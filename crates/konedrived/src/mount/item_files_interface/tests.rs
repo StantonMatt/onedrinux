@@ -387,3 +387,158 @@ fn a_download_asked_by_path_while_onedrive_asks_to_wait_is_refused_with_the_time
     fixture.runtime().block_on(files.download(&fixture.disk_path("report.txt"))).expect("the file is downloaded");
     assert_eq!(fixture.read_disk_file("report.txt").as_deref(), Some(&b"the report"[..]));
 }
+
+fn attribute(files: &ItemFilesInterface, item: &Item, identity: &str) {
+    let content = item.local.as_ref().unwrap().content.clone().unwrap();
+    let ticket = files.downloader.app_downloads.begin(identity, item.local_item_id, content).unwrap();
+    ticket.landed();
+}
+
+#[test]
+fn app_reclamation_frees_only_its_copies_and_counts_actual_blocks_once() {
+    use std::os::unix::fs::MetadataExt;
+    let fixture = ItemFixture::new();
+    let (mine, other, explicit) = (
+        make_clean_copy(&fixture, "mine.txt", &[3; 5000]),
+        make_clean_copy(&fixture, "other.txt", b"other"),
+        make_clean_copy(&fixture, "explicit.txt", b"explicit"),
+    );
+    let files = make_files_interface(&fixture);
+    attribute(&files, &mine, "app:reader");
+    attribute(&files, &other, "app:other");
+    let states = super::super::directory_states::DirectoryStates::build(
+        &fixture.store, fixture.download_states.clone(), fixture.running_steps.clone(), fixture.published_plan.clone(), fixture.inotify_bridge.clone(),
+    ).unwrap();
+    assert_eq!(states.directory_values(konedrive_tree::LocalItemId::ROOT).0, konedrive_fs::placeholder::State::Hydrated);
+    let run = fixture.runtime();
+    assert_eq!(run.block_on(files.free_app_downloads("app:unknown")).unwrap(), FreedSpace::default());
+    let expected_bytes = fs::metadata(fixture.disk_path("mine.txt")).unwrap().blocks() * 512;
+    let freed = run.block_on(files.free_app_downloads("app:reader")).unwrap();
+    assert_eq!(freed.files, 1);
+    assert_eq!(freed.bytes, expected_bytes);
+    assert_eq!(presence_at(&fixture, "mine.txt"), ContentPresence::NotOnDisk);
+    assert_eq!(states.directory_values(konedrive_tree::LocalItemId::ROOT).0, konedrive_fs::placeholder::State::OnlineOnly);
+    assert_eq!(presence_at(&fixture, "other.txt"), ContentPresence::OnDisk);
+    assert_eq!(presence_at(&fixture, "explicit.txt"), ContentPresence::OnDisk);
+    assert_eq!(run.block_on(files.free_app_downloads("app:reader")).unwrap(), FreedSpace::default());
+    fixture.assert_rows_and_disk_agree();
+    assert_eq!(fixture.read_rows(|reader| reader.list_unsent(None, 10)), Vec::new());
+    assert!(fixture.read_disk_file("mine.txt").is_none());
+    assert!(fixture.read_disk_file("explicit.txt").is_some());
+    let _ = explicit;
+}
+
+#[test]
+fn app_reclamation_skips_pins_changes_writers_readers_downloads_and_uploads() {
+    use crate::mount::item_handles::OpenItemFile;
+    use crate::sync_parts::running_steps::{RunningStep, StepClass};
+    let fixture = ItemFixture::new();
+    let directory = fixture.show_onedrive_directory("kept");
+    let names = ["pin.txt", "kept/inherited.txt", "changed.txt", "writer.txt", "reader.txt", "remote-reader.txt", "downloading.txt", "sending.txt"];
+    let rows: Vec<_> = names.iter().map(|name| make_clean_copy(&fixture, name, name.as_bytes())).collect();
+    let files = make_files_interface(&fixture);
+    for row in &rows { attribute(&files, row, "app:reader"); }
+    // Direct row pins exercise both inherited and own pin checks at the final free-up,
+    // independently of explicit UI pin invalidation.
+    let (own_pin, parent_pin) = (rows[0].local_item_id, directory.local_item_id);
+    fixture.write_rows(move |store| {
+        store.item_store().set_item_pin(own_pin, true)?;
+        store.item_store().set_item_pin(parent_pin, true)
+    });
+    fixture.change_file_here(rows[2].local_item_id, b"unsent local edit");
+    let file = |name| Arc::new(fs::File::open(fixture.disk_path(name)).unwrap());
+    let (writer, _) = fixture.item_handles.add_writer(rows[3].local_item_id, file(names[3]));
+    let reader = fixture.item_handles.add_file(OpenItemFile::ReadingBackingFile { item: rows[4].local_item_id, backing_file: file(names[4]) });
+    let remote_reader = fixture.item_handles.add_file(OpenItemFile::ReadingNotOnDisk { item: rows[5].local_item_id, content: rows[5].local.as_ref().unwrap().content.clone().unwrap() });
+    let key = crate::mount::item_download_states::DownloadKey { item: rows[6].local_item_id, content: ItemFixture::onedrive_content_of(b"new version") };
+    let _download = fixture.download_states.start_or_join(&key, &DownloadAsker::Read, None);
+    assert!(fixture.running_steps.begin(RunningStep { class: StepClass::Content, item: rows[7].local_item_id, other_items: Vec::new(), destination: None, sent: 0, total: 5 }));
+    let run = fixture.runtime();
+    let freed = run.block_on(files.free_app_downloads("app:reader")).unwrap();
+    assert_eq!((freed.files, freed.bytes, freed.kept), (0, 0, 8));
+    for name in names { assert_eq!(presence_at(&fixture, name), ContentPresence::OnDisk, "{name}"); }
+    fixture.item_handles.remove_writer(writer);
+    fixture.item_handles.close_reader(reader);
+    fixture.item_handles.close_reader(remote_reader);
+    let freed = run.block_on(files.free_app_downloads("app:reader")).unwrap();
+    assert_eq!(freed.files, 3, "temporary open handles can be retried after close");
+    assert_eq!(fixture.read_disk_file("changed.txt").as_deref(), Some(b"unsent local edit".as_slice()));
+}
+
+#[test]
+fn explicit_hydrate_and_pin_invalidate_files_and_directories_even_after_unpin() {
+    let fixture = ItemFixture::new();
+    fixture.show_onedrive_directory("docs");
+    fixture.show_onedrive_directory("pins");
+    let paths = ["hydrate.txt", "docs/a.txt", "docs/b.txt", "pin.txt", "pins/a.txt"];
+    let rows: Vec<_> = paths.iter().map(|name| make_clean_copy(&fixture, name, name.as_bytes())).collect();
+    let files = make_files_interface(&fixture);
+    for row in &rows { attribute(&files, row, "app:reader"); }
+    let run = fixture.runtime();
+    run.block_on(files.download(&fixture.disk_path("hydrate.txt"))).unwrap();
+    run.block_on(files.download(&fixture.disk_path("docs"))).unwrap();
+    for path in ["pin.txt", "pins"] {
+        run.block_on(files.set_pin(&fixture.disk_path(path), true)).unwrap();
+        run.block_on(files.set_pin(&fixture.disk_path(path), false)).unwrap();
+    }
+    assert_eq!(run.block_on(files.free_app_downloads("app:reader")).unwrap(), FreedSpace::default());
+    for path in paths { assert_eq!(presence_at(&fixture, path), ContentPresence::OnDisk); }
+}
+
+#[test]
+fn an_app_snapshot_cannot_free_a_different_content_or_an_explicitly_freed_copy() {
+    let fixture = ItemFixture::new();
+    let old = make_clean_copy(&fixture, "version.txt", b"first");
+    let freed = make_clean_copy(&fixture, "freed.txt", b"first");
+    let files = make_files_interface(&fixture);
+    attribute(&files, &freed, "app:reader");
+    let run = fixture.runtime();
+    run.block_on(files.free_up(&fixture.disk_path("freed.txt"))).unwrap();
+    fixture.land_copy(freed.local_item_id, b"first");
+    // A changed local copy and a former version are both ineligible. The final expected
+    // content check is independently exercised with a clean copy of a different version.
+    let content = ItemFixture::onedrive_content_of(b"a different version");
+    let wrong = files.downloader.app_downloads.begin("app:wrong-version", old.local_item_id, content).unwrap();
+    wrong.landed();
+    assert_eq!(run.block_on(files.free_app_downloads("app:wrong-version")).unwrap().files, 0);
+    assert_eq!(presence_at(&fixture, "version.txt"), ContentPresence::OnDisk);
+    assert_eq!(run.block_on(files.free_app_downloads("app:reader")).unwrap().files, 0);
+    assert_eq!(presence_at(&fixture, "freed.txt"), ContentPresence::OnDisk, "an explicit free consumed the old attribution");
+}
+
+#[test]
+fn explicit_hydrate_rereads_after_an_app_free_up_queued_ahead_of_it() {
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+    let fixture = ItemFixture::new();
+    let row = make_clean_copy(&fixture, "keep.txt", b"keep this copy");
+    let files = Arc::new(make_files_interface(&fixture));
+    attribute(&files, &row, "app:reader");
+    let (started, start) = mpsc::channel();
+    let (release, blocked) = mpsc::channel();
+    fixture.write_operation_thread.run(move || {
+        started.send(()).unwrap();
+        blocked.recv_timeout(Duration::from_secs(10)).unwrap();
+    });
+    start.recv_timeout(Duration::from_secs(10)).unwrap();
+    let wait_queued = |count| {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while fixture.write_operation_thread.count_queued_jobs() < count {
+            assert!(Instant::now() < deadline, "the operation queued its write job");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    };
+    let run = fixture.runtime();
+    let freeing = run.spawn({ let files = Arc::clone(&files); async move { files.free_app_downloads("app:reader").await } });
+    wait_queued(1);
+    let keeping = run.spawn({
+        let (files, path) = (Arc::clone(&files), fixture.disk_path("keep.txt"));
+        async move { files.download(&path).await }
+    });
+    wait_queued(2);
+    release.send(()).unwrap();
+    assert_eq!(run.block_on(freeing).unwrap().unwrap().files, 1);
+    run.block_on(keeping).unwrap().unwrap();
+    assert_eq!(presence_at(&fixture, "keep.txt"), ContentPresence::OnDisk, "hydrate cannot use its stale pre-free snapshot");
+    assert_eq!(run.block_on(files.free_app_downloads("app:reader")).unwrap(), FreedSpace::default());
+}

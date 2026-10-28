@@ -2,7 +2,7 @@
 
 // A stand-in for konedrived on the tests' private session bus, shaped as the
 // daemon serves it: the manager at /org/konedrive/Accounts with Accounts
-// (dbus/org.konedrive.Accounts.xml), and each account at
+// (dbus/org.konedrive.Accounts.xml), Files and DownloadGuard, and each account at
 // /org/konedrive/Accounts/<id> with Account and its folder's Folder, Transfers,
 // UploadQueue, Conflicts, LocalScan and ActivityLog. Each interface is an
 // adaptor, since one D-Bus path holds one object. What the controllers ask is
@@ -15,7 +15,9 @@
 #include "synctypes.h"
 
 #include <QDBusAbstractAdaptor>
+#include <QDBusArgument>
 #include <QDBusConnection>
+#include <QDBusMetaType>
 #include <QDBusMessage>
 #include <QDBusObjectPath>
 #include <QHash>
@@ -953,6 +955,241 @@ public Q_SLOTS:
     }
 };
 
+/// A row of DownloadGuard.ListApps: identity, display name, policy, blocked, reason, files,
+/// bytes.
+struct FakeGuardApp {
+    FakeGuardApp(const QString &identity = QString(),
+                 const QString &name = QString(),
+                 const QString &policy = QStringLiteral("automatic"),
+                 bool blocked = false,
+                 const QString &reason = QString(),
+                 qulonglong files = 0,
+                 qulonglong bytes = 0)
+        : identity(identity)
+        , name(name)
+        , policy(policy)
+        , blocked(blocked)
+        , reason(reason)
+        , files(files)
+        , bytes(bytes)
+    {
+    }
+
+    QString identity;
+    QString name;
+    QString policy;
+    bool blocked;
+    QString reason;
+    qulonglong files;
+    qulonglong bytes;
+};
+Q_DECLARE_METATYPE(FakeGuardApp)
+
+inline QDBusArgument &operator<<(QDBusArgument &argument, const FakeGuardApp &app)
+{
+    argument.beginStructure();
+    argument << app.identity << app.name << app.policy << app.blocked << app.reason << app.files << app.bytes;
+    argument.endStructure();
+    return argument;
+}
+
+inline const QDBusArgument &operator>>(const QDBusArgument &argument, FakeGuardApp &app)
+{
+    argument.beginStructure();
+    argument >> app.identity >> app.name >> app.policy >> app.blocked >> app.reason >> app.files >> app.bytes;
+    argument.endStructure();
+    return argument;
+}
+
+/// DownloadGuard on the manager object (dbus/org.konedrive.DownloadGuard.xml): its properties,
+/// the apps it lists, and its methods, logged in `calls`, which change the rows as the
+/// daemon's do and send AppsChanged. A test sets `apps` and sends the signals itself.
+class FakeDownloadGuard : public QDBusAbstractAdaptor
+{
+    Q_OBJECT
+    Q_CLASSINFO("D-Bus Interface", "org.konedrive.DownloadGuard")
+    Q_PROPERTY(bool Enabled READ enabled)
+    Q_PROPERTY(uint MaxFiles READ maxFiles)
+    Q_PROPERTY(qulonglong MaxBytes READ maxBytes)
+    Q_PROPERTY(uint WindowSeconds READ windowSeconds)
+
+public:
+    static inline const QString Interface = QStringLiteral("org.konedrive.DownloadGuard");
+
+    explicit FakeDownloadGuard(QObject *daemon)
+        : QDBusAbstractAdaptor(daemon)
+    {
+        qDBusRegisterMetaType<FakeGuardApp>();
+        qDBusRegisterMetaType<QList<FakeGuardApp>>();
+    }
+
+    bool enabled() const { return m_properties.value(QStringLiteral("Enabled")).toBool(); }
+    uint maxFiles() const { return m_properties.value(QStringLiteral("MaxFiles")).toUInt(); }
+    qulonglong maxBytes() const { return m_properties.value(QStringLiteral("MaxBytes")).toULongLong(); }
+    uint windowSeconds() const { return m_properties.value(QStringLiteral("WindowSeconds")).toUInt(); }
+
+    void set(const QVariantMap &changes)
+    {
+        for (auto it = changes.cbegin(); it != changes.cend(); ++it) {
+            m_properties.insert(it.key(), it.value());
+        }
+        fake::propertiesChanged(fake::bus(), fake::ManagerPath, Interface, changes);
+    }
+
+    /// DownloadsBlocked as the daemon sends it; the row is the test's to set.
+    void sendBlocked(const QString &identity, const QString &name, qulonglong files, qulonglong bytes, const QString &reason)
+    {
+        auto signal = QDBusMessage::createSignal(fake::ManagerPath, Interface, QStringLiteral("DownloadsBlocked"));
+        signal << identity << name << QVariant::fromValue(files) << QVariant::fromValue(bytes) << reason;
+        fake::bus().send(signal);
+    }
+
+    void sendAppsChanged() { fake::bus().send(QDBusMessage::createSignal(fake::ManagerPath, Interface, QStringLiteral("AppsChanged"))); }
+
+    /// A row blocked as the daemon blocks it, and its DownloadsBlocked.
+    void block(const QString &identity, const QString &name, qulonglong files, qulonglong bytes, const QString &reason = QStringLiteral("bulk"))
+    {
+        FakeGuardApp *row = find(identity);
+        if (!row) {
+            apps << FakeGuardApp{identity, name};
+            row = &apps.last();
+        }
+        row->blocked = true;
+        row->reason = reason;
+        row->files = files;
+        row->bytes = bytes;
+        sendBlocked(identity, name, files, bytes, reason);
+    }
+
+    FakeGuardApp *find(const QString &identity)
+    {
+        for (FakeGuardApp &app : apps) {
+            if (app.identity == identity) {
+                return &app;
+            }
+        }
+        return nullptr;
+    }
+
+    QList<FakeGuardApp> apps;
+    QStringList calls;
+    /// Every method but ListApps is refused Failed with these words, when not empty, as when
+    /// config.toml cannot be written.
+    QString refuse;
+    /// What FreeUpAppDownloads answers.
+    qulonglong freedFiles = 0;
+    qulonglong freedBytes = 0;
+
+public Q_SLOTS:
+    QList<FakeGuardApp> ListApps()
+    {
+        calls << QStringLiteral("ListApps");
+        return apps;
+    }
+    void AllowApp(const QString &identity, bool always, const QDBusMessage &message)
+    {
+        calls << QStringLiteral("AllowApp:%1:%2").arg(identity, always ? QStringLiteral("always") : QStringLiteral("session"));
+        if (refused(message)) {
+            return;
+        }
+        FakeGuardApp *row = rowFor(identity);
+        row->policy = always ? QStringLiteral("allowed-always") : QStringLiteral("allowed-session");
+        row->blocked = false;
+        row->reason.clear();
+        sendAppsChanged();
+    }
+    void BlockApp(const QString &identity, const QDBusMessage &message)
+    {
+        calls << QStringLiteral("BlockApp:") + identity;
+        if (refused(message)) {
+            return;
+        }
+        FakeGuardApp *row = rowFor(identity);
+        row->policy = QStringLiteral("blocked-always");
+        row->blocked = true;
+        if (row->reason.isEmpty()) {
+            row->reason = QStringLiteral("user");
+        }
+        sendAppsChanged();
+    }
+    void ResetApp(const QString &identity, const QDBusMessage &message)
+    {
+        calls << QStringLiteral("ResetApp:") + identity;
+        if (refused(message)) {
+            return;
+        }
+        apps.removeIf([&identity](const FakeGuardApp &app) {
+            return app.identity == identity;
+        });
+        sendAppsChanged();
+    }
+    qulonglong FreeUpAppDownloads(const QString &identity, const QDBusMessage &message, qulonglong &bytes)
+    {
+        calls << QStringLiteral("FreeUpAppDownloads:") + identity;
+        if (refused(message)) {
+            return 0;
+        }
+        bytes = freedBytes;
+        if (freedFiles > 0) {
+            sendAppsChanged();
+        }
+        return freedFiles;
+    }
+    void SetEnabled(bool on, const QDBusMessage &message)
+    {
+        calls << QStringLiteral("SetEnabled:") + (on ? QStringLiteral("on") : QStringLiteral("off"));
+        if (refused(message)) {
+            return;
+        }
+        set({{QStringLiteral("Enabled"), on}});
+    }
+    /// Refused InvalidArgs for a zero, as the daemon does.
+    void SetThresholds(uint files, qulonglong bytes, uint seconds, const QDBusMessage &message)
+    {
+        calls << QStringLiteral("SetThresholds:%1:%2:%3").arg(files).arg(bytes).arg(seconds);
+        if (files == 0 || bytes == 0 || seconds == 0) {
+            message.setDelayedReply(true);
+            fake::bus().send(message.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"), QStringLiteral("thresholds must be positive")));
+            return;
+        }
+        if (refused(message)) {
+            return;
+        }
+        set({{QStringLiteral("MaxFiles"), files}, {QStringLiteral("MaxBytes"), QVariant::fromValue(bytes)}, {QStringLiteral("WindowSeconds"), seconds}});
+    }
+
+Q_SIGNALS:
+    void DownloadsBlocked(const QString &identity, const QString &displayName, qulonglong files, qulonglong bytes, const QString &reason);
+    void AppsChanged();
+
+private:
+    bool refused(const QDBusMessage &message)
+    {
+        if (refuse.isEmpty()) {
+            return false;
+        }
+        message.setDelayedReply(true);
+        fake::bus().send(message.createErrorReply(QStringLiteral("org.konedrive.Error.Failed"), refuse));
+        return true;
+    }
+
+    FakeGuardApp *rowFor(const QString &identity)
+    {
+        if (FakeGuardApp *row = find(identity)) {
+            return row;
+        }
+        apps << FakeGuardApp{identity, identity};
+        return &apps.last();
+    }
+
+    QVariantMap m_properties{
+        {QStringLiteral("Enabled"), true},
+        {QStringLiteral("MaxFiles"), 30u},
+        {QStringLiteral("MaxBytes"), QVariant::fromValue<qulonglong>(2ULL << 30)},
+        {QStringLiteral("WindowSeconds"), 600u},
+    };
+};
+
 /// The daemon: the manager object and its accounts. `account` and `sync` are
 /// the first account's, for tests about one account.
 class FakeDaemon : public QObject
@@ -964,6 +1201,7 @@ public:
     explicit FakeDaemon(const QStringList &labels = {QStringLiteral("Personal")})
         : manager(new FakeAccounts(this))
         , files(new FakeFiles(this))
+        , guard(new FakeDownloadGuard(this))
     {
         // Before anything is sent: Transfers is an a(stt).
         registerKonedriveSyncTypes();
@@ -1090,6 +1328,7 @@ public:
 
     FakeAccounts *manager;
     FakeFiles *files;
+    FakeDownloadGuard *guard;
     QList<FakeAccountObject *> objects;
     /// The number of the SignIn that has not ended; 0 when none is under way.
     uint signIn = 0;

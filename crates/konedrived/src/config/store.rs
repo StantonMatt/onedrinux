@@ -29,6 +29,8 @@ pub enum ConfigError {
     InvalidLabel(String),
     #[error("invalid client ID: expected a GUID like 00000000-0000-0000-0000-000000000000")]
     InvalidClientId,
+    #[error("{0}")]
+    InvalidGuard(String),
     /// [`ConfigStore::record_drive`] of a drive another account has; its label.
     #[error("this Microsoft account is already connected as '{0}'")]
     DriveTaken(String),
@@ -70,6 +72,7 @@ impl From<ConfigError> for String {
 /// The calls do blocking file I/O on a small file, as the single-account code did.
 pub struct ConfigStore {
     file: PathBuf,
+    pub(crate) download_guard: std::sync::Arc<crate::download_guard::DownloadGuard>,
     inner: Mutex<Inner>,
 }
 
@@ -148,7 +151,8 @@ impl ConfigStore {
             }
         }
         let troubles = poisoned.iter().map(|detail| ConfigTrouble::Unreadable { detail: detail.clone() }).collect();
-        Self { file, inner: Mutex::new(Inner { config, poisoned, troubles }) }
+        let download_guard = std::sync::Arc::new(crate::download_guard::DownloadGuard::new(config.download_guard.unwrap_or(true), config.download_guard_limits.clone().unwrap_or_default()));
+        Self { file, download_guard, inner: Mutex::new(Inner { config, poisoned, troubles }) }
     }
 
     pub fn file(&self) -> &Path {
@@ -220,6 +224,7 @@ impl ConfigStore {
         if config != before {
             write_config(&self.file, &config)?;
         }
+        self.download_guard.configure(config.download_guard.unwrap_or(true), config.download_guard_limits.clone().unwrap_or_default());
         inner.config = config;
         Ok(result)
     }

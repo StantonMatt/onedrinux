@@ -20,11 +20,11 @@ using namespace testsupport;
 
 namespace
 {
-const QStringList Cloud{QStringLiteral("cloudstatus")};
-const QStringList Syncing{QStringLiteral("state-sync")};
-const QStringList CheckOutline{QStringLiteral("dialog-ok")};
-const QStringList CheckFilled{QStringLiteral("emblem-checked")};
-const QStringList Error{QStringLiteral("state-error")};
+const QStringList Cloud{QStringLiteral("konedrive-online-only")};
+const QStringList Syncing{QStringLiteral("konedrive-syncing")};
+const QStringList CheckOutline{QStringLiteral("konedrive-downloaded")};
+const QStringList CheckFilled{QStringLiteral("konedrive-always-keep")};
+const QStringList Error{QStringLiteral("konedrive-error")};
 
 /// inotify watches this process holds, as the kernel counts them
 /// (/proc/self/fdinfo lists one "inotify wd:" line per watch).
@@ -114,6 +114,42 @@ private Q_SLOTS:
             QCOMPARE(engine.overlays(url(tree.path(QStringLiteral("top/a/b/%1.bin").arg(i)))), expected);
         }
         QCOMPARE(reads, afterFirst);
+    }
+
+    void rootFolderHasItsOwnLiveEmblem()
+    {
+        Tree tree;
+        QVERIFY(tree.root(QStringLiteral("OneDrive")));
+        const QString root = tree.path(QStringLiteral("OneDrive"));
+        const QUrl rootUrl = url(root);
+        QVERIFY(setState(root, "online-only"));
+        QStringList markReads;
+        OverlayEngine engine(nullptr, OverlayEngine::DefaultDirectoryLimit, [&markReads](const QString &path) {
+            markReads.append(path);
+            return hasRootMark(path);
+        });
+        QCOMPARE(engine.overlays(rootUrl), Cloud);
+        QCOMPARE(engine.watchCount(), 1);
+        for (const QString &path : std::as_const(markReads)) {
+            QCOMPARE(path, root); // No root lookup or watch of the parent home directory.
+        }
+
+        QSignalSpy changed(&engine, &OverlayEngine::overlaysChanged);
+        QVERIFY(setState(root, "hydrating"));
+        QTRY_COMPARE(changedOverlaysFor(changed, rootUrl), Syncing);
+        changed.clear();
+        QVERIFY(setUploadState(root, "blocked"));
+        QTRY_COMPARE(changedOverlaysFor(changed, rootUrl), Error);
+        changed.clear();
+        QVERIFY(removeAttribute(root, SyncAttribute));
+        QVERIFY(setState(root, "hydrated"));
+        QTRY_COMPARE(changedOverlaysFor(changed, rootUrl), CheckOutline);
+        changed.clear();
+        QVERIFY(testsupport::pin(root));
+        QTRY_COMPARE(changedOverlaysFor(changed, rootUrl), CheckFilled);
+        changed.clear();
+        QVERIFY(removeAttribute(root, RootAttribute));
+        QTRY_COMPARE(changedOverlaysFor(changed, rootUrl), QStringList());
     }
 
     /// However many folders Dolphin shows, the watches held stay at the
@@ -268,9 +304,9 @@ private Q_SLOTS:
         QCOMPARE(physicalDirectory(path), expected);
     }
 
-    /// The names handed to Dolphin -- the four emblems and the two menu
-    /// icons -- are real icons of the installed Breeze and Breeze Dark
-    /// themes, not guesses.
+    /// The names handed to Dolphin -- the five emblems and the two menu
+    /// icons -- are real icons under Breeze and Breeze Dark once the emblems
+    /// are installed (in hicolor, which both fall back on), not guesses.
     void iconNamesExistInBreeze_data()
     {
         QTest::addColumn<QString>("theme");
@@ -283,11 +319,13 @@ private Q_SLOTS:
         QFETCH(QString, theme);
         QStringList names = overlayNames(Emblem::Cloud) + overlayNames(Emblem::Syncing) + overlayNames(Emblem::CheckOutline) + overlayNames(Emblem::CheckFilled)
             + overlayNames(Emblem::Error);
-        names << QString::fromLatin1(AlwaysKeepIcon) << QString::fromLatin1(FreeUpSpaceIcon);
+        names << QString::fromLatin1(FreeUpSpaceIcon) << QString::fromLatin1(OpenOnlineIcon);
         QCOMPARE(names.size(), 7);
-        // The installed themes (XDG_DATA_DIRS/icons), not the copy of Breeze
-        // some KDE libraries compile in under :/icons.
-        QIcon::setThemeSearchPaths(QStandardPaths::locateAll(QStandardPaths::GenericDataLocation, QStringLiteral("icons"), QStandardPaths::LocateDirectory));
+        // The emblems as installed, then the installed themes
+        // (XDG_DATA_DIRS/icons), not the copy of Breeze some KDE libraries
+        // compile in under :/icons.
+        QIcon::setThemeSearchPaths(QStringList{QStringLiteral(KONEDRIVE_INSTALLED_ICONS)}
+                                   + QStandardPaths::locateAll(QStandardPaths::GenericDataLocation, QStringLiteral("icons"), QStandardPaths::LocateDirectory));
         QIcon::setThemeName(theme);
         QIcon::setFallbackThemeName(QString());
         for (const QString &name : std::as_const(names)) {
@@ -332,6 +370,69 @@ private Q_SLOTS:
         QVERIFY(testsupport::pin(sub));
         QTRY_COMPARE(changedOverlaysFor(changed, url(b)), CheckFilled);
         QCOMPARE(engine.overlays(url(excepted)), CheckOutline);
+    }
+
+    /// A folder's state, summed up by the mount from everything below it, is
+    /// followed live through the watch of the folder above it; a change of it
+    /// leaves the files below as they were, unread.
+    void folderStateIsFollowedLiveWithoutRereadingBelow()
+    {
+        Tree tree;
+        QVERIFY(tree.root(QStringLiteral("OneDrive")));
+        QVERIFY(tree.file(QStringLiteral("OneDrive/folder/doc.bin"), "online-only"));
+        const QString folder = tree.path(QStringLiteral("OneDrive/folder"));
+        const QString doc = tree.path(QStringLiteral("OneDrive/folder/doc.bin"));
+        QVERIFY(setState(folder, "online-only"));
+        int docReads = 0;
+        // What the mount answers: a pin on the folder holds for the file in it.
+        auto answered = [&docReads, folder, doc](const QString &path) {
+            if (path == doc) {
+                ++docReads;
+            }
+            return hasPinMark(path) || (path == doc && hasPinMark(folder));
+        };
+        OverlayEngine engine(nullptr, OverlayEngine::DefaultDirectoryLimit, hasRootMark, answered);
+        QCOMPARE(engine.overlays(url(folder)), Cloud);
+        QCOMPARE(engine.overlays(url(doc)), Cloud);
+        QCOMPARE(docReads, 1);
+
+        QSignalSpy changed(&engine, &OverlayEngine::overlaysChanged);
+        QVERIFY(setState(folder, "hydrating"));
+        QTRY_COMPARE(changedOverlaysFor(changed, url(folder)), Syncing);
+        changed.clear();
+        QVERIFY(setUploadState(folder, "blocked"));
+        QTRY_COMPARE(changedOverlaysFor(changed, url(folder)), Error);
+        QCOMPARE(docReads, 1);
+
+        // Its pin, though, holds for what is below it.
+        QVERIFY(removeAttribute(folder, "user.konedrive.sync"));
+        QVERIFY(setState(folder, "hydrated"));
+        changed.clear();
+        QVERIFY(testsupport::pin(folder));
+        QTRY_COMPARE(changedOverlaysFor(changed, url(doc)), Syncing);
+        QCOMPARE(changedOverlaysFor(changed, url(folder)), CheckFilled);
+    }
+
+    /// A folder shown through a symbolic link to it is pinned: the pin is
+    /// read where the link leads, so the files below it follow.
+    void pinOnAFolderShownThroughALinkIsFollowed()
+    {
+        Tree tree;
+        QVERIFY(tree.root(QStringLiteral("OneDrive")));
+        QVERIFY(tree.file(QStringLiteral("OneDrive/sub/b.bin"), "hydrated"));
+        QVERIFY(tree.symlink(QStringLiteral("OneDrive/sub"), QStringLiteral("OneDrive/shortcut")));
+        const QString sub = tree.path(QStringLiteral("OneDrive/sub"));
+        const QString linked = tree.path(QStringLiteral("OneDrive/shortcut/b.bin"));
+        // What the mount answers: a pin on the folder holds for the file in it, by any path.
+        auto answered = [](const QString &path) {
+            return hasPinMark(path) || hasPinMark(physicalDirectory(parentDirectory(path)));
+        };
+        OverlayEngine engine(nullptr, OverlayEngine::DefaultDirectoryLimit, hasRootMark, answered);
+        QCOMPARE(engine.overlays(url(linked)), CheckOutline);
+
+        QSignalSpy changed(&engine, &OverlayEngine::overlaysChanged);
+        QVERIFY(testsupport::pin(sub));
+        QTRY_COMPARE(changedOverlaysFor(changed, url(linked)), CheckFilled);
     }
 
     /// The upload state the daemon writes, and its removal at the commit,

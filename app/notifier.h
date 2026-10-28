@@ -5,20 +5,31 @@
 #include <QHash>
 #include <QList>
 #include <QObject>
+#include <QPointer>
+#include <QSet>
 #include <QString>
 #include <QUrl>
 
 #include <functional>
 
 class AccountController;
+class DownloadGuardController;
+class KNotification;
 class SyncController;
 class QTimer;
+struct GuardApp;
+
+/// A button of a notification, and what it does.
+struct NoticeAction {
+    QString text;
+    std::function<void()> run;
+};
 
 /// One desktop notification, as the Notifier decides it.
 struct Notice {
     /// The event in konedrive.notifyrc: signedOut, diskFull, downloadFailed,
     /// updateFailed, uploadFailed, conflict, notRemovedHere, nameTaken, throttled,
-    /// newerRelease.
+    /// newerRelease, downloadsBlocked.
     QString event;
     /// Where a click on the notification opens the window.
     WindowSection section = WindowSection::Status;
@@ -34,6 +45,13 @@ struct Notice {
     /// When set, a click on the notification opens this page in the browser instead of the
     /// window, and the notification offers "Open Release Page" for it.
     QUrl link = QUrl();
+    /// When set, the notice takes the place of the one sent with the same key, if that is
+    /// still shown, and withdraw() takes it back.
+    QString key = QString();
+    /// The notification's buttons, in order.
+    QList<NoticeAction> actions = {};
+    /// The notification's icon, when it is not KOneDrive's.
+    QString iconName = QString();
 };
 
 /// Where notices go. The app sends them through KNotification
@@ -43,6 +61,8 @@ class NotificationSink
 public:
     virtual ~NotificationSink() = default;
     virtual void send(const Notice &notice) = 0;
+    /// Takes back the notification sent with `key`, if it is still shown.
+    virtual void withdraw(const QString &key) { Q_UNUSED(key) }
 };
 
 /// Sends each notice as a KNotification of component "konedrive", so each
@@ -58,9 +78,12 @@ public:
     /// accounts, whose Notifiers point at it).
     void setOpenWindow(OpenWindow openWindow) { m_openWindow = std::move(openWindow); }
     void send(const Notice &notice) override;
+    void withdraw(const QString &key) override;
 
 private:
     OpenWindow m_openWindow;
+    /// The notifications sent with a key; each goes once it is closed.
+    QHash<QString, QPointer<KNotification>> m_keyed;
 };
 
 /// Turns what one account's daemon objects report into notifications:
@@ -142,4 +165,36 @@ private:
     /// RetryAfterRefusal as last seen: the daemon names one file for a wait, and takes
     /// the name off when the wait is over. The daemon's first answer only sets it.
     QString m_waitRefusal;
+};
+
+/// The download guard's notifications, for the whole app: the guard counts each app across
+/// every account, so they name none. An app blocked for downloading too much (DownloadsBlocked,
+/// reason bulk) gets one, with Allow for This Session, Always Allow, Always Block and Free Up
+/// What It Downloaded; a program that could not be identified (unidentified) gets one with
+/// nothing to press, since it can't be allowed. A reader the guard always refuses (background)
+/// and an app the user always blocks (user) notify nothing. One notification for each block,
+/// never one per refused read, and never summed up with others: each has its own buttons. An
+/// app has one at a time: a new one takes the place of the one shown, and one whose app is no
+/// longer blocked (allowed in the window, removed, the daemon gone) is withdrawn. A click opens
+/// the window on Settings' list of apps.
+class GuardNotifier : public QObject
+{
+    Q_OBJECT
+
+public:
+    GuardNotifier(DownloadGuardController *guard, NotificationSink *sink, QObject *parent = nullptr);
+
+private:
+    void onBlocked(const GuardApp &app);
+    /// Withdraws what is shown for an app the list no longer has blocked.
+    void reconcile();
+    void post(const QString &identity, Notice notice);
+    /// The daemon refused what a button asked.
+    void refused(const QString &identity, const QString &name, const QString &error);
+    void freeUp(const QString &identity, const QString &name, const QString &iconName);
+
+    QPointer<DownloadGuardController> m_guard;
+    NotificationSink *m_sink;
+    /// The apps that have a notification of theirs out.
+    QSet<QString> m_shown;
 };

@@ -2,12 +2,21 @@
 // directories lie inside a sync root, and live updates when a file's state
 // changes.
 //
-// Live updates come from inotify. A change to a child's extended attribute is
-// reported as IN_ATTRIB on a watch of its directory, and a change to the
-// directory's own attributes (its root mark, or its pin) as IN_ATTRIB with no
+// Live updates come from inotify. A change to a child's extended attribute --
+// a file's or a folder's -- is reported as IN_ATTRIB on a watch of its
+// directory, and a change to the directory's own attributes (its root mark,
+// its pin, or the state the mount sums up from below it) as IN_ATTRIB with no
 // name; so one watch per directory Dolphin has asked about keeps both the
 // emblems and the cached root answer current. inotify reports without
 // opening anything.
+//
+// Only a change of a directory's root mark or pin reaches what lies below it.
+// Its summed-up state changes whenever anything below it moves -- the sync
+// root's with every download -- and each item below that moved is reported
+// on its own; so the root mark and pin are kept as last read, and a change
+// that leaves both as they were rechecks nothing below. (A pin set and
+// removed between two reads of the events looks like no change: an emblem
+// Dolphin asked for in between, under the pin, stays until it asks again.)
 //
 // A pin is read fresh on every call to overlays() -- it is never cached the
 // way the root answer is -- so it is always correct even for an ancestor
@@ -68,6 +77,11 @@ private:
         int watch = -1;
         /// The sync root this directory lies in, if any.
         std::optional<QString> root;
+        /// Its own root mark and pin, as last read.
+        bool marked = false;
+        bool pinned = false;
+        /// Its own emblem, when Dolphin asked about the root folder itself.
+        std::optional<Emblem> ownEmblem;
         /// The files in it Dolphin has asked about, with the emblem it was
         /// given; only kept for a directory inside a root.
         QHash<QString, Emblem> files;
@@ -84,7 +98,9 @@ private:
     void makeRoom();
     void forget(QString dir);
     void forgetTree(QString dir);
+    bool readMarksAgain(Directory &directory, const QString &dir);
     void resolveAgain(const QStringList &dirs, Changes &changes);
+    void recheckSelf(const QString &dir, Changes &changes);
     void recheck(const QString &dir, const QString &name, Changes &changes);
     void readEvents();
 

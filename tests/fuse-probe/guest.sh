@@ -10,13 +10,14 @@
 set -u
 bin=$1
 shift
-tests=${*:-service mounted_folder file_writes file_reads daemon_restarts cli}
+tests=${*:-service mounted_folder file_writes file_reads download_guard daemon_restarts cli}
 here=$(cd "$(dirname "$0")" && pwd)
 . "$here/scenario_checks.sh"
 . "$here/scenario_folder.sh"
 . "$here/mounted_folder.sh"
 . "$here/file_writes.sh"
 . "$here/file_reads.sh"
+. "$here/download_guard.sh"
 . "$here/daemon_restarts.sh"
 . "$here/kio_trash.sh"
 

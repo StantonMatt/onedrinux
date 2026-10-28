@@ -1,4 +1,4 @@
-// "Always keep on this device", "Free up space" and "Open in OneDrive" in
+// "Always keep on this device", "Free up space" and "View online" in
 // Dolphin's context menu, as a section of their own under the heading
 // "OneDrive".
 //
@@ -87,7 +87,7 @@ public:
         menu->heading->setObjectName(QStringLiteral("konedrive_section"));
         menu->heading->setProperty(konedrive::WaitingProperty, true);
 
-        menu->alwaysKeep = new QAction(QIcon::fromTheme(QString::fromLatin1(konedrive::AlwaysKeepIcon)), i18nc("@action:inmenu", "Always Keep on This Device"), parentWidget);
+        menu->alwaysKeep = new QAction(i18nc("@action:inmenu", "Always Keep on This Device"), parentWidget);
         menu->alwaysKeep->setObjectName(QStringLiteral("konedrive_always_keep"));
         menu->alwaysKeep->setCheckable(true);
         menu->alwaysKeep->setEnabled(false);
@@ -106,7 +106,7 @@ public:
             m_client->start(konedrive::Operation::FreeUpSpace, menu->paths);
         });
 
-        menu->openOnline = new QAction(QIcon::fromTheme(QString::fromLatin1(konedrive::OpenOnlineIcon)), i18nc("@action:inmenu", "Open in OneDrive"), parentWidget);
+        menu->openOnline = new QAction(QIcon::fromTheme(QString::fromLatin1(konedrive::OpenOnlineIcon)), i18nc("@action:inmenu the item's page in OneDrive's web interface", "View Online"), parentWidget);
         menu->openOnline->setObjectName(QStringLiteral("konedrive_open_online"));
         menu->openOnline->setEnabled(false);
         connect(menu->openOnline, &QAction::triggered, menu, [this, menu]() {

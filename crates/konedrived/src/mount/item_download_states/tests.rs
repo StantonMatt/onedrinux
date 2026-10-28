@@ -552,3 +552,41 @@ fn the_unfinished_files_are_those_of_the_running_downloads_that_are_not_whole_an
     download_states.forget_item(LocalItemId::new(6));
     assert_eq!(list(&download_states, &files), Vec::<i64>::new());
 }
+
+#[test]
+fn regression_fs1_a_pin_only_retry_preserves_an_unresolved_read_failure() {
+    let states = download_states();
+    let key = key(7, "content");
+    for asker in [DownloadAsker::Read, DownloadAsker::FilesInterface, DownloadAsker::OpenForWriting] {
+        let (run, _) = start_as(&states, &key, asker, None).unwrap();
+        states.finish(&run, Err(libc::EIO));
+        let (retry, _) = start_as(&states, &key, plan_pin(), None).unwrap();
+        states.finish(&retry, Err(libc::EIO));
+        assert!(states.has_failed_download(&key, false), "unpin cannot resolve the earlier failure");
+        let (recovered, _) = start_as(&states, &key, plan_pin(), None).unwrap();
+        states.finish(&recovered, Ok(()));
+        assert!(!states.has_failed_download(&key, false));
+        assert!(!states.has_failed_download(&key, true));
+    }
+}
+
+#[test]
+fn terminal_failure_is_content_specific_and_holds_or_cancellation_do_not_create_it() {
+    let states = ItemDownloadStates::new(1);
+    let key = key(7, "content");
+    let run = start_anew(&states, &key);
+    states.finish_with_failure(&run, Err(libc::EIO), false);
+    assert!(!states.has_failed_download(&key, false), "a stopped step or sign-out is not a terminal file failure");
+    let run = start_anew(&states, &key);
+    states.finish_with_failure(&run, Err(libc::EIO), true);
+    assert!(states.has_failed_download(&key, false));
+    let other = self::key(7, "other");
+    assert!(!states.has_failed_download(&other, false));
+    let run = start_anew(&states, &key);
+    states.finish_with_failure(&run, Ok(()), false);
+    assert!(!states.has_failed_download(&key, false));
+    let (run, _) = start_as(&states, &key, plan_pin(), None).unwrap();
+    states.finish_with_failure(&run, Err(libc::EIO), true);
+    assert!(states.has_failed_download(&key, true));
+    assert!(!states.has_failed_download(&key, false), "unpin resolves a failure of a plan-only download");
+}

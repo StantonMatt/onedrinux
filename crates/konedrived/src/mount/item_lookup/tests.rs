@@ -643,3 +643,24 @@ fn the_sync_mark_per_case() {
     }
     assert_eq!((SyncMark::Pending.as_str(), SyncMark::Uploading.as_str(), SyncMark::Blocked.as_str()), ("pending", "uploading", "blocked"), "the words Dolphin's emblem reads");
 }
+
+#[test]
+fn directory_and_failed_file_attributes_use_the_incremental_index() {
+    let fixture = ItemFixture::new();
+    let dir = fixture.show_onedrive_directory("docs");
+    let file = fixture.show_onedrive_file("docs/file", b"hello");
+    let states = super::super::directory_states::DirectoryStates::build(&fixture.store,
+        fixture.download_states.clone(), fixture.running_steps.clone(), fixture.published_plan.clone(), fixture.inotify_bridge.clone()).unwrap();
+    let lookup = Arc::new(ItemLookup::new(fixture.read_connections.clone(), fixture.place_changes.clone(), fixture.item_handles.clone(),
+        fixture.download_states.clone(), fixture.access_mode_switch.clone(), fixture.running_steps.clone(), fixture.published_plan.clone(), fixture.backing_directory.clone(), START_TIME).with_directory_states(states));
+    assert_eq!(find_xattr(&fixture, &lookup, dir.local_item_id, XATTR_STATE).unwrap(), "online-only");
+    assert_eq!(find_xattr(&fixture, &lookup, ROOT, XATTR_STATE).unwrap(), "online-only");
+    let key = DownloadKey { item: file.local_item_id, content: file.local.unwrap().content.unwrap() };
+    let super::super::item_download_states::ItemDownloadStart::Started { run, .. } = fixture.download_states.start_or_join(&key, &DownloadAsker::Read, None) else { panic!("started") };
+    fixture.download_states.finish(&run, Err(libc::EIO));
+    assert_eq!(find_xattr(&fixture, &lookup, key.item, XATTR_STATE).unwrap(), "failed");
+    assert_eq!(find_xattr(&fixture, &lookup, dir.local_item_id, XATTR_STATE).unwrap(), "failed");
+    assert_eq!(find_xattr(&fixture, &lookup, ROOT, XATTR_STATE).unwrap(), "failed");
+    fixture.land_copy(key.item, b"hello");
+    assert_eq!(find_xattr(&fixture, &lookup, ROOT, XATTR_STATE).unwrap(), "hydrated");
+}

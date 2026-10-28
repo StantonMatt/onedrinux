@@ -385,6 +385,8 @@ fn a_download_that_would_not_leave_the_free_space_kept_is_held_and_said() {
     *task_fixture.free_space.lock().unwrap() = Some(12 * GB);
     let (to_start, held) = task.hold_downloads_for_space(planned(), &[]);
     assert_eq!((ids(&to_start), ids(&held)), (vec![id(5), id(7)], vec![id(6)]));
+    assert!(task.parts.published_plan.is_download_held(id(6)));
+    assert!(!task.parts.published_plan.is_download_held(id(5)));
     let snapshot = task_fixture.state.get();
     assert_eq!(snapshot.transfers.disk_space_shortage, Some(DiskSpaceShortage { count: 1, bytes: 5 * GB, free_space: 12 * GB, reserve: 10 * GB }));
     let (trouble, _) = crate::status::snapshot::running_trouble(&snapshot).expect("a trouble of the folder");
@@ -400,6 +402,7 @@ fn a_download_that_would_not_leave_the_free_space_kept_is_held_and_said() {
     *task_fixture.free_space.lock().unwrap() = Some(40 * GB);
     let (_, held) = task.hold_downloads_for_space(planned(), &[]);
     assert_eq!(ids(&held), Vec::new());
+    assert!(!task.parts.published_plan.is_download_held(id(6)));
     assert_eq!(task_fixture.state.get().transfers.disk_space_shortage, None);
 }
 

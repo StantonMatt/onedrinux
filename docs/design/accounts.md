@@ -508,10 +508,19 @@ $ konedrivectl --account family login
 Recorded in [`../limitations/`](../limitations/README.md):
 
 - a move between two accounts' folders is a download, a removal and an upload (F124);
-- "Open in OneDrive" opens under whichever personal account the browser is signed in to (F295);
+- "View Online" opens under whichever personal account the browser is signed in to (F295);
 - while a wallet prompt is open at the end of a sign-in, the other changes of the accounts wait
   (A31);
 - consent to write stays with Microsoft after an account turns read-only (F66).
 
 Said where it happens: a sign-in refused when the drive cannot be checked (§6.2), an account held
 back at load (§4.2), and a migrated account's store, which is made anew (§9).
+
+## 10. Download guard configuration
+
+Top-level `download_guard` defaults to true. `[download_guard_limits]` holds `max_files`
+(default 30), `max_bytes` (2147483648), `window_seconds` (600), `allowed_apps`, `blocked_apps`,
+and `background_readers` (the built-in reader list when absent; a supplied list replaces it).
+Always rules hold for every account. `ConfigStore` owns their atomic writes and the one shared
+guard, which each mount receives. Session approvals and counters live only in that guard.
+See [download-guard.md](download-guard.md) for policy precedence and the bus contract.

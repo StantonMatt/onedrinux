@@ -11,6 +11,7 @@
 #include "conflictmodel.h"
 #include "currentaccount.h"
 #include "daemoncontroller.h"
+#include "downloadguardcontroller.h"
 #include "downloadprogresssettings.h"
 #include "folderchoice.h"
 #include "placessettings.h"
@@ -29,8 +30,14 @@ inline void registerKonedriveQml(DaemonController *daemon,
                                  PlacesSettings *places,
                                  TraySettings *tray,
                                  ServiceUnit *serviceUnit,
-                                 ReleaseCheck *releaseCheck)
+                                 ReleaseCheck *releaseCheck,
+                                 DownloadGuardController *downloadGuard = nullptr)
 {
+    // One on the daemon's bus when none is given: what does not test the guard has it off
+    // the fake daemon, which may have none.
+    if (!downloadGuard) {
+        downloadGuard = new DownloadGuardController(daemon->bus(), daemon);
+    }
     const char *uri = "org.konedrive.app";
     qmlRegisterSingletonInstance(uri, 1, 0, "Daemon", daemon);
     qmlRegisterSingletonInstance(uri, 1, 0, "Accounts", accounts);
@@ -41,6 +48,7 @@ inline void registerKonedriveQml(DaemonController *daemon,
     qmlRegisterSingletonInstance(uri, 1, 0, "Tray", tray);
     qmlRegisterSingletonInstance(uri, 1, 0, "ServiceUnit", serviceUnit);
     qmlRegisterSingletonInstance(uri, 1, 0, "ReleaseCheck", releaseCheck);
+    qmlRegisterSingletonInstance(uri, 1, 0, "DownloadGuard", downloadGuard);
     // Parented to `current`, whose account its refusal shows with.
     qmlRegisterSingletonInstance(uri, 1, 0, "FolderChoice", new FolderChoice(accounts, current, current));
     qmlRegisterUncreatableType<AccountItem>(uri, 1, 0, "AccountItem", QStringLiteral("owned by Accounts"));

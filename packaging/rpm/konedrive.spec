@@ -102,16 +102,18 @@ Requires:       qt6-qtdeclarative%{?_isa}
 # trash, which downloads it (docs/limitations/K34.md).
 Requires:       kf6-kio-core%{?_isa} >= %{kf6_min}
 Requires:       dolphin
+# The directories of the emblems the overlay plugin installs.
+Requires:       hicolor-icon-theme
 # Installed with the daemon on a Plasma desktop, from a repository.
 Supplements:    (%{name} and plasma-workspace)
 
 %description    kde
 The KOneDrive window, with its tray icon and notifications, where OneDrive
 accounts are added and each one's folder, space, transfers and history are
-shown; and two Dolphin plugins for the folder: an emblem on each file that
-shows whether it is online-only, downloading, downloaded or kept on this
-device, or has a change waiting to be uploaded, and "Always Keep on This
-Device", "Free Up Space" and "Open in OneDrive" in its context menu. Neither
+shown; and two Dolphin plugins for the folder: an emblem on each file and
+folder that shows whether it is online-only, downloading, downloaded or kept
+on this device, or has a change waiting to be uploaded, and "Always Keep on
+This Device", "Free Up Space" and "View Online" in its context menu. Neither
 plugin opens a file in the folder.
 
 # Where Cargo writes: the build directory, unless the build names another directory
@@ -222,6 +224,7 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/org.konedrive.KOneDri
 %dir %{_qt6_plugindir}/kf6/kfileitemaction
 %{_qt6_plugindir}/kf6/overlayicon/konedriveoverlay.so
 %{_qt6_plugindir}/kf6/kfileitemaction/konedriveactions.so
+%{_datadir}/icons/hicolor/*/emblems/konedrive-*.svg
 
 %changelog
 * Fri Sep 25 2026 kartas <kartas39@gmail.com> - 0.1.0-1

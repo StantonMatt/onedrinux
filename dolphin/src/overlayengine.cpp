@@ -20,7 +20,7 @@ namespace konedrive
 namespace
 {
 // IN_ATTRIB: a child's attributes (its state, its pin or its upload state) or the directory's
-// own (its root mark or its pin). IN_DELETE / IN_MOVED_FROM: a name to stop tracking.
+// own (its root mark, its pin, or its state and upload state). IN_DELETE / IN_MOVED_FROM: a name to stop tracking.
 // IN_MOVED_TO: a name replaced by a rename. The *_SELF events: this
 // directory's path no longer leads to it.
 constexpr uint32_t WatchMask = IN_ATTRIB | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO | IN_DELETE_SELF | IN_MOVE_SELF | IN_ONLYDIR | IN_EXCL_UNLINK;
@@ -52,6 +52,16 @@ QStringList OverlayEngine::overlays(const QUrl &url)
         return {};
     }
     const QString path = url.toLocalFile();
+    // A root shown from outside the mount has no marked ancestor. Track it
+    // on its own watch, without watching or looking for marks above it.
+    if (isDirectory(path) && m_hasMark(path)) {
+        Directory *directory = directoryFor(path);
+        const Emblem emblem = itemEmblem(path, m_hasPin);
+        if (directory) {
+            directory->ownEmblem = emblem;
+        }
+        return overlayNames(emblem);
+    }
     const QString dir = parentDirectory(path);
     const QString name = fileName(path);
     if (dir.isEmpty() || name.isEmpty()) {
@@ -109,6 +119,7 @@ OverlayEngine::Directory *OverlayEngine::directoryFor(QString dir)
     directory.watch = watch;
     m_pathsByWatch[watch].append(dir);
     directory.root = rootOf(dir, m_hasMark);
+    readMarksAgain(directory, dir);
     use(directory);
 
     if (directory.root && *directory.root != dir) {
@@ -216,6 +227,19 @@ void OverlayEngine::forgetTree(QString dir)
     }
 }
 
+bool OverlayEngine::readMarksAgain(Directory &directory, const QString &dir)
+{
+    // By the physical path, as the root walk reads them: `dir` may end in a
+    // symbolic link to the directory, and the link has no marks of its own.
+    const QString physical = physicalDirectory(dir);
+    const bool marked = !physical.isEmpty() && m_hasMark(physical);
+    const bool pinned = !physical.isEmpty() && m_hasPin(physical);
+    const bool changed = marked != directory.marked || pinned != directory.pinned;
+    directory.marked = marked;
+    directory.pinned = pinned;
+    return changed;
+}
+
 void OverlayEngine::resolveAgain(const QStringList &dirs, Changes &changes)
 {
     // Everything whose answer could depend on these directories' marks:
@@ -238,6 +262,7 @@ void OverlayEngine::resolveAgain(const QStringList &dirs, Changes &changes)
         }
         Directory &directory = it->second;
         directory.root = rootOf(path, m_hasMark);
+        recheckSelf(path, changes);
         if (!directory.root) {
             for (auto file = directory.files.cbegin(); file != directory.files.cend(); ++file) {
                 if (file.value() != Emblem::None) {
@@ -265,6 +290,19 @@ void OverlayEngine::resolveAgain(const QStringList &dirs, Changes &changes)
     }
 }
 
+void OverlayEngine::recheckSelf(const QString &dir, Changes &changes)
+{
+    auto it = m_directories.find(dir);
+    if (it == m_directories.end() || !it->second.ownEmblem) {
+        return;
+    }
+    const Emblem now = it->second.root ? itemEmblem(dir, m_hasPin) : Emblem::None;
+    if (now != *it->second.ownEmblem) {
+        it->second.ownEmblem = now;
+        changes.append({QUrl::fromLocalFile(dir), overlayNames(now)});
+    }
+}
+
 void OverlayEngine::recheck(const QString &dir, const QString &name, Changes &changes)
 {
     auto it = m_directories.find(dir);
@@ -287,7 +325,7 @@ void OverlayEngine::recheck(const QString &dir, const QString &name, Changes &ch
 void OverlayEngine::readEvents()
 {
     QStringList gone;
-    QStringList marksChanged;
+    QStringList ownAttributesChanged;
     QList<std::pair<QString, QString>> touched;
     bool overflow = false;
 
@@ -322,7 +360,7 @@ void OverlayEngine::readEvents()
             }
             if (event->len == 0 || event->name[0] == '\0') {
                 if (event->mask & IN_ATTRIB) {
-                    marksChanged.append(dirs);
+                    ownAttributesChanged.append(dirs);
                 }
                 continue;
             }
@@ -362,8 +400,23 @@ void OverlayEngine::readEvents()
                 }
             }
         }
-    } else if (!marksChanged.isEmpty()) {
-        resolveAgain(marksChanged, changes);
+    } else {
+        // A directory whose root mark and pin are as they were changed only
+        // its own emblem. A root shown from outside has no parent watch.
+        ownAttributesChanged.removeDuplicates();
+        QStringList marksChanged;
+        for (const QString &dir : std::as_const(ownAttributesChanged)) {
+            auto it = m_directories.find(dir);
+            if (it != m_directories.end() && readMarksAgain(it->second, dir)) {
+                marksChanged.append(dir);
+            }
+        }
+        if (!marksChanged.isEmpty()) {
+            resolveAgain(marksChanged, changes);
+        }
+        for (const QString &dir : std::as_const(ownAttributesChanged)) {
+            recheckSelf(dir, changes);
+        }
     }
     for (const auto &[dir, name] : std::as_const(touched)) {
         recheck(dir, name, changes);

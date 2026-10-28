@@ -1328,7 +1328,9 @@ fn a_page_costs_the_same_whatever_the_store_holds() {
     };
     measure("in memory", &mut TreeStore::in_memory().unwrap(), &mut TreeStore::in_memory().unwrap());
     // On disk, below the build's own directory.
-    let dir = tempfile::tempdir_in(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target")).unwrap();
+    let target = std::env::var_os("CARGO_TARGET_DIR").map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"));
+    let dir = tempfile::tempdir_in(target).unwrap();
     measure("on disk", &mut TreeStore::open(&dir.path().join("small.sqlite")).unwrap(), &mut TreeStore::open(&dir.path().join("large.sqlite")).unwrap());
 }
 

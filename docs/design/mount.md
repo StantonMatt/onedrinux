@@ -222,6 +222,54 @@ The attributes a program reads through the mount (`user.konedrive.item-id`, `.st
 (`item_lookup.rs`), lists none of them, and writes nothing on disk. Dolphin's emblems read them
 ([desktop.md](desktop.md)).
 
+Through the mount, `user.konedrive.state` on a bound file is `online-only`,
+`hydrating`, `hydrated`, or `failed`. `failed` means a whole download exhausted the
+content source's existing retries or failed to land (disk I/O or an occupied backing
+place), or a pinned file's download is held by `free_space_reserve_gb`. A running
+retry reports `hydrating`; success clears the remembered failure. Failures are keyed
+by item and content version, so new content does not inherit them. Unpinning clears
+the reserve-held case and a failure of a download only the pin asked for; failures
+of downloads also requested by a read, write-open or explicit hydration remain until
+recovery. Throttling, sign-out, cancellation and stale-content answers
+are not download failures. Whole downloads triggered by reads use the same rule;
+individual range-read errors do not. Download failures and retry memory last for the
+mount's run; they are not persisted across restart.
+
+Every directory, including the sync root, has `user.konedrive.state`, aggregated
+recursively over all files shown below it, with this precedence:
+
+| Condition below the directory | State |
+|---|---|
+| Any failed file | `failed` |
+| Any hydrating file, or pinned file not yet on disk | `hydrating` |
+| Any online-only file | `online-only` |
+| All files on disk, or no files | `hydrated` |
+
+`user.konedrive.sync` on a directory is `blocked` if any descendant file is blocked,
+else `uploading` if any is uploading, else `pending` if any is pending, else absent.
+These aggregates include unbound local files (on disk, with their existing upload
+mark) and exclude items the mount does not show. A directory's own upload mark is not
+part of the aggregate. File sync values and the pin on files and directories are
+unchanged. `listxattr` still lists none of these virtual attributes.
+
+`mount/directory_states.rs` keeps a parent/children index and seven counters per
+node in memory, rebuilt before the mount is served. This avoids a persistent schema
+change and keeps runtime transfer states beside durable row facts. Directory
+`getxattr` reads counters, never descendants. A file-state update changes only its
+ancestor counters; a move subtracts the old subtree totals and adds them to the new
+ancestors. A moved or pinned subtree also refreshes inherited pins. Connection-local
+TEMP triggers on items, pins and step memory record every writer's changes, including
+listing/resync and deletes, in the same transaction. The store observer refreshes the
+index before answering the writer job; rolled-back changes leave no feed entries.
+Download, running-step and published-plan changes update the same counters directly.
+
+Aggregate changes queue the existing inotify bridge's `MarksChanged` operation on
+the affected directories (including the root), so parent watches receive `IN_ATTRIB`.
+Each directory has a fixed 100 ms debounce window: bursts coalesce, and continuous
+changes cannot postpone notification indefinitely. Counter updates remain immediate.
+No aggregate or failure mark is written into the backing directory.
+
+
 ## 4. What a request of the kernel does
 
 ### 4.1 The requests
@@ -289,8 +337,9 @@ asked.
 | `ESTALE` | the row is gone or shows nothing; the content a handle was opened as is not the row's any more; OneDrive stated another content (§5.5) |
 | `EEXIST` | the place is taken in the rows, or held on disk by what no row says, or the name in OneDrive by an item the folder cannot show, as OneDrive compares names ([F304](../limitations/F304.md)) |
 | `ENOTEMPTY`, `ENOENT` | the store's refusal of a removal or a make ([F299](../limitations/F299.md) for a directory that holds in OneDrive what it does not show) |
+| `EACCES` | the download guard refuses remote content ([download-guard.md](download-guard.md)); local bytes remain readable |
 | `EAGAIN` | OneDrive asks the account to wait, and the content is needed now (§5.6) |
-| `ENOSPC`, `EDQUOT` | a download or a write ran out of space |
+| `ENOSPC`, `EDQUOT` | a download or a write ran out of space; or the reserve prevents a verified whole download required for a read |
 | `EIO` | the store failed; a download failed after its tries; a row against the rules |
 | `EBADF` | a handle that holds no file, or may not write |
 
@@ -635,3 +684,11 @@ mark says ([desktop.md](desktop.md)).
   `EAGAIN`.
 - **A directory with nothing on disk** shows the time the mount started, which changes at every
   start.
+
+## 11. Download admission
+
+Cloud-only opens and remote reads use the machine-wide [download guard](download-guard.md).
+It owns caller identification and app budgets; the downloader owns backing-filesystem space
+reservations. Guard refusals are `EACCES`, before network I/O and without a tree change.
+Reads that cannot leave the disk reserve stay as ranges, or answer `ENOSPC` when a verified
+whole download is required. Explicit hydrate and pin do not enter the app guard.

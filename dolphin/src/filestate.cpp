@@ -14,15 +14,10 @@
 namespace konedrive
 {
 
-FileState readFileState(const QString &path)
+namespace
 {
-    const QByteArray native = QFile::encodeName(path);
-    struct stat info {
-    };
-    if (::lstat(native.constData(), &info) != 0 || !S_ISREG(info.st_mode)) {
-        return FileState::NotAFile;
-    }
-
+FileState stateAttribute(const QByteArray &native)
+{
     // The longest value is "online-only"; anything that does not fit is not
     // a state this plugin knows.
     char value[32];
@@ -43,7 +38,27 @@ FileState readFileState(const QString &path)
     if (state == "hydrated") {
         return FileState::Hydrated;
     }
+    if (state == "failed") {
+        return FileState::Failed;
+    }
     return FileState::Unrecognised;
+}
+} // namespace
+
+FileState readFileState(const QString &path)
+{
+    const QByteArray native = QFile::encodeName(path);
+    struct stat info {
+    };
+    if (::lstat(native.constData(), &info) != 0 || !S_ISREG(info.st_mode)) {
+        return FileState::NotAFile;
+    }
+    return stateAttribute(native);
+}
+
+FileState readFolderState(const QString &dir)
+{
+    return stateAttribute(QFile::encodeName(dir));
 }
 
 UploadState readUploadState(const QString &path)
@@ -158,6 +173,8 @@ Emblem emblemFor(FileState state, bool pinned)
         return Emblem::Syncing;
     case FileState::Hydrated:
         return pinned ? Emblem::CheckFilled : Emblem::CheckOutline;
+    case FileState::Failed:
+        return Emblem::Error;
     case FileState::Unmanaged:
     case FileState::Unrecognised:
     case FileState::NotAFile:
@@ -166,35 +183,54 @@ Emblem emblemFor(FileState state, bool pinned)
     return Emblem::None;
 }
 
+Emblem folderEmblemFor(FileState state, bool pinned)
+{
+    switch (state) {
+    case FileState::Failed:
+        return Emblem::Error;
+    case FileState::Hydrating:
+        // Something below is downloading, or kept and not downloaded yet.
+        return Emblem::Syncing;
+    case FileState::OnlineOnly:
+        return pinned ? Emblem::CheckFilled : Emblem::Cloud;
+    case FileState::Hydrated:
+        return pinned ? Emblem::CheckFilled : Emblem::CheckOutline;
+    case FileState::Unmanaged:
+    case FileState::Unrecognised:
+    case FileState::NotAFile:
+        break;
+    }
+    return pinned ? Emblem::CheckFilled : Emblem::None;
+}
+
 QStringList overlayNames(Emblem emblem)
 {
-    // Breeze names, checked against /usr/share/icons/breeze{,-dark}:
-    //   - status/*/cloudstatus.svg (online-only);
-    //   - status/*/state-sync.svg (hydrating, or pinned and
-    //     still online-only -- the sweep is filling it);
-    //   - actions/*/dialog-ok.svg, a bare check with no fill behind it, for
-    //     a hydrated file nobody asked to keep (the OUTLINE case). Not
-    //     actions/*/checkmark.svg: emblems/*/checkmark.svg is a symlink to
-    //     emblem-checked.svg, so that name is ambiguous between the two
-    //     directories and could resolve to the filled icon instead;
-    //     dialog-ok.svg is the same bare glyph under a name that exists
-    //     nowhere else in the theme;
-    //   - emblems/*/emblem-checked.svg, the same check filled solid, for one
-    //     that a pin holds for (the FILLED case) -- this is the icon
-    //     "hydrated" alone used before pinning existed;
-    //   - status/*/state-error.svg, for an item whose upload is blocked
-    //     (state-sync, above, serves one waiting to be uploaded too).
+    // KOneDrive's own emblems (dolphin/emblems), installed in hicolor so that
+    // every icon theme finds them. Each sits on a white plate in fixed
+    // colours, which no theme recolours: Breeze's monochrome clouds and checks
+    // vanished on white pages in Breeze Dark, and its syncing and error
+    // states were the online-only cloud again.
+    //   - konedrive-online-only: a blue outline cloud;
+    //   - konedrive-syncing: a solid blue disc with circular arrows
+    //     (downloading, pinned and still online-only -- the sweep is filling
+    //     it -- or waiting to be uploaded);
+    //   - konedrive-downloaded: a green ring and check, for a hydrated file
+    //     nobody asked to keep (the OUTLINE case);
+    //   - konedrive-always-keep: a solid green disc and white check, for one
+    //     that a pin holds for (the FILLED case);
+    //   - konedrive-error: a red rounded square and white X -- square, so that
+    //     it is not told from the green discs by colour alone.
     switch (emblem) {
     case Emblem::Cloud:
-        return {QStringLiteral("cloudstatus")};
+        return {QStringLiteral("konedrive-online-only")};
     case Emblem::Syncing:
-        return {QStringLiteral("state-sync")};
+        return {QStringLiteral("konedrive-syncing")};
     case Emblem::CheckOutline:
-        return {QStringLiteral("dialog-ok")};
+        return {QStringLiteral("konedrive-downloaded")};
     case Emblem::CheckFilled:
-        return {QStringLiteral("emblem-checked")};
+        return {QStringLiteral("konedrive-always-keep")};
     case Emblem::Error:
-        return {QStringLiteral("state-error")};
+        return {QStringLiteral("konedrive-error")};
     case Emblem::None:
         break;
     }
@@ -250,29 +286,25 @@ bool isDirectory(const QString &path)
 
 Emblem emblemForItem(FileState state, bool isDir, bool pinned, UploadState upload)
 {
-    switch (upload) {
-    case UploadState::Pending:
-    case UploadState::Uploading:
-        return Emblem::Syncing;
-    case UploadState::Blocked:
+    if (upload == UploadState::Blocked || state == FileState::Failed) {
         return Emblem::Error;
-    case UploadState::None:
-        break;
     }
-    if (isDir) {
-        return pinned ? Emblem::CheckFilled : Emblem::None;
+    if (upload == UploadState::Pending || upload == UploadState::Uploading) {
+        return Emblem::Syncing;
     }
-    return emblemFor(state, pinned);
+    return isDir ? folderEmblemFor(state, pinned) : emblemFor(state, pinned);
 }
 
 Emblem itemEmblem(const QString &path, const PinMarkReader &hasPin)
 {
-    // An item with changes waiting to be uploaded needs nothing else read.
+    // An item whose upload is blocked needs nothing else read.
     const UploadState upload = readUploadState(path);
-    if (upload != UploadState::None) {
-        return emblemForItem(FileState::NotAFile, false, false, upload);
+    if (upload == UploadState::Blocked) {
+        return Emblem::Error;
     }
-    return emblemForItem(readFileState(path), isDirectory(path), hasPin(path));
+    const bool isDir = isDirectory(path);
+    const FileState state = isDir ? readFolderState(path) : readFileState(path);
+    return emblemForItem(state, isDir, hasPin(path), upload);
 }
 
 bool anyInSyncFolder(const QStringList &paths, const RootMarkReader &hasRoot)

@@ -489,6 +489,8 @@ impl ItemFixture {
             pool: Arc::clone(&self.pool),
             split_download_share: Arc::clone(&self.split_download_share),
             download_after: DOWNLOAD_AFTER,
+            download_guard: Arc::new(crate::download_guard::DownloadGuard::default()),
+            free_space_reserve: Arc::new(|| 0),
             tree_lock: Arc::clone(&self.tree_lock),
             ignore: Arc::clone(&self.ignore),
             sync_plan_wake: Arc::clone(&self.sync_plan_wake),

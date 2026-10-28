@@ -36,11 +36,12 @@ fn always_keep_is_checked_when_everything_is_pinned() {
 }
 
 /// "Free up space": offered for a folder, for a file that is downloaded and for a file a
-/// pin holds for, which it lets go; disabled, with why, when `FreeUp` would refuse.
+/// pin holds for, which it lets go; disabled, with why, when `FreeUp` would refuse, and
+/// with no why for an online-only file, which has nothing to free.
 #[test]
 fn free_up_is_offered_for_what_has_something_to_free_and_disabled_with_its_reason() {
     let cases = [
-        (taken(false, false, false), None, Offer::Hidden, None),
+        (taken(false, false, false), None, Offer::Disabled, None),
         (taken(false, false, true), None, Offer::Enabled, None),
         (taken(true, false, false), None, Offer::Enabled, None),
         (taken(false, true, false), None, Offer::Enabled, None),
@@ -51,9 +52,15 @@ fn free_up_is_offered_for_what_has_something_to_free_and_disabled_with_its_reaso
         let menu = menu_of(&["/f/a"], vec![(vec![0], Part { taken: vec![Some(item)], free_up_refused: refused })], false);
         assert_eq!((menu.free_up, menu.free_up_why), (offer, why), "{item:?} {refused:?}");
     }
+    // Over several files: enabled once one of them has something to free.
+    let online = Some(taken(false, false, false));
+    let two_online = menu_of(&["/f/a", "/f/b"], vec![(vec![0, 1], part(vec![online, online]))], false);
+    assert_eq!((two_online.free_up, two_online.free_up_why), (Offer::Disabled, None));
+    let and_downloaded = menu_of(&["/f/a", "/f/b"], vec![(vec![0, 1], part(vec![online, Some(taken(false, false, true))]))], false);
+    assert_eq!(and_downloaded.free_up, Offer::Enabled);
 }
 
-/// "Open in OneDrive" is for one selected path: an item OneDrive has, or an account's
+/// "View online" is for one selected path: an item OneDrive has, or an account's
 /// folder itself; never for a selection of several, and hidden for what no folder shows.
 #[test]
 fn open_online_is_for_one_path_that_onedrive_has_or_an_accounts_folder() {

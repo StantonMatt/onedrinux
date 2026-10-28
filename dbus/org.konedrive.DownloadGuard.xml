@@ -1,0 +1,46 @@
+<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN" "http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
+<node>
+  <!-- Machine-wide, at /org/konedrive/Accounts. No file paths or command lines. -->
+  <interface name="org.konedrive.DownloadGuard">
+    <method name="ListApps">
+      <!-- identity, display name, policy, blocked, reason, admitted files, reserved bytes -->
+      <arg name="apps" type="a(sssbstt)" direction="out"/>
+    </method>
+    <method name="AllowApp">
+      <arg name="identity" type="s" direction="in"/>
+      <arg name="always" type="b" direction="in"/>
+    </method>
+    <method name="BlockApp">
+      <arg name="identity" type="s" direction="in"/>
+    </method>
+    <method name="ResetApp">
+      <arg name="identity" type="s" direction="in"/>
+    </method>
+    <method name="FreeUpAppDownloads">
+      <!-- Frees what the app's reads downloaded this session; skips kept, changed and open files. -->
+      <arg name="identity" type="s" direction="in"/>
+      <arg name="freed_files" type="t" direction="out"/>
+      <arg name="freed_bytes" type="t" direction="out"/>
+    </method>
+    <method name="SetEnabled">
+      <arg name="enabled" type="b" direction="in"/>
+    </method>
+    <method name="SetThresholds">
+      <arg name="max_files" type="u" direction="in"/>
+      <arg name="max_bytes" type="t" direction="in"/>
+      <arg name="window_seconds" type="u" direction="in"/>
+    </method>
+    <property name="Enabled" type="b" access="read"/>
+    <property name="MaxFiles" type="u" access="read"/>
+    <property name="MaxBytes" type="t" access="read"/>
+    <property name="WindowSeconds" type="u" access="read"/>
+    <signal name="DownloadsBlocked">
+      <arg name="identity" type="s"/>
+      <arg name="display_name" type="s"/>
+      <arg name="files" type="t"/>
+      <arg name="bytes" type="t"/>
+      <arg name="reason" type="s"/>
+    </signal>
+    <signal name="AppsChanged"/>
+  </interface>
+</node>

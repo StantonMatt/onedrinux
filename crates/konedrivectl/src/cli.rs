@@ -31,6 +31,11 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand)]
 pub(crate) enum Cmd {
+    /// Show or change the machine-wide download guard
+    Guard {
+        #[command(subcommand)]
+        command: GuardCmd,
+    },
     /// List, add, rename and remove accounts
     Account {
         #[command(subcommand)]
@@ -326,3 +331,30 @@ pub(crate) enum IgnoreCmd {
     Remove { pattern: String },
 }
 
+
+#[derive(Subcommand)]
+pub(crate) enum GuardCmd {
+    /// Show whether the guard is enabled and its limits
+    Status,
+    /// List seen apps, blocks, allowances and their counters
+    Apps,
+    /// Allow an app for this daemon session, or persist with --always
+    Allow { identity: String, #[arg(long)] always: bool },
+    /// Always block remote content reads by this app
+    Block { identity: String },
+    /// Free the safe copies this app's reads downloaded this daemon session
+    Free { identity: String },
+    /// Restore automatic guarding and clear an app's counters
+    Reset { identity: String },
+    /// Turn the guard on or off (persisted)
+    Enable { #[arg(value_parser = ["on", "off"])] choice: String },
+    /// Set positive limits (bytes, seconds; one window across all accounts)
+    Thresholds {
+        #[arg(long)] files: u32,
+        #[arg(long)] bytes: u64,
+        #[arg(long)] seconds: u32,
+    },
+}
+
+#[cfg(test)]
+mod tests;

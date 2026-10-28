@@ -86,7 +86,7 @@ know `konedrive-graph`); `konedrive-dbus`; `konedrive-text` (uses `konedrive-rea
 | The development build's tests | `cargo test -p konedrived -p konedrivectl --features konedrived/dev-tools,konedrivectl/dev-tools` | The token export and the signed-out account (`dbus/token_export.rs`, `dbus/dev_tools.rs`, `konedrivectl dev`) |
 | The window | `cmake -S app -B build/app -DBUILD_TESTING=ON && cmake --build build/app && ctest --test-dir build/app --output-on-failure` | `app/tests/` |
 | The Dolphin plugins | `cmake -S dolphin -B build/dolphin -DBUILD_TESTING=ON && cmake --build build/dolphin && ctest --test-dir build/dolphin --output-on-failure` | `dolphin/tests/` |
-| The VM suite | `tests/fuse-probe/run.sh [<group>…]`; `ONLY="<scenario>"` for one scenario | The daemon's service and `konedrivectl` over a sync folder that is mounted for real, on ext4 in a virtme-ng VM, over the fake OneDrive: nothing is mounted on the host. Groups: `service`, `mounted_folder`, `file_writes`, `file_reads`, `daemon_restarts`, `cli`; by name only, `kio_trash` |
+| The VM suite | `tests/fuse-probe/run.sh [<group>…]`; `ONLY="<scenario>"` for one scenario | The daemon's service and `konedrivectl` over a sync folder that is mounted for real, on ext4 in a virtme-ng VM, over the fake OneDrive: nothing is mounted on the host. Groups: `service`, `mounted_folder`, `file_writes`, `file_reads`, `download_guard`, `daemon_restarts`, `cli`; by name only, `kio_trash` |
 | The test account | `konedrive-write-test` (`tests/write-account`) | Writes to OneDrive itself, through the guards; rare, never the user's real account |
 | The structure | `scripts/check-structure.sh` | The files over the advised sizes (listed only), tests outside source files, the daemon's layer order, locks, the tests a module names |
 
@@ -101,7 +101,7 @@ know `konedrive-graph`); `konedrive-dbus`; `konedrive-text` (uses `konedrive-rea
 
 The directories below are in layer order: a directory uses only the directories before it, and
 `listing/` does not use `onedrive_steps/`. The order, as `scripts/check-structure.sh` has it:
-`config`, `account`, `folder`, `conditions`, `status`, `content_source`, `local`, `sync_parts`,
+`download_guard`, `config`, `account`, `folder`, `conditions`, `status`, `content_source`, `local`, `sync_parts`,
 `mount`, `folder_steps`, `onedrive_steps`, `listing`, `desktop`, `upload_queue`,
 `sync_plan_task`, `sync_tasks`, `account_folder`, `daemon`, `sentences`, `dbus`.
 
@@ -126,10 +126,23 @@ The directories below are in layer order: a directory uses only the directories 
 - `model.rs` — what `config.toml` holds (version 2), and the rules of labels, client ids and
   held accounts.
 - `store.rs` — `ConfigStore`, the one owner of the file.
+- `download_guard.rs` — persistent guard rules and thresholds through `ConfigStore`; memory-only session approval.
 - `config_trouble.rs` — `AccountHold`, why an account is held back, and `ConfigTrouble`, what
   `Accounts.LastError` says: cases with their data.
 - `atomic.rs` — one file replaced in one step.
 - `migrate.rs` — version 1 of `config.toml` and its migration to version 2. `[tests]`
+
+### `crates/konedrived/src/download_guard/`
+
+The machine-wide [download guard](design/download-guard.md), shared by every mount.
+
+- `mod.rs` — app policies, sliding admission windows, byte reservations and block records. `[tests]`
+- `downloads/tests.rs` — attribution capacity, invalidation and landing-ticket tests.
+- `downloads.rs` — bounded session attribution of whole read downloads, landing tickets and explicit-keep invalidation. `[tests]`
+- `identity/tests.rs` — caller identity, systemd units and KIO reader-role tests.
+- `space/tests.rs` — shared disk-reservation and concurrent allocation tests.
+- `identity.rs` — procfs caller facts, systemd app identities, KIO roles and the reader list. `[tests]`
+- `space.rs` — allocations shared by reads, pins and explicit hydrate on the same filesystem. `[tests]`
 
 ### `crates/konedrived/src/account/`
 
@@ -230,6 +243,7 @@ Which names stay here, and which OneDrive refuses.
 
 What the tasks of one folder's sync share: each a small owner of one state.
 
+- `state_changes.rs` — listeners for runtime item-state changes, called after the source lock is released.
 - `mod.rs` — the list of the parts.
 - `running_steps.rs` — `RunningSteps`: the steps of the plan that run now, one per item.
   `[tests]`
@@ -325,6 +339,10 @@ What the kernel asks:
 - `item_lookup.rs` — `ItemLookup`: lookup, getattr, a directory's reading and the extended
   attributes, answered from the rows on the asking thread's own connection; the sync mark
   Dolphin's emblem reads. `[tests]`
+- `directory_states/tests.rs` — incremental aggregate state, moves, pins, failures and notification tests.
+- `directory_states.rs` — in-memory recursive directory xattrs: parent/children links,
+  descendant counters, incremental row/move/pin/delete and transfer updates; failed-download
+  state. `[tests: precedence, moves, pin/unpin, recovery, randomized full recount, 100k cost]`
 - `read_connections.rs` — the mount's connections to the store for reading, one per thread.
   `[tests]`
 - `item_attributes.rs` — the attributes the kernel is given for an item: a function of its row,
@@ -362,11 +380,13 @@ A file that is not on disk:
   whoever asked. `[tests]`
 - `item_downloader/download_source.rs` — the source one download fetches through: only answers
   of the content asked for, and how far the file is written, for the reads meanwhile.
+- `item_downloader/space_checked.rs` — read and pin streams recheck the disk reserve; retry bytes
+  are counted against the app's admission budget.
 - `item_download_states.rs` — `ItemDownloadStates`: the state of each file's download, by the
   item and the content. `[tests]`
 - `item_download_landing.rs` — the landing: the last step of every download, the file given
   its name and then the row saying on disk. `[tests]`
-- `item_free_up.rs` — free up space: the row first, then the downloaded copy goes. `[tests]`
+- `item_free_up.rs` — free up space: the row first, then the downloaded copy goes; app reclamation also requires the attributed content and no open reader. `[tests]`
 
 Who else asks, and the mount's end:
 
@@ -375,7 +395,7 @@ Who else asks, and the mount's end:
 - `item_content_files.rs` — the local content of an item as a step towards OneDrive reads it,
   and the marks a confirmed step leaves on what it sent. `[tests]`
 - `item_inotify_bridge.rs` — tells whoever watches the folder of a change a step or a landing
-  made, through the mount. `[tests]`
+  made, through the mount; directory aggregate notifications coalesce in 100 ms windows. `[tests]`
 - `item_announcements.rs` — `ItemAnnouncement`: what is told, by local item id and former
   name. `[tests]`
 - `mount_take_down.rs` — `MountTakeDown`: how a part says the mount must be taken down and the
@@ -526,10 +546,10 @@ access mode.
 - `queries.rs` — the activity, the conflicts and their dismissal, the address of an item in
   OneDrive's web interface.
 - `hydrate.rs` — `Hydrate`: a file downloaded now.
-- `free_up.rs` — `Dehydrate`, `FreeUpSpace` and `FreeUp`. `[tests]`
+- `free_up.rs` — `Dehydrate`, `FreeUpSpace`, `FreeUp` and per-app session download reclamation. `[tests]`
 - `pins.rs` — pins put on and taken off. `[tests]`
 - `menu.rs` — what the context menu may offer for a selection (`Files.Menu`). `[tests]`
-- `testing.rs` — test support: a `Wiring` of fakes.
+- `testing.rs` — test support: a `Wiring` of fakes, unfinished downloads and direct backing-allocation facts for the VM.
 - `staged_folder.rs` — test code: a folder put into a state by hand, with no start of its sync.
 - `tests/mod.rs`, `tests/running_sync.rs` — the owner over a folder whose sync really runs,
   with the mount built and not served.
@@ -565,6 +585,7 @@ The D-Bus interfaces: thin zbus wrappers, one file each, named like the XML in `
 
 - `mod.rs` — the interfaces of one account's folder, as types.
 - `accounts.rs` — `org.konedrive.Accounts`.
+- `download_guard.rs` — `org.konedrive.DownloadGuard`: settings, app rules, session download reclamation across accounts and block signals.
 - `account.rs` — `org.konedrive.Account`.
 - `folder.rs` — `org.konedrive.Folder`.
 - `files.rs` — `org.konedrive.Files`.
@@ -606,6 +627,7 @@ what is decided and what is said, with nothing read from the daemon.
 
 - `main.rs` — the program: parses the command line and runs the command.
 - `cli.rs` — the commands as `clap` describes them; `sync` is `status`, `FolderCmd` and `PathCmd`.
+- `cli/tests.rs` — guard command parsing, including `guard free ID`.
 - `daemon.rs` — the daemon on the bus, the account a command chose, and every account's folder.
 - `read.rs` — what is read of the daemon into the types `text/` prints.
 - `wait.rs` — the waits for a sign-in to end.
@@ -622,6 +644,7 @@ what is decided and what is said, with nothing read from the daemon.
 - `browser.rs` — opening the sign-in page.
 - `status.rs` — `status`.
 - `settings.rs` — `settings`.
+- `guard.rs` — `guard`: status, app list, allowances, blocks, reset, thresholds and `free ID` reclamation.
 - `sync/mod.rs` — `sync`: `status`, `anyway --all`, and which of the two groups a command is in.
 - `sync/folder.rs` — the `sync` commands on the chosen account's folder.
 - `sync/path.rs` — the `sync` commands that take a path.
@@ -724,6 +747,9 @@ per item), `step_memory` and the tables beside it, `place_change_records`, `pins
   rebuilt. `[tests]`
 - `schema/old_store.rs` — `decide_old_store`: what becomes of a store of another version (it
   is rebuilt, never migrated), and what a rebuild loses. `[tests]`
+- `item_changes/tests.rs` — change-feed transaction rollback and observer tests.
+- `item_changes.rs` — transaction-safe TEMP-trigger feed for the mount's derived state;
+  items, pin roots and step memory, consumed after writer jobs without changing the schema.
 - `shared.rs` — `Store`: the store shared by the tasks of one folder, one thread per
   connection.
 - `read.rs` — `ReadStore`: the store as its read-only connection gives it, for the bus.
@@ -906,6 +932,7 @@ The sync plan:
 - `build.rs` — the version and the commit a build shows.
 - `src/lib.rs` — the D-Bus names. `[tests]`
 - `src/accounts.rs` — the proxies of the accounts' interfaces. `[tests]`
+- `src/download_guard.rs` — the machine-wide download guard proxy.
 - `src/rows.rs` — the rows the daemon answers with, by name. `[tests]`
 - `src/overall.rs` — `Folder.Overall`: the states and the reasons, as they are spelled. `[tests]`
 - `src/refusal.rs` — `Refusal`: every name a call is refused under. `[tests]`
@@ -921,6 +948,7 @@ Each has its file in `crates/konedrived/src/dbus/`.
 ### `dbus/`
 
 - `org.konedrive.Accounts.xml` — the manager: the accounts, the shared settings, the version.
+- `org.konedrive.DownloadGuard.xml` — machine-wide app policies, counters, settings and block signals.
 - `org.konedrive.Account.xml` — one account: sign-in, label, mode and the wish for read-only
   that waits, profile, quota.
 - `org.konedrive.Folder.xml` — one account's folder: registration, refresh, pause, settings.
@@ -960,6 +988,8 @@ Each has its file in `crates/konedrived/src/dbus/`.
   build.
 - `qmlregistration.h` — what the QML finds in `org.konedrive.app`.
 - `daemoncontroller.h`, `daemoncontroller.cpp` — the manager object, `org.konedrive.Accounts`.
+- `downloadguardcontroller.h`, `downloadguardcontroller.cpp` — the download guard,
+  `org.konedrive.DownloadGuard`: its switch and limits, and the apps it blocked or has a rule for.
 - `accountsmodel.h`, `accountsmodel.cpp` — the accounts, each with its controllers; Sign In and
   its link.
 - `currentaccount.h`, `currentaccount.cpp` — the account the window shows.
@@ -985,9 +1015,9 @@ Each has its file in `crates/konedrived/src/dbus/`.
   sentences as `konedrivectl`'s, compared by its test.
 - `generated/reasontexts.h`, `generated/reasontexts.cpp` — generated from `konedrive-text`, not
   edited: the window's sentence for every reason, and how a reason is cut into its parts.
-- `notifier.h`, `notifier.cpp` — the notifications.
+- `notifier.h`, `notifier.cpp` — the notifications; `GuardNotifier`, the download guard's.
 - `windowsection.h` — where a click on a notification opens the window: Status, Status with its
-  History unfolded, or a section of Issues.
+  History unfolded, a section of Issues, or Settings' apps the download guard blocked.
 - `konedrive.notifyrc` — the notification events.
 - `trayicon.h`, `trayicon.cpp` — the app in the tray: one icon for every account, or one each.
 - `trayitem.h`, `trayitem.cpp` — one tray icon and its menu.
@@ -1035,7 +1065,10 @@ Each has its file in `crates/konedrived/src/dbus/`.
   whose both versions were kept, what can't be shown in the folder.
 - `OneDriveSettingsPage.qml` — one OneDrive's settings: its account, two-way sync, folder,
   previews and the free space its downloads leave.
-- `SettingsPage.qml` — the whole app's settings, and Quit.
+- `SettingsPage.qml` — the whole app's settings, the download guard with its limits and its apps,
+  and Quit.
+- `GuardAppRow.qml` — one app the download guard blocked or has a rule for, with its buttons; on
+  Settings and Status.
 - `ServiceCard.qml` — the KOneDrive service is not running: start it, or read its log.
 
 ### `app/tests/`
@@ -1051,6 +1084,8 @@ Each has its file in `crates/konedrived/src/dbus/`.
 - `reasontextstest.cpp` — every reason reads as it did before its sentence was generated.
 - `modelstest.cpp` — the transfer, activity and conflict models.
 - `notifiertest.cpp` — `Notifier`.
+- `downloadguardtest.cpp` — `DownloadGuardController`, `GuardNotifier`.
+- `guardpagestest.cpp` — the download guard on Settings, Status and OneDrive Settings.
 - `dialogstest.cpp` — the window's pages and confirmations, against the fake daemon.
 - `serviceunittest.cpp` — `ServiceUnit`.
 - `releasechecktest.cpp` — `BuildVersion`, what a latest release is to a build, a case each, and
@@ -1069,6 +1104,11 @@ Each has its file in `crates/konedrived/src/dbus/`.
 ### `dolphin/`
 
 - `CMakeLists.txt` — the build.
+
+### `dolphin/emblems/`
+
+- `generate.py` — generates the hicolor state emblems.
+- `8/`, `16/`, `22/`, `32/` — SVG emblems for online-only, downloaded, pinned, syncing and failed states.
 
 ### `dolphin/src/`
 
@@ -1122,6 +1162,8 @@ suite".
   changes.
 - `file_writes.sh` — the group `file_writes`: what a program's changes become in OneDrive.
 - `file_reads.sh` — the group `file_reads`: reads, downloads, free-up.
+- `download_guard.sh` — the group `download_guard`: app-download reclamation and its keep/open skip rules, bulk and background refusals, explicit actions,
+  low-space ranges, already-open handles and mmap.
 - `daemon_restarts.sh` — the group `daemon_restarts`: stops and kills in the middle of work.
 - `kio_trash.sh` — the group `kio_trash`, by name only: what KIO does when a file of the folder
   is moved to the trash (`tests/kio/trash_probe.cpp`).
@@ -1189,6 +1231,10 @@ What `docs/kio-behavior.md` was measured with.
 ### `packaging/`
 
 - `rpm/konedrive.spec` — the two packages.
+- `deb/README.md` — local Kubuntu package layout, build inputs and use.
+- `deb/build.sh` — packages existing release artifacts into two Debian packages without installing them.
+- `deb/konedrive.postinst`, `deb/konedrive.prerm`, `deb/konedrive.postrm` — user-service lifecycle hooks.
+- `deb/copyright` — Debian copyright metadata.
 - `systemd/konedrived.service` — the daemon's user unit.
 - `dbus/org.konedrive.Daemon.service` — the daemon started by the bus.
 
@@ -1219,4 +1265,5 @@ What `docs/kio-behavior.md` was measured with.
   `README.md` is the index.
 - `docs/kernel-behavior-7.2/` — what fanotify, leases and file handles were measured to do, for
   that earlier mechanism; kept as a record of the kernel. Its `README.md` is the index.
+- `docs/design/download-guard.md` — caller policy, admission windows, space and the UI bus handoff.
 - `docs/code-map.md` — this file.

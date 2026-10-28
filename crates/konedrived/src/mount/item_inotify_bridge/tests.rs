@@ -359,3 +359,47 @@ fn an_announcement_in_a_directory_the_folder_no_longer_shows_is_skipped_and_the_
     assert_eq!(fs::read_dir(watched.path()).unwrap().count(), 1, "nothing else was made");
     bridge.stop();
 }
+
+#[test]
+fn regression_fs3_content_announcements_progress_while_directory_batches_are_always_due() {
+    let fixture = ItemFixture::new();
+    let file = fixture.show_onedrive_file("file", b"hello").local_item_id;
+    let bridge = bridge();
+    assert!(bridge.read_connections.set(fixture.read_connections.clone()).is_ok());
+    let mut directories = 0;
+    for _ in 0..100 {
+        let content = ItemAnnouncement::ContentChanged { item: file, place: place_in(LocalItemId::ROOT, "file") };
+        bridge.announce(vec![content.clone()]);
+        let mut delivered = false;
+        for _ in 0..2 {
+            // Make directory traffic due again before EVERY dequeue, without timing
+            // assumptions about how quickly either class of announcement is served.
+            bridge.directories.lock().unwrap().insert(LocalItemId::ROOT, Instant::now());
+            let batch = bridge.wait_for_announcements().unwrap();
+            if batch == [content.clone()] {
+                delivered = true;
+                break;
+            }
+            assert!(matches!(batch.as_slice(), [ItemAnnouncement::MarksChanged { item: LocalItemId::ROOT, .. }]));
+            directories += 1;
+        }
+        assert!(delivered, "a content invalidation waits behind at most one directory batch");
+    }
+    assert_eq!(directories, 100, "directory announcements also keep progressing");
+    bridge.stop();
+}
+
+#[test]
+fn directory_bursts_coalesce_without_postponing_the_first_deadline() {
+    let bridge = bridge();
+    let root = LocalItemId::ROOT;
+    bridge.announce_directories([root]);
+    let first = bridge.directories.lock().unwrap()[&root];
+    for _ in 0..5000 { bridge.announce_directories([root]); }
+    let pending = bridge.directories.lock().unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[&root], first);
+    drop(pending);
+    bridge.stop();
+    assert!(bridge.directories.lock().unwrap().is_empty());
+}

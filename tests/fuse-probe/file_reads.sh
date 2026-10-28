@@ -55,7 +55,7 @@ download_cut_off_keeps_what_it_has_and_goes_on_from_there() {
     # As many as the download tries before it gives up.
     onedrive cut X 20971520 3 > /dev/null
     check_holds "the download fails" "$(daemon hydrate "$F/big.bin")" "refused"
-    check "the file is not shown as downloaded" "$(state_of big.bin)" online-only
+    check "the exhausted download is shown as failed" "$(state_of big.bin)" failed
     local left
     left=$(daemon staged)
     check_holds "the first half is kept, unfinished" "$left" "[(20971520, Some("
@@ -155,6 +155,9 @@ many_files_read_at_once_all_get_their_content() {
     seed_folder M R many
     for n in $(seq -w 1 200); do seed_file M$n M f$n.txt "the content of file $n, which no other file has"; done
     register_folder read-only
+    # This scenario exercises the transfer pool with 200 deliberate concurrent reads.
+    # The guard's cutoff is exercised separately in download_guard.sh.
+    daemon guard enabled off > /dev/null
     mkdir "$SRC/got"
     chown 1000:1000 "$SRC/got"
     user "ls many | xargs -P 64 -I{} sh -c 'cat many/{} > $SRC/got/{} 2> /dev/null || echo {} >> $SRC/refused'"
@@ -174,7 +177,7 @@ download_onto_a_full_disk_fails_and_works_once_there_is_room() {
     user "dd if=/dev/zero of=../ballast bs=1M 2> /dev/null; dd if=/dev/zero of=../ballast bs=1 oflag=append conv=notrunc 2> /dev/null; sync; truncate -s -2M ../ballast; sync"
     check_read_gives_the_file_or_fails big.bin X
     check_holds "a download asked for by name is refused" "$(daemon hydrate "$F/big.bin")" "refused"
-    check "the file is not shown as downloaded" "$(state_of big.bin)" online-only
+    check "the exhausted download is shown as failed" "$(state_of big.bin)" failed
     check "the folder still answers" "$(user "ls")" big.bin
     user "rm ../ballast; sync"
     check "with room again, the download goes through" "$(daemon hydrate "$F/big.bin")" downloaded

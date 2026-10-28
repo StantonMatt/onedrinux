@@ -14,6 +14,7 @@
 
 mod atomic;
 mod config_trouble;
+mod download_guard;
 mod ids;
 pub(crate) mod migrate;
 mod model;

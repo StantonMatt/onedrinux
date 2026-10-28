@@ -1,6 +1,6 @@
 {
     "KPlugin": {
-        "Description": "Shows whether each file in the KOneDrive folder is online-only, downloading or downloaded",
+        "Description": "Shows whether each file and folder in the KOneDrive folder is online-only, downloading, downloaded or kept on this device",
         "Icon": "cloudstatus",
         "Name": "KOneDrive file states"
     }

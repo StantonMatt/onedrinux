@@ -53,3 +53,8 @@ Action=Popup
 Name=New release
 Comment=A newer release of KOneDrive is out on GitHub
 Action=Popup
+
+[Event/downloadsBlocked]
+Name=App's downloads blocked
+Comment=An app downloaded many files from OneDrive in a short time; its downloads are blocked until you allow them
+Action=Popup

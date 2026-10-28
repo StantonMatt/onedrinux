@@ -122,6 +122,18 @@ async fn main() {
             }
         }
         let answer = match words.as_slice() {
+            ["guard", "enabled", choice] => said(persist.store.set_download_guard(*choice == "on").map(|()| "saved".into()).map_err(|e| e.to_string())),
+            ["guard", "limits", files, bytes, seconds] => said((|| {
+                persist.store.set_guard_thresholds(files.parse().map_err(|_| "bad files")?, bytes.parse().map_err(|_| "bad bytes")?, seconds.parse().map_err(|_| "bad seconds")?).map_err(|e| e.to_string())?;
+                Ok("saved".into())
+            })()),
+            ["guard", "rule", policy, identity] => said(persist.store.set_guard_app(identity, policy).map(|()| "saved".into()).map_err(|e| e.to_string())),
+            ["backing-bytes", paths @ ..] => {
+                let paths: Vec<_> = paths.iter().map(|path| PathBuf::from(*path)).collect();
+                testing::allocated_bytes(&service, &paths).map_or_else(|| "unavailable".into(), |bytes| bytes.to_string())
+            }
+            ["guard", "free", identity] => { let (files, bytes) = service.free_app_downloads(identity).await; format!("{files} files {bytes} bytes") },
+            ["guard", "apps"] => persist.store.guard().apps().iter().map(|app| format!("{} {} {} {} {} {}", app.identity, app.policy, app.blocked, app.reason, app.files, app.bytes)).collect::<Vec<_>>().join(" | "),
             ["staged"] => format!("{:?}", testing::staged(&service).await),
             ["register", p] => said(service.register_root(&path(p)).await.map(|()| "registered".into()).map_err(|e| e.to_string())),
             ["forget"] => said(service.unregister_root().await.map(|()| "forgotten".into()).map_err(|e| e.to_string())),

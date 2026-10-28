@@ -11,6 +11,8 @@ use nix::sys::stat::Mode;
 use xattr::FileExt;
 
 pub const XATTR_ITEM_ID: &str = "user.konedrive.item-id";
+/// File download state; on directories, recursive file aggregate (failed > hydrating
+/// > online-only > hydrated). See docs/design/mount.md.
 pub const XATTR_STATE: &str = "user.konedrive.state";
 pub const XATTR_ROOT: &str = "user.konedrive.root";
 /// On a OneDrive folder's root directory: the drive id of the account it shows. A folder
@@ -22,7 +24,7 @@ pub const XATTR_PROGRESS: &str = "user.konedrive.progress";
 /// directory's above it. The mount answers it from the store's pins and writes nothing on
 /// disk; the Dolphin plugin reads it by name (`docs/design/pinning.md` §2.2).
 pub const XATTR_PIN: &str = "user.konedrive.pin";
-/// On an item with a change waiting to go up: `pending`, `uploading` or `blocked`. The
+/// On a file with a change waiting to go up (recursive aggregate on directories): `pending`, `uploading` or `blocked`. The
 /// mount answers it from the row and the plan and writes nothing on disk; Dolphin's
 /// emblem plugin reads it as it reads the state (`docs/design/writes.md` §7).
 pub const XATTR_SYNC: &str = "user.konedrive.sync";
@@ -30,6 +32,7 @@ pub const XATTR_SYNC: &str = "user.konedrive.sync";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
     OnlineOnly,
+    Failed,
     Hydrating,
     Hydrated,
 }
@@ -38,6 +41,7 @@ impl State {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::OnlineOnly => "online-only",
+            Self::Failed => "failed",
             Self::Hydrating => "hydrating",
             Self::Hydrated => "hydrated",
         }
@@ -50,6 +54,7 @@ impl FromStr for State {
     fn from_str(value: &str) -> Result<Self, ()> {
         match value {
             "online-only" => Ok(Self::OnlineOnly),
+            "failed" => Ok(Self::Failed),
             "hydrating" => Ok(Self::Hydrating),
             "hydrated" => Ok(Self::Hydrated),
             _ => Err(()),

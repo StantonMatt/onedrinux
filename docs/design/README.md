@@ -18,6 +18,7 @@ holds between them, and why.
 | This page | The overview: the processes, a read and a write from start to finish, the invariants everything else serves, the words |
 | [sync.md](sync.md) | The item and its three versions, who writes what, the listing, the sync plan, a step and what it remembers, the plan's task, a folder's start and stop, how the model is tested |
 | [mount.md](mount.md) | The mount and the backing directory: what each request of the kernel does, reading a file that is not on disk, downloads, freeing up space, the start-up check, the mount's end |
+| [download-guard.md](download-guard.md) | Caller identities, background refusals, app budgets, disk reserves and the UI bus contract |
 | [writes.md](writes.md) | Uploads: the access mode, what a program's change does, the requests to OneDrive, conflicts, what holds sending back (pausing, the automatic hold, throttling), what the bus shows of what waits, the test account |
 | [pinning.md](pinning.md) | "Always keep on this device": the pin, what a pin downloads and keeps, freeing up around pins, and how the bus, the command line and Dolphin show it |
 | [accounts.md](accounts.md) | Several accounts, each with its own folder: what an account is, the configuration and each account's files, keeping accounts apart, adding and removing |
@@ -71,7 +72,7 @@ chosen, [accounts.md](accounts.md)); the design was measured on Linux 7.2.
 | `konedrived` | the user; systemd user service, D-Bus activated | Everything, for each of the user's accounts: sign-in and tokens, the listing, the store, the mount and its answers to the kernel, the downloads, the sync plan and its steps, the uploads, thumbnails, the D-Bus API | Run with any privilege |
 | `konedrive` (KOneDrive) | the user | The window and tray icon: shows what the daemon publishes and calls its methods | Touch the folder itself |
 | `konedrivectl` | the user | The command line for every feature of the window, plus developer commands | — |
-| Dolphin plugins | inside Dolphin | Emblems from the daemon's answer for a file or a folder; "Always keep on this device", "Free up space" and "Open in OneDrive" in the context menu | Open a file in the folder |
+| Dolphin plugins | inside Dolphin | Emblems from the daemon's answer for a file or a folder; "Always keep on this device", "Free up space" and "View Online" in the context menu | Open a file in the folder |
 
 The mount is put on and taken off with `fusermount3`, the setuid program of the `fuse3` package,
 as every FUSE filesystem of an ordinary user is. It is `nosuid` and `nodev`, without `allow_other`:

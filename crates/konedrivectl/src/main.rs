@@ -82,6 +82,7 @@ async fn main() -> ExitCode {
 fn takes_no_account(command: &Cmd) -> Option<&'static str> {
     match command {
         Cmd::SetClientId { .. } => Some("the client ID is one for every account"),
+        Cmd::Guard { .. } => Some("the download guard is one for every account"),
         Cmd::Settings { .. } => Some("the settings are one for every account"),
         Cmd::Account { command: AccountCmd::List } => Some("`account list` shows every account"),
         Cmd::Account { command: AccountCmd::Add } => Some("`account add` adds a new account"),
@@ -112,6 +113,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     match command {
         Cmd::Account { command } => account(&daemon, option, command).await,
         Cmd::SetClientId { id } => set_client_id(&daemon, &id).await,
+        Cmd::Guard { command } => commands::guard::guard(&daemon, command).await,
         Cmd::Settings { command } => settings(&daemon, command).await,
         Cmd::Login => login(&daemon, option).await,
         Cmd::Logout => {

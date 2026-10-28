@@ -67,6 +67,8 @@ pub(crate) struct ItemInotifyBridge {
     page_cache: std::sync::OnceLock<Arc<dyn KernelPageCache>>,
     queued: std::sync::Mutex<std::collections::VecDeque<Vec<ItemAnnouncement>>>,
     in_progress: std::sync::Mutex<Option<ItemAnnouncement>>,
+    directories: std::sync::Mutex<std::collections::BTreeMap<LocalItemId, std::time::Instant>>,
+    last_was_directory: std::sync::atomic::AtomicBool,
     is_queued: std::sync::Condvar,
     thread_id: std::sync::OnceLock<u32>,
     is_stopping: std::sync::atomic::AtomicBool,
@@ -80,7 +82,7 @@ impl ItemInotifyBridge {
     /// daemon's leaves, since every runner of steps and the downloader announce through
     /// it; the thread (`start`, and the performing by path) with the reading requests.
     pub(super) fn new(folder: PathBuf) -> Self {
-        ItemInotifyBridge { folder, read_connections: std::sync::OnceLock::new(), page_cache: std::sync::OnceLock::new(), queued: std::sync::Mutex::default(), in_progress: std::sync::Mutex::new(None), is_queued: std::sync::Condvar::new(), thread_id: std::sync::OnceLock::new(), is_stopping: std::sync::atomic::AtomicBool::new(false), thread: std::sync::Mutex::new(None) }
+        ItemInotifyBridge { directories: Default::default(), last_was_directory: Default::default(), folder, read_connections: std::sync::OnceLock::new(), page_cache: std::sync::OnceLock::new(), queued: std::sync::Mutex::default(), in_progress: std::sync::Mutex::new(None), is_queued: std::sync::Condvar::new(), thread_id: std::sync::OnceLock::new(), is_stopping: std::sync::atomic::AtomicBool::new(false), thread: std::sync::Mutex::new(None) }
     }
 
     /// Starts the bridge's thread, which reads the paths of what it announces through a
@@ -207,6 +209,33 @@ impl ItemInotifyBridge {
         self.is_queued.notify_one();
     }
 
+    /// Fixed 100 ms debounce windows per directory. Subsequent changes join the
+    /// existing window rather than postponing it indefinitely during a large download.
+    pub(super) fn announce_directories(&self, directories: impl IntoIterator<Item = LocalItemId>) {
+        let _queued = crate::panic::lock(&self.queued);
+        if self.is_stopping.load(std::sync::atomic::Ordering::SeqCst) { return; }
+        let due = std::time::Instant::now() + std::time::Duration::from_millis(100);
+        let mut pending = crate::panic::lock(&self.directories);
+        for directory in directories { pending.entry(directory).or_insert(due); }
+        self.is_queued.notify_one();
+    }
+
+    fn directory_announcements(&self, ids: Vec<LocalItemId>) -> Vec<ItemAnnouncement> {
+        let Some(connections) = self.read_connections.get() else { return Vec::new() };
+        connections.read(|reader| {
+            let mut announcements = Vec::new();
+            for id in ids {
+                if let Some(item) = reader.find_item(id)?.filter(|item| item.local.is_some()) {
+                    let place = if id == LocalItemId::ROOT {
+                        Some(konedrive_tree::ItemPlace { parent_local_item_id: id, name: std::ffi::OsString::new() })
+                    } else { item.local.and_then(|local| local.place) };
+                    if let Some(place) = place { announcements.push(ItemAnnouncement::MarksChanged { item: id, place }); }
+                }
+            }
+            Ok(announcements)
+        }).unwrap_or_else(|error| { tracing::warn!("directory attributes could not be announced: {error}"); Vec::new() })
+    }
+
     /// What is queued and not performed yet, a change after the other: for the tests of
     /// what announces — a step towards the folder, a download, a free-up — over a bridge
     /// whose thread was not started, which is the one way to see what they announced.
@@ -236,10 +265,28 @@ impl ItemInotifyBridge {
             if self.is_stopping.load(std::sync::atomic::Ordering::SeqCst) {
                 return None;
             }
-            if let Some(announcements) = queued.pop_front() {
-                return Some(announcements);
+            // Alternate when both classes have work, so sustained aggregate changes
+            // cannot starve file announcements (especially page-cache invalidations).
+            if self.last_was_directory.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                if let Some(announcements) = queued.pop_front() { return Some(announcements); }
             }
-            queued = self.is_queued.wait(queued).unwrap_or_else(std::sync::PoisonError::into_inner);
+            let now = std::time::Instant::now();
+            let (due, next) = {
+                let mut pending = crate::panic::lock(&self.directories);
+                let due: Vec<_> = pending.iter().filter(|(_, time)| **time <= now).map(|(id, _)| *id).collect();
+                for id in &due { pending.remove(id); }
+                (due, pending.values().min().copied())
+            };
+            if !due.is_empty() {
+                self.last_was_directory.store(true, std::sync::atomic::Ordering::Relaxed);
+                drop(queued);
+                return Some(self.directory_announcements(due));
+            }
+            if let Some(announcements) = queued.pop_front() { return Some(announcements); }
+            queued = match next {
+                Some(next) => self.is_queued.wait_timeout(queued, next.saturating_duration_since(now)).unwrap_or_else(std::sync::PoisonError::into_inner).0,
+                None => self.is_queued.wait(queued).unwrap_or_else(std::sync::PoisonError::into_inner),
+            };
         }
     }
 
@@ -260,6 +307,7 @@ impl ItemInotifyBridge {
             let mut queued = crate::panic::lock(&self.queued);
             self.is_stopping.store(true, std::sync::atomic::Ordering::SeqCst);
             queued.clear();
+            crate::panic::lock(&self.directories).clear();
             // Under the queue's lock: the thread is either before its look at the flag or
             // in its wait.
             self.is_queued.notify_all();

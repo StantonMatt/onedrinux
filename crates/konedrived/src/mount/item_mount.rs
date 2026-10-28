@@ -84,6 +84,8 @@ pub(crate) struct ItemMountSetup {
     pub(crate) report: Report,
     pub(crate) pool: Arc<TransferPool>,
     pub(crate) split_download_share: Arc<Share>,
+    pub(crate) download_guard: Arc<crate::download_guard::DownloadGuard>,
+    pub(crate) free_space_reserve: Arc<dyn Fn() -> u64 + Send + Sync>,
     /// `[transfers] download_after`.
     pub(crate) download_after: u64,
     /// The folder's tree lock: each job of the write-operation thread runs under it, and
@@ -353,8 +355,16 @@ impl ItemMount {
     /// in bytes; `None` when it cannot be measured. What the plan's task asks before it
     /// starts the download of a pinned file (`sync_plan_task::disk_space`).
     pub(crate) fn free_space_reader(&self) -> Arc<dyn Fn() -> Option<u64> + Send + Sync> {
-        let backing_directory = Arc::clone(&self.backing_directory);
-        Arc::new(move || backing_directory.measure_free_space().ok())
+        let downloader = Arc::clone(&self.folder_step_parts.downloader);
+        Arc::new(move || downloader.free_space_for_plan())
+    }
+
+    /// Test-only allocation facts from the backing descriptor, without FUSE's cached
+    /// attributes. The VM uses this to verify the bytes a reclamation really returned.
+    #[cfg(any(test, feature = "fault-injection"))]
+    pub(crate) fn allocated_file_bytes(&self, relative: &std::path::Path) -> Option<u64> {
+        use std::os::unix::fs::MetadataExt;
+        self.backing_directory.read_metadata(relative).map(|metadata| metadata.blocks() * 512)
     }
 
     /// The directory on disk the mount lies over: for the measure of the folder's space.

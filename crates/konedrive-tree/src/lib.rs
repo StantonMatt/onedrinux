@@ -13,10 +13,18 @@ use std::path::PathBuf;
 
 use rusqlite::Connection;
 
+/// Locks the observer slot, also after a callback panicked. Replacing the slot is
+/// one assignment; invoking its callback does not change the slot itself.
+pub(crate) fn lock<T: ?Sized>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 mod activity;
 mod conflicts;
 mod folded_name;
 mod item_store;
+mod item_changes;
+pub use item_changes::ItemChanges;
 mod meta;
 mod model;
 mod path_column;

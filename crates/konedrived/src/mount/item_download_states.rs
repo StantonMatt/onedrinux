@@ -30,7 +30,7 @@
 //! or joins the one that runs and has no answer yet, which asks OneDrive anew
 //! (`item_kernel_requests`). Only an answer that states a version or a size
 //! that disagrees is remembered so; a file OneDrive does not have and a size it did not
-//! say are failures like any other ([`finish`](ItemDownloadStates::finish)). The latest
+//! say are failures like any other ([`finish_with_failure`](ItemDownloadStates::finish_with_failure)). The latest
 //! [`ANOTHER_CONTENTS_REMEMBERED`] are kept.
 //!
 //! **Tested without the rest:**
@@ -174,6 +174,7 @@ struct States {
     by_key: HashMap<DownloadKey, State>,
     /// No download is started any more.
     is_stopped: bool,
+    failures: HashMap<DownloadKey, bool>,
 }
 
 /// A running download taken out of the states: who waited for it, the file it wrote
@@ -275,6 +276,7 @@ fn list_another_content_numbers(states: &HashMap<DownloadKey, State>) -> impl It
 /// The download states of one mount.
 pub(crate) struct ItemDownloadStates {
     states: std::sync::Mutex<States>,
+    pub(crate) changes: crate::sync_parts::state_changes::StateChanges,
     bytes_read_as_ranges: std::sync::Mutex<HashMap<LocalItemId, u64>>,
     /// `[transfers] download_after`.
     download_after: u64,
@@ -285,7 +287,7 @@ pub(crate) struct ItemDownloadStates {
 impl ItemDownloadStates {
     /// No download runs. Made by the mount's build.
     pub(super) fn new(download_after: u64) -> Self {
-        ItemDownloadStates { states: std::sync::Mutex::default(), bytes_read_as_ranges: std::sync::Mutex::default(), download_after, last_run_number: AtomicU64::new(0) }
+        ItemDownloadStates { changes: Default::default(), states: std::sync::Mutex::default(), bytes_read_as_ranges: std::sync::Mutex::default(), download_after, last_run_number: AtomicU64::new(0) }
     }
 
     /// A download of `key` is asked for by `asker`: joined when one runs, started
@@ -333,6 +335,8 @@ impl ItemDownloadStates {
             another_content,
         };
         states.by_key.insert(key.clone(), running);
+        drop(states);
+        self.changes.changed(vec![key.item]);
         ItemDownloadStart::Started { run: DownloadRun { key: key.clone(), number }, unfinished_file }
     }
 
@@ -384,7 +388,7 @@ impl ItemDownloadStates {
     ///
     /// The state is changed here, at once. What the aborted task still says of its
     /// download — its guard's [`abandon`](Self::abandon), a late
-    /// [`finish`](Self::finish) — is of a `DownloadRun` that runs no more, and changes
+    /// [`finish_with_failure`](Self::finish_with_failure) — is of a `DownloadRun` that runs no more, and changes
     /// nothing, whatever runs for the key by then.
     pub(super) fn abort_if_plan_alone_asked(&self, key: &DownloadKey) -> bool {
         let taken = {
@@ -397,6 +401,7 @@ impl ItemDownloadStates {
             taken
         };
         taken.abort();
+        self.changes.changed(vec![key.item]);
         true
     }
 
@@ -442,6 +447,10 @@ impl ItemDownloadStates {
         }
     }
 
+    pub(super) fn is_running(&self, key: &DownloadKey) -> bool {
+        matches!(crate::panic::lock(&self.states).by_key.get(key), Some(State::Running { .. }))
+    }
+
     /// The file and the watermark of the running download of `key`: a read of a range it
     /// has written already is answered from it. Called by read.
     ///
@@ -463,19 +472,33 @@ impl ItemDownloadStates {
     /// the failure that stands for the key
     /// ([`find_another_content`](Self::find_another_content)). Nothing for a download
     /// that runs no more — it was aborted, or this is said twice.
+    #[cfg(test)]
     pub(super) fn finish(&self, run: &DownloadRun, outcome: Result<(), i32>) {
+        self.finish_with_failure(run, outcome, outcome.is_err());
+    }
+
+    /// `failed` means the downloader exhausted its source retries, or could not land
+    /// the content. Account-wide holds, a stopped step and stale content are excluded.
+    pub(super) fn finish_with_failure(&self, run: &DownloadRun, outcome: Result<(), i32>, failed: bool) {
         let key = &run.key;
         let waiters = {
             let mut states = crate::panic::lock(&self.states);
             if !is_running(&states.by_key, run) {
                 return;
             }
+            let asked_beyond_plan = matches!(states.by_key.get(key), Some(State::Running { is_asked_beyond_plan, .. }) if *is_asked_beyond_plan.borrow());
             let Some(taken) = take_running(&mut states.by_key, key) else { return };
             if let Err(errno) = outcome {
                 keep_left_by_download(&mut states.by_key, key, &taken, Some(errno));
             }
+            if outcome.is_ok() {
+                states.failures.remove(key);
+            } else if failed && !matches!(outcome, Err(libc::ESTALE | libc::EINTR | libc::EAGAIN)) {
+                *states.failures.entry(key.clone()).or_default() |= asked_beyond_plan;
+            }
             taken.waiters
         };
+        self.changes.changed(vec![key.item]);
         if outcome.is_ok() {
             // Downloaded: what was read of it as ranges counts no more.
             crate::panic::lock(&self.bytes_read_as_ranges).remove(&key.item);
@@ -491,7 +514,7 @@ impl ItemDownloadStates {
     /// ([`is_another_content`](Self::is_another_content)), among the latest
     /// [`ANOTHER_CONTENTS_REMEMBERED`]. Nothing for a download that runs no more. A
     /// download OneDrive answered with no such file, or with nothing to tell the content
-    /// by, did not end so: it failed ([`finish`](Self::finish)).
+    /// by, did not end so: it failed ([`finish_with_failure`](Self::finish_with_failure)).
     pub(super) fn finish_as_another_content(&self, run: &DownloadRun) {
         let waiters = {
             let mut states = crate::panic::lock(&self.states);
@@ -502,6 +525,7 @@ impl ItemDownloadStates {
             remember_another_content(&mut states.by_key, &run.key, AnotherContentFact { number: run.number, failed_asking: None });
             taken.waiters
         };
+        self.changes.changed(vec![run.key.item]);
         for waiter in waiters {
             let _ = waiter.send(Err(libc::ESTALE));
         }
@@ -565,6 +589,7 @@ impl ItemDownloadStates {
             }
             taken
         };
+        self.changes.changed(vec![run.key.item]);
         for waiter in taken.into_iter().flat_map(|taken| taken.waiters) {
             let _ = waiter.send(Err(libc::EIO));
         }
@@ -589,6 +614,21 @@ impl ItemDownloadStates {
                 State::AnotherContent { .. } => None,
             })
             .collect()
+    }
+
+    /// A whole download of this exact content gave up after retries or failed to land.
+    /// Separate from the bounded cache of unfinished file descriptors.
+    pub(super) fn has_failed_download(&self, key: &DownloadKey, is_pinned: bool) -> bool {
+        crate::panic::lock(&self.states).failures.get(key).is_some_and(|beyond_plan| is_pinned || *beyond_plan)
+    }
+
+    /// The effective pin was removed. A later pin must not revive its old failure;
+    /// requests beyond the plan still need successful recovery.
+    pub(super) fn forget_pin_failure(&self, key: &DownloadKey) {
+        let mut states = crate::panic::lock(&self.states);
+        if states.failures.get(key) == Some(&false) {
+            states.failures.remove(key);
+        }
     }
 
     /// Whether a download of `item` runs, of any content: the state attribute, free-up.
@@ -617,7 +657,9 @@ impl ItemDownloadStates {
     pub(crate) fn forget_item(&self, item: LocalItemId) {
         // The unfinished files of every content of it, and what was remembered of each; a
         // download of it that runs is left to its landing, which finds the row changed.
-        crate::panic::lock(&self.states).by_key.retain(|key, state| match state {
+        let mut states = crate::panic::lock(&self.states);
+        states.failures.retain(|key, _| key.item != item);
+        states.by_key.retain(|key, state| match state {
             State::Running { another_content, .. } => {
                 if key.item == item {
                     *another_content = None;
@@ -626,6 +668,8 @@ impl ItemDownloadStates {
             }
             State::Failed { .. } | State::AnotherContent { .. } => key.item != item,
         });
+        drop(states);
+        self.changes.changed(vec![item]);
         crate::panic::lock(&self.bytes_read_as_ranges).remove(&item);
     }
 

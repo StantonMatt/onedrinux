@@ -120,18 +120,29 @@ refreshes, pauses for 2, 8 or 24 hours or until resumed, resumes, and quits.
 
 In the OneDrive folder every file and folder has an emblem:
 
-- a cloud — only in OneDrive, takes no space;
-- sync arrows — downloading or freeing up;
-- a check mark — downloaded;
-- a filled check — always kept on this device.
+- a blue cloud — only in OneDrive, takes no space;
+- blue circling arrows — downloading, about to be downloaded because it is always kept, or waiting
+  to be uploaded;
+- a green check in a ring — downloaded;
+- a solid green check — always kept on this device;
+- a red square with an X — something needs attention: a change that can't be uploaded (Issues
+  says why), or a file that couldn't be downloaded for now.
+
+A folder's emblem sums up what is inside it: the red square if anything in it needs attention,
+the arrows if anything in it is moving, the solid check if it is always kept, the cloud if any
+file in it is only in OneDrive, and the check in a ring once everything in it is downloaded.
+
+The Details view shows small emblems; zoom it in to 32 px icons or more (View → Zoom In) for
+bigger ones.
 
 The right-click menu has, under **OneDrive**:
 
 - **Always Keep on This Device** — downloads it and keeps it, for a file or a whole folder; what
   comes into a pinned folder later is downloaded too. Status says how many files are still to
   download, how much the folder takes on this computer, and how much of it is always kept;
-- **Free Up Space** — makes it online-only again, and unpins it;
-- **Open in OneDrive** — opens its page in OneDrive's web interface, where it can be shared and its
+- **Free Up Space** — makes it online-only again, and unpins it. It is greyed out for a file that
+  is only in OneDrive already, and for one with changes not uploaded yet;
+- **View Online** — opens its page in OneDrive's web interface, where it can be shared and its
   versions seen. With two personal accounts this opens under the account your browser is signed in
   to (limitations log, F295).
 
@@ -268,6 +279,55 @@ To move or remove something in OneDrive, do it while the service runs.
 - **Removing**: first **Disconnect This OneDrive…** for every account, then
   `sudo dnf remove konedrive konedrive-kde`. A folder still registered when the package goes
   stays locked, and shows only the files that are on this computer.
+
+## Downloads requested by programs
+
+The download guard is on by default. It prevents thumbnailers and indexers from fetching
+cloud-only content, and stops an app before it reads more than 30 distinct files or 2 GiB in
+10 minutes. This also limits recursive searches and backups. Files already on this computer
+remain readable. Opening a file in its app still fetches it within those limits; a large file
+or bulk copy can need an allowance. KIO file copies work, while Dolphin's automatic MIME
+sniffing and thumbnail workers cannot fetch content. Some ambiguous file types can therefore
+show a generic icon until opened or explicitly downloaded.
+
+If an open says "Permission denied", `konedrivectl guard apps` shows the caller and reason.
+Use `konedrivectl guard allow '<identity>'` for this daemon session, or add `--always` to
+remember it. `guard block '<identity>'` always blocks it; `guard reset '<identity>'` restores
+automatic rules and clears its counters. Background-reader rules still apply to allowed apps.
+The [command-line guide](command-line.md#download-guard) lists settings and thresholds.
+
+"Always keep on this device", explicit hydrate and "Free up space" bypass the app guard.
+The existing thumbnails setting still controls Graph's small cached previews. If a whole
+read-triggered download would use the disk's reserve, reads fetch only their requested ranges
+and do not keep a whole copy. For an application that cannot mmap a cloud-only file on an
+older kernel, hydrate the file explicitly first.
+
+## When an app's downloads are blocked
+
+When an app downloads more than the limits allow, a notification says so ("Too many downloads by
+Konsole"), and the app cannot download anything more from OneDrive until you choose:
+
+- **Allow for This Session**: it downloads freely until the KOneDrive service restarts, normally
+  until you log out.
+- **Always Allow**: it is never counted again.
+- **Always Block**: it never downloads from OneDrive. Files already on this computer stay readable.
+- **Free Up What It Downloaded**: what its reads downloaded since the service started becomes
+  online-only again, except files that are open, changed or kept on this device. It stays blocked.
+
+After allowing it, open the file again in the app: a refused read is not retried by itself.
+
+The notification goes after a while; the app stays on the Status page under **Blocked apps** until
+you choose, and in **Settings → Sync** under **Blocked and Allowed Apps**, with the same buttons
+(Always Block and Free Up What It Downloaded are in the ⋮ menu). Apps you allowed or always block
+are listed there too: **Remove** takes the rule away, and the app is counted from zero again. A
+program KOneDrive cannot identify is refused with a "Download blocked" notification, and can't
+be allowed. Indexers and thumbnailers are refused without a notification: with the guard on, a file
+only in OneDrive gets the small preview OneDrive makes, if "Previews without downloading" is on,
+or none, and is never downloaded for a preview.
+
+**Block bulk downloads**, in the same place, turns the guard off and on; **Change Limits…** sets
+how many files, how many GiB and within how many minutes. With it off, any app can download your
+whole OneDrive; the apps you allowed or blocked are kept for when it is on again.
 
 ## Troubleshooting
 

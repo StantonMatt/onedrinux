@@ -74,7 +74,7 @@ These rules hold for every change:
 2. **Tests are never in a source file.** The unit tests of `x.rs` are in `x/tests.rs`, or in
    `x/tests/` by topic. Integration tests stay in `crates/*/tests/`.
 3. **Layers.** In `konedrived`, a directory of `crates/konedrived/src` uses only the
-   directories before it in this order: `config/`, `account/`, `folder/`,
+   directories before it in this order: `download_guard/`, `config/`, `account/`, `folder/`,
    `conditions/`, `status/`, `content_source/`, `local/`, `sync_parts/`, `mount/`, `folder_steps/`,
    `onedrive_steps/`, `listing/`, `desktop/`, `upload_queue/`, `sync_plan_task/`, `sync_tasks/`,
    `account_folder/`, `daemon/`, `dbus/`. And `listing/` does not use `onedrive_steps/`. Test code is exempt. What a lower
@@ -107,7 +107,7 @@ scripts/check-structure.sh
 7. **Locks.** A lock of `std::sync` is taken through `crate::panic::lock`, `read` or `write`,
    which go on after a holder of the lock panicked; never with `.lock().unwrap()` or a
    recovery written out. What is done under such a lock must therefore not be able to leave
-   its data half-changed. `konedrive-graph` has a function of its own
+   its data half-changed. `konedrive-graph` and `konedrive-tree` have functions of their own
    for it. Not asked of test code, test doubles and the files that hold those
    functions. What the guard does with this rule:
 

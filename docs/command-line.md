@@ -150,6 +150,44 @@ konedrivectl settings on-battery [sync | power-saver | pause]
 `settings on-metered` and `settings on-battery` show the setting when no choice is given. They
 hold for every account.
 
+## Download guard
+
+The guard is on by default, across every account. It refuses background readers of files
+that are not on this computer. An app that would read more than 30 distinct files or 2 GiB
+within 10 minutes is blocked until allowed or reset; files already downloaded stay readable.
+
+```
+konedrivectl guard status
+konedrivectl guard apps
+konedrivectl guard allow 'app:org.kde.okular'             # this daemon session
+konedrivectl guard allow 'exe:/usr/bin/rg' --always      # persist the allowance
+konedrivectl guard block 'exe:/usr/bin/backup-tool'      # persist the block
+konedrivectl guard free 'exe:/usr/bin/rg'                # free what its reads downloaded
+konedrivectl guard reset 'exe:/usr/bin/rg'               # automatic rules, fresh counters
+konedrivectl guard thresholds --files 30 --bytes 2147483648 --seconds 600
+konedrivectl guard enable off                           # or on; persisted
+```
+
+Use the exact identity printed by `guard apps`. The columns are identity, display name,
+policy, blocked/seen, admitted files, reserved bytes and reason. Byte totals include requests
+and whole-download reservations, not only traffic received. Thresholds must be positive.
+These commands refuse `--account` and ignore `KONEDRIVE_ACCOUNT`.
+
+`guard free ID` prints the files and allocated bytes actually freed across accounts. It
+reclaims whole copies attributed to that app's reads during this daemon session. Kept/pinned,
+changed or uploading files, open readers/writers and running transfers are skipped. Explicit
+hydrate or pin protects a copy from this action, even after unpin. It leaves the cloud files
+and app's block intact; unknown identities and repeated calls with nothing eligible print
+zero. Attribution is memory-only and capped at 10,000 entries across apps/accounts; further
+downloads are untracked until entries become available. Range-only reads store no whole copy.
+
+A permission error on a cloud-only file may be the guard. `guard apps` explains which program
+was refused. Allowances do not override the background-reader list; its deliberate override is
+in `config.toml` ([design/download-guard.md](design/download-guard.md)). Dolphin MIME sniffing
+and KIO thumbnail workers are background readers; KIO file copies remain eligible. Explicit
+`sync hydrate`, `sync pin` and `sync free` bypass the guard. When disk space is below the
+account's reserve, normal reads can stay as ranges without keeping a whole local copy.
+
 ## Other
 
 ```

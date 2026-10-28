@@ -54,6 +54,16 @@ pub async fn staged(service: &SyncService) -> Vec<(u64, Option<u64>)> {
     unfinished.into_iter().map(|(_, bytes_on_disk, checkpoint)| (bytes_on_disk, checkpoint)).collect()
 }
 
+/// Actual backing allocations of the requested paths in the test's own mount. This
+/// bypasses stale FUSE stat attributes after a read-triggered landing.
+pub fn allocated_bytes(service: &SyncService, paths: &[std::path::PathBuf]) -> Option<u64> {
+    let (mount, root) = (service.mount()?, service.root()?);
+    paths.iter().try_fold(0, |total, path| {
+        let relative = path.strip_prefix(&root.path).ok()?;
+        Some(total + mount.allocated_file_bytes(relative)?)
+    })
+}
+
 /// A clock that stands still until the test moves it. Whoever sleeps by it wakes when it
 /// has been moved far enough, however the sleep and the move fall in time.
 pub(crate) struct ManualClock {

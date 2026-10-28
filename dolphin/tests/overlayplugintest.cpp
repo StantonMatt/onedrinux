@@ -20,11 +20,11 @@ using namespace testsupport;
 
 namespace
 {
-const QStringList Cloud{QStringLiteral("cloudstatus")};
-const QStringList Syncing{QStringLiteral("state-sync")};
-const QStringList CheckOutline{QStringLiteral("dialog-ok")};
-const QStringList CheckFilled{QStringLiteral("emblem-checked")};
-const QStringList Error{QStringLiteral("state-error")};
+const QStringList Cloud{QStringLiteral("konedrive-online-only")};
+const QStringList Syncing{QStringLiteral("konedrive-syncing")};
+const QStringList CheckOutline{QStringLiteral("konedrive-downloaded")};
+const QStringList CheckFilled{QStringLiteral("konedrive-always-keep")};
+const QStringList Error{QStringLiteral("konedrive-error")};
 } // namespace
 
 class OverlayPluginTest : public QObject
@@ -78,6 +78,8 @@ private Q_SLOTS:
         QTest::newRow("hydrated, not pinned: outline check") << QByteArray("hydrated") << QStringLiteral("none") << CheckOutline;
         QTest::newRow("hydrated, pinned: filled check") << QByteArray("hydrated") << QStringLiteral("own") << CheckFilled;
         QTest::newRow("hydrated, excepted from the folder's pin: outline check") << QByteArray("hydrated") << QStringLiteral("excepted") << CheckOutline;
+        QTest::newRow("download given up: error") << QByteArray("failed") << QStringLiteral("none") << Error;
+        QTest::newRow("download given up, pinned: error") << QByteArray("failed") << QStringLiteral("own") << Error;
         QTest::newRow("no attribute: none") << QByteArray() << QStringLiteral("none") << QStringList();
         QTest::newRow("a value we do not know: none") << QByteArray("downloaded") << QStringLiteral("none") << QStringList();
     }
@@ -110,10 +112,12 @@ private Q_SLOTS:
         QTest::newRow("new here, no state yet, pending: syncing") << QByteArray() << QByteArray("pending") << Syncing;
         QTest::newRow("a new folder, pending: syncing") << QByteArray("folder") << QByteArray("pending") << Syncing;
         QTest::newRow("an upload value we do not know: the state's emblem") << QByteArray("hydrated") << QByteArray("later") << CheckFilled;
+        QTest::newRow("download given up, pending: error") << QByteArray("failed") << QByteArray("pending") << Error;
     }
 
     /// `user.konedrive.sync` wins over the state and the pin (every item
-    /// here is pinned) while it is there.
+    /// here is pinned) while it is there, but a download given up wins over
+    /// it.
     void emblemWhileWaitingToUpload()
     {
         QFETCH(QByteArray, state);
@@ -182,10 +186,49 @@ private Q_SLOTS:
         QCOMPARE(overlays(tree.path(QStringLiteral("OneDrive/inside.bin"))), Cloud);
     }
 
-    /// An unpinned folder gets no emblem, and a symbolic link never does --
-    /// it does not borrow the state or the pin of the placeholder it points
-    /// to.
-    void noEmblemOnUnpinnedFolderOrSymlink()
+    void folderEmblemForEachState_data()
+    {
+        QTest::addColumn<QByteArray>("state"); // what the mount sums up from below the folder
+        QTest::addColumn<QByteArray>("upload");
+        QTest::addColumn<bool>("pinned");
+        QTest::addColumn<QStringList>("expected");
+        QTest::newRow("all downloaded") << QByteArray("hydrated") << QByteArray() << false << CheckOutline;
+        QTest::newRow("all downloaded, kept") << QByteArray("hydrated") << QByteArray() << true << CheckFilled;
+        QTest::newRow("online-only files below") << QByteArray("online-only") << QByteArray() << false << Cloud;
+        QTest::newRow("online-only files below, kept") << QByteArray("online-only") << QByteArray() << true << CheckFilled;
+        QTest::newRow("downloading below") << QByteArray("hydrating") << QByteArray() << false << Syncing;
+        QTest::newRow("downloading below, kept") << QByteArray("hydrating") << QByteArray() << true << Syncing;
+        QTest::newRow("uploading below") << QByteArray("hydrated") << QByteArray("uploading") << true << Syncing;
+        QTest::newRow("waiting to upload below") << QByteArray("online-only") << QByteArray("pending") << false << Syncing;
+        QTest::newRow("a download given up below") << QByteArray("failed") << QByteArray("pending") << true << Error;
+        QTest::newRow("an upload blocked below") << QByteArray("hydrating") << QByteArray("blocked") << false << Error;
+        QTest::newRow("no state (an older daemon)") << QByteArray() << QByteArray() << false << QStringList();
+        QTest::newRow("no state (an older daemon), kept") << QByteArray() << QByteArray() << true << CheckFilled;
+        QTest::newRow("a state we do not know") << QByteArray("later") << QByteArray() << false << QStringList();
+    }
+
+    /// A folder shows what the mount sums up from everything below it: an
+    /// error first, then something moving, then its pin, then online-only
+    /// files, then everything downloaded.
+    void folderEmblemForEachState()
+    {
+        QFETCH(QByteArray, state);
+        QFETCH(QByteArray, upload);
+        QFETCH(bool, pinned);
+        QFETCH(QStringList, expected);
+        Tree tree;
+        QVERIFY(tree.root(QStringLiteral("OneDrive")));
+        const QString folder = tree.path(QStringLiteral("OneDrive/folder"));
+        QVERIFY(tree.dir(QStringLiteral("OneDrive/folder")));
+        QVERIFY(state.isEmpty() || setState(folder, state));
+        QVERIFY(upload.isEmpty() || setUploadState(folder, upload));
+        QVERIFY(!pinned || testsupport::pin(folder));
+        QCOMPARE(overlays(folder), expected);
+    }
+
+    /// A symbolic link never gets an emblem -- it does not borrow the state
+    /// or the pin of the placeholder or the folder it points to.
+    void noEmblemOnSymlink()
     {
         Tree tree;
         QVERIFY(tree.root(QStringLiteral("OneDrive")));
@@ -193,9 +236,11 @@ private Q_SLOTS:
         QVERIFY(setState(tree.path(QStringLiteral("OneDrive/folder")), "online-only"));
         QVERIFY(tree.file(QStringLiteral("OneDrive/doc.bin"), "online-only"));
         QVERIFY(tree.symlink(QStringLiteral("OneDrive/doc.bin"), QStringLiteral("OneDrive/link.bin")));
-        QCOMPARE(overlays(tree.path(QStringLiteral("OneDrive/folder"))), QStringList());
+        QVERIFY(tree.symlink(QStringLiteral("OneDrive/folder"), QStringLiteral("OneDrive/folder-link")));
         QCOMPARE(overlays(tree.path(QStringLiteral("OneDrive/link.bin"))), QStringList());
+        QCOMPARE(overlays(tree.path(QStringLiteral("OneDrive/folder-link"))), QStringList());
         QCOMPARE(overlays(tree.path(QStringLiteral("OneDrive/doc.bin"))), Cloud);
+        QCOMPARE(overlays(tree.path(QStringLiteral("OneDrive/folder"))), Cloud);
     }
 
     /// A folder a pin holds for gets the filled check, same as a pinned

@@ -7,6 +7,7 @@
 #include "conflictmodel.h"
 #include "currentaccount.h"
 #include "daemoncontroller.h"
+#include "downloadguardcontroller.h"
 #include "downloadjobtracker.h"
 #include "downloadprogresscontroller.h"
 #include "downloadprogresssettings.h"
@@ -96,6 +97,9 @@ int run(int argc, char *argv[], Restart *restart)
     KNotificationSink sink;
 
     DaemonController daemon;
+    // The download guard, the whole app's, and its notifications.
+    DownloadGuardController downloadGuard;
+    GuardNotifier guardNotifier(&downloadGuard, &sink);
     AccountsModel accounts(&daemon);
     CurrentAccount current(&accounts);
     AppStatus appStatus(&accounts);
@@ -104,7 +108,7 @@ int run(int argc, char *argv[], Restart *restart)
     ServiceUnit serviceUnit;
     // Says a newer release in the foot of the sidebar, and once as a notification.
     ReleaseCheck releaseCheck(QStringLiteral(KONEDRIVE_VERSION), &sink);
-    registerKonedriveQml(&daemon, &accounts, &current, &autostart, &downloadProgressSettings, &placesSettings, &traySettings, &serviceUnit, &releaseCheck);
+    registerKonedriveQml(&daemon, &accounts, &current, &autostart, &downloadProgressSettings, &placesSettings, &traySettings, &serviceUnit, &releaseCheck, &downloadGuard);
 
     QQmlApplicationEngine engine;
     KLocalization::setupLocalizedContext(&engine);
@@ -126,9 +130,12 @@ int run(int argc, char *argv[], Restart *restart)
     });
 
     // A click on a notification opens the window on its account, where the notice is dealt
-    // with. The account first: another one shown makes its pages anew.
+    // with. The account first: another one shown makes its pages anew. One of the whole app's
+    // (the download guard's) names none, and leaves the account shown as it is.
     sink.setOpenWindow([&tray, &current, window](const QString &account, WindowSection section) {
-        current.select(account);
+        if (!account.isEmpty()) {
+            current.select(account);
+        }
         QMetaObject::invokeMethod(window, "showSection", Q_ARG(QVariant, sectionName(section)));
         tray.showWindow();
     });

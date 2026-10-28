@@ -31,7 +31,7 @@
 // MenuAnswerTimeoutMs. No answer means no entries; nothing is decided here
 // from the marks instead.
 //
-// "Open in OneDrive" is the same kind of call, WebUrl(s) -> s for one path:
+// "View online" is the same kind of call, WebUrl(s) -> s for one path:
 // the daemon asks OneDrive for the address, which takes as long as the
 // network does, and this class only hands the address on. It opens nothing.
 

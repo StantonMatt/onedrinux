@@ -118,7 +118,7 @@ void SyncClient::start(Operation operation, const QStringList &paths)
         return;
     }
 
-    // WebUrl takes one path; "Open in OneDrive" is never offered for more.
+    // WebUrl takes one path; "View online" is never offered for more.
     const QStringList asked = operation == Operation::OpenOnline ? paths.mid(0, 1) : paths;
     QStringList toSend;
     QSet<QString> sending;

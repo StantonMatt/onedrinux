@@ -117,6 +117,23 @@ private Q_SLOTS:
         QVERIFY(m_sink.sent.first().text.contains(QStringLiteral("the connection was reset")));
     }
 
+    void fileNamesAndFailureDetailsAreEscaped()
+    {
+        start();
+        const QString name = QStringLiteral("<file&A>.txt");
+        const QString detail = QStringLiteral("failure <tag> & reason");
+        report(QStringLiteral("failed"), name, detail);
+        QCOMPARE(m_sink.sent.first().text,
+                 QStringLiteral("&lt;file&amp;A&gt;.txt could not be downloaded: failure &lt;tag&gt; &amp; reason"));
+
+        const QString copy = Root + QStringLiteral("/<copy&>.txt");
+        report(QStringLiteral("conflict"), QStringLiteral("<file&>.txt"), copy);
+        const Notice &conflict = m_sink.sent.last();
+        QCOMPARE(conflict.text,
+                 QStringLiteral("&lt;file&amp;&gt;.txt changed here and in OneDrive. Kept both versions: yours is &lt;copy&amp;&gt;.txt."));
+        QCOMPARE(conflict.showPath, copy);
+    }
+
     /// A directory that cannot be removed here is told once, with why and what to do,
     /// and offers nothing to press.
     void aDirectoryNotRemovedHereNotifies()

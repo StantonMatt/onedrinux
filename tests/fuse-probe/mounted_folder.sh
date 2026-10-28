@@ -111,10 +111,11 @@ name_held_by_what_the_folder_cannot_show_is_refused() {
     check "nor at a name that differs by case" "$(errno_of "os.mkdir('Documents/it')")" EEXIST
     check "a rename to it is refused" "$(errno_of "os.rename('Documents/IT-soname-krasnov', 'Documents/IT')")" EEXIST
     user "printf 'mine' > notes.txt"
-    # What mv says of the refusal is coreutils' own: it finds nothing at the name, and is told it is taken.
+    # Coreutils chooses its diagnostic from the destination lookup. Check the refusal
+    # without fixing its wording; the errno and preservation are checked separately.
     check "mv of a directory to it is refused" "$(user "mv Documents/IT-soname-krasnov Documents/IT 2>&1")" \
         "mv: cannot overwrite non-directory 'Documents/IT' with directory 'Documents/IT-soname-krasnov'"
-    check "mv of a file to it is refused" "$(user "mv notes.txt Documents/IT 2>&1")" "mv: cannot overwrite 'Documents/IT': File exists"
+    check_holds "mv of a file to it is refused" "$(user "mv notes.txt Documents/IT 2>&1")" "mv: cannot overwrite"
     check "each stays where it was" "$(listing)" "Documents Documents/IT-soname-krasnov notes.txt"
     check "the user is told once" "$(daemon activity | grep -o NameTakenInOneDrive | wc -l)" 1
     check_sent
@@ -148,6 +149,7 @@ mounted_folder() {
     echo "==== a folder from its start to its end ===="
     ip link set lo up
     for name in \
+        directory_states_follow_descendants_and_notify_the_parent \
         start_from_nothing_shows_onedrives_files_and_reads_them \
         file_that_is_not_on_disk_is_read_in_ranges_and_then_downloaded_whole \
         changes_made_in_onedrive_arrive_in_the_folder \
@@ -156,4 +158,47 @@ mounted_folder() {
         forgotten_folder_with_unsent_changes_keeps_them_as_plain_files; do
         folder_scenario $name
     done
+}
+
+# Every folder, including the mount root, reflects recursive content without opening it.
+# Watch the ROOT while only a grandchild changes: ATTRIB docs must be synthesized by
+# the bridge; a file event in docs/deep alone cannot reach this watch.
+directory_states_follow_descendants_and_notify_the_parent() {
+    begin_folder
+    seed_folder D R docs
+    seed_folder E D deep
+    seed_folder Z R empty
+    seed_random X E data.bin 1048576
+    register_folder read-only
+    check_state . online-only
+    check_state docs online-only
+    check_state docs/deep online-only
+    check_state empty hydrated
+    check "reading directory states downloaded nothing" "$(onedrive count GET dl/)" 0
+    $U "$bin/watch-client" "$F" 12 > "$LOGS/directory-watch" &
+    local watcher=$!
+    sleep 0.3
+    onedrive delay GET dl/X 1200 1 > /dev/null
+    daemon hydrate "$F/docs/deep/data.bin" > "$LOGS/hydrate" &
+    local hydration=$!
+    check_within 3 "a grandchild download makes its ancestors hydrating" state_is docs hydrating
+    check_state . hydrating
+    wait "$hydration"
+    check_state docs/deep/data.bin hydrated
+    check_state docs hydrated
+    check_state . hydrated
+    check_within 3 "IN_ATTRIB reaches a watcher on the folder's parent" grep -q '^inotify: ATTRIB docs$' "$LOGS/directory-watch"
+    daemon free-up "$F/docs" > /dev/null
+    check_state docs online-only
+    check_state . online-only
+    onedrive delay GET dl/X 1200 1 > /dev/null
+    daemon pin "$F/docs" > /dev/null
+    check_within 3 "a pin awaiting content makes the folder hydrating" state_is docs hydrating
+    check_state . hydrating
+    check_within 20 "a pinned folder becomes hydrated" state_is docs hydrated
+    daemon unpin "$F/docs" > /dev/null
+    check_state docs hydrated
+    daemon free-up "$F/docs" > /dev/null
+    check_state docs online-only
+    wait "$watcher"
 }

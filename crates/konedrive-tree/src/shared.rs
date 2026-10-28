@@ -24,6 +24,7 @@ thread_local! {
 struct Owner {
     jobs: tokio::sync::mpsc::Sender<Job>,
     id: u64,
+    observer: std::sync::Arc<std::sync::Mutex<Option<crate::item_changes::ItemObserver>>>,
     /// True once the thread has dropped its connection ([`Store::close`]).
     closed: tokio::sync::watch::Receiver<bool>,
 }
@@ -51,7 +52,7 @@ impl Owner {
                 let _ = closing.send(true);
             })
             .expect("the tree store's thread starts");
-        Owner { jobs, id, closed }
+        Owner { jobs, id, closed, observer: Default::default() }
     }
 
     /// A call from inside one of this owner's jobs would wait for itself:
@@ -65,25 +66,33 @@ impl Owner {
     }
 
     fn job<T: Send + 'static>(
+        &self,
         f: impl FnOnce(&mut TreeStore) -> Result<T, TreeError> + Send + 'static,
     ) -> (Job, tokio::sync::oneshot::Receiver<Result<T, TreeError>>) {
         let (answer, answered) = tokio::sync::oneshot::channel();
+        let observer = self.observer.clone();
         let job: Job = Box::new(move |store| {
-            let _ = answer.send(f(store));
+            let result = f(store);
+            if let Some(observer) = &*crate::lock(&observer) {
+                if let Err(error) = observer(store) {
+                    tracing::error!("mount derived state could not be updated: {error}");
+                }
+            }
+            let _ = answer.send(result);
         });
         (job, answered)
     }
 
     async fn call<T: Send + 'static>(&self, f: impl FnOnce(&mut TreeStore) -> Result<T, TreeError> + Send + 'static) -> Result<T, TreeError> {
         self.refuse_reentry()?;
-        let (job, answered) = Self::job(f);
+        let (job, answered) = self.job(f);
         self.jobs.send(job).await.map_err(|_| stopped())?;
         answered.await.map_err(|_| failed())?
     }
 
     fn call_blocking<T: Send + 'static>(&self, f: impl FnOnce(&mut TreeStore) -> Result<T, TreeError> + Send + 'static) -> Result<T, TreeError> {
         self.refuse_reentry()?;
-        let (job, answered) = Self::job(f);
+        let (job, answered) = self.job(f);
         self.jobs.blocking_send(job).map_err(|_| stopped())?;
         answered.blocking_recv().map_err(|_| failed())?
     }
@@ -121,6 +130,19 @@ impl Store {
             reader: Default::default(),
             path,
         }
+    }
+
+    /// Installs the mount's derived-state observer. Invoked after each writer job,
+    /// before its caller is answered; it must never reenter the store. A failed
+    /// observation keeps the dirty set for the next job. Replacing it is supported
+    /// when the same store is mounted again.
+    pub fn observe_items(&self, observer: impl Fn(&crate::ItemReader<'_>, crate::ItemChanges) -> Result<(), TreeError> + Send + 'static) -> Result<(), TreeError> {
+        let target = self.owner.observer.clone();
+        self.call_blocking(move |store| {
+            let installed = crate::item_changes::install(store, observer)?;
+            *crate::lock(&target) = Some(installed);
+            Ok(())
+        })
     }
 
     /// Lets go of this handle and waits until the store's connections are closed: that is,

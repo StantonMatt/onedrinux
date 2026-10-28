@@ -41,7 +41,7 @@ BEGIN {
 
     # The daemon: its directories in layer order.
     DAEMON = "crates/konedrived/src/"
-    count = split("config account folder conditions status content_source local sync_parts mount folder_steps onedrive_steps listing desktop upload_queue sync_plan_task sync_tasks account_folder daemon sentences dbus", order, " ")
+    count = split("download_guard config account folder conditions status content_source local sync_parts mount folder_steps onedrive_steps listing desktop upload_queue sync_plan_task sync_tasks account_folder daemon sentences dbus", order, " ")
     for (i = 1; i <= count; i++)
         layer[order[i]] = i
 }
@@ -101,7 +101,7 @@ function uses(file, number, line, own, top,    text, name) {
 # function and not of test doubles (`testing.rs`, `testing/`):
 # CONTRIBUTING.md, rule 7.
 function locks_checked(file) {
-    if (file == DAEMON "panic.rs" || file == "crates/konedrive-graph/src/lib.rs")
+    if (file == DAEMON "panic.rs" || file == "crates/konedrive-graph/src/lib.rs" || file == "crates/konedrive-tree/src/lib.rs")
         return 0
     return file !~ /(^|\/)testing(\.rs$|\/)/
 }

@@ -16,6 +16,7 @@
 
 pub mod account;
 pub(crate) mod accounts;
+pub(crate) mod download_guard;
 pub(crate) mod activity_log;
 pub mod conflicts;
 #[cfg(feature = "dev-tools")]

@@ -17,6 +17,7 @@
 //! `/org/konedrive/Daemon`, the single-account object of earlier versions.
 
 pub mod accounts;
+pub mod download_guard;
 pub mod overall;
 mod refusal;
 pub mod rows;

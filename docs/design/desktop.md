@@ -220,9 +220,9 @@ The calls on one file or on chosen paths, each routed by path to the account who
 |---|---|
 | `Hydrate(s path)` | downloads one file now ([mount.md](mount.md) §5) |
 | `Dehydrate(s path)` | frees up one file ([mount.md](mount.md) §6): `NotUploaded` for one with an unsent change, `NotAllowed` for one a pin holds for, `NotHydrated` for one that is being downloaded, `InUse` for one that could not be freed after all; one that is not on disk is answered at once, as freed |
-| `ItemState(s path) → s` | `online-only`, `hydrating`, `hydrated`, or `not-managed` (a directory, a file of the user's own, a path in no folder): the folder's `user.konedrive.state`, read by name through the mount, never by opening the file |
+| `ItemState(s path) → s` | `online-only`, `hydrating`, `hydrated`, `failed`, or `not-managed` (a file of the user's own, a path in no folder): the folder's `user.konedrive.state`, read by name through the mount, never by opening the file |
 | `Pin(as) → u`, `Unpin(as) → u`, `FreeUp(as) → (u files, t bytes, u skipped_pinned)` | "Always keep on this device", unpinning, and "Free up space" for chosen paths ([pinning.md](pinning.md) §4, §4.1) |
-| `WebUrl(s path) → s url` | "Open in OneDrive": the address of the item's page in OneDrive's web interface, asked of Graph each time; an account's folder itself answers the drive's root. `NotUploaded` for an item OneDrive does not have yet, `NotSignedIn`, `Unreachable` when OneDrive does not answer, `NotManaged` for a file of the user's own, `Failed` otherwise. The caller opens the address (F295) |
+| `WebUrl(s path) → s url` | "View Online": the address of the item's page in OneDrive's web interface, asked of Graph each time; an account's folder itself answers the drive's root. `NotUploaded` for an item OneDrive does not have yet, `NotSignedIn`, `Unreachable` when OneDrive does not answer, `NotManaged` for a file of the user's own, `Failed` otherwise. The caller opens the address (F295) |
 | `Menu(as) → a{sv}` | what a file manager's context menu may offer for a selection ([pinning.md](pinning.md) §4.2): the keys `paths`, `always-keep` (`hidden`, `off`, `on`), `free-up` (`hidden`, `enabled`, `disabled`), `free-up-why` (`not-uploaded`), `open-online` (`hidden`, `enabled`, `disabled`) and `open-online-path` |
 
 `Menu` decides in one place what the calls behind it would take and refuse
@@ -272,8 +272,8 @@ knows only the codes (`konedrive-reason`, `konedrive-dbus`):
 |---|---|---|
 | `reasons` | every key of `Reason` and `LocalSkip`: why a change is not uploaded | the window, `konedrivectl` |
 | `waits` | every key of `WaitsFor`: what keeps an item here that the folder cannot hold | the window, `konedrivectl` |
-| `files` | every name of `Refusal`, for each of four operations on a file: keep on this device, unpin, free up, open in OneDrive; and what the Dolphin plugin says of a call the daemon never answered | the Dolphin plugin, `konedrivectl` |
-| `menu` | every `free-up-why` of `Files.Menu`, and the tooltip of a disabled "Open in OneDrive" | the Dolphin plugin |
+| `files` | every name of `Refusal`, for each of four operations on a file: keep on this device, unpin, free up, view online; and what the Dolphin plugin says of a call the daemon never answered | the Dolphin plugin, `konedrivectl` |
+| `menu` | every `free-up-why` of `Files.Menu`, and the tooltip of a disabled "View Online" | the Dolphin plugin |
 
 - **A sentence** is written as the window or the plugin shows it: a capital first letter, a full
   stop, and named places for what is filled in. A code may have no sentence: such a reason is shown
@@ -471,7 +471,8 @@ An account added or removed gains or loses its icon at once. The setting is the 
 
 Notifications are sent by the **window's process**, not the daemon, through KNotification, with
 events defined in `app/konedrive.notifyrc` so that each can be configured in System Settings
-(`app/notifier.cpp`; `newerRelease` from `app/releasecheck.cpp`):
+(`app/notifier.cpp`, the download guard's `GuardNotifier` there too; `newerRelease` from
+`app/releasecheck.cpp`):
 
 | Event | When |
 |---|---|
@@ -485,14 +486,23 @@ events defined in `app/konedrive.notifyrc` so that each can be configured in Sys
 | `nameTaken` | a name could not be used here because OneDrive holds it with an item the folder cannot show (F304): that item's reason, and to rename it in OneDrive |
 | `throttled` | a program was refused a file during OneDrive's `Retry-After`: once per wait, naming the first file and the time left |
 | `newerRelease` | a newer release is out on GitHub, once per release (§4, the version line); not an account's, so it names none and is never summed up |
+| `downloadsBlocked` | the download guard ([download-guard.md](download-guard.md)) blocked an app for going over its limits (`DownloadsBlocked`, reason `bulk`): "Too many downloads by …", with the files or the size it downloaded and the window, and Allow for This Session, Always Allow, Always Block and Free Up What It Downloaded; or a program it could not identify (`unidentified`), with no button, since it can't be allowed. Never for a background reader (`background`) or an app always blocked (`user`). Free Up's result, or a button the daemon refused, takes its place |
 
 The first notification of an event is sent at once; more of the same event within 10 s are sent as
-one summary. A notification is chosen by the event's kind, never by its wording, except that a full
+one summary, except `downloadsBlocked`: the guard counts each app across every account, so it names
+none, and it is never summed up, since each has its own buttons. It is one per block, never one per
+refused read, and an app has one at a time: a new one takes the place of the one shown, and one whose
+app the list (`ListApps`, read again after each signal and when the daemon comes back) no longer has
+blocked — allowed in the window, removed, the daemon gone — is withdrawn. The app's name is the
+program's own say: escaped in the text, which Plasma reads as markup. File names and failure
+details in account notifications are escaped in the same way. The window lists what the
+notification said for as long as the app is blocked: on Status, under Blocked apps, and in Settings. A notification is chosen by the event's kind, never by its wording, except that a full
 disk is the exact detail `not enough disk space`. Each account's events notify on their own; with
 more than one account a notification's title names the account. Clicking it opens the window on that
 account where the event is dealt with (`WindowSection`): `uploadFailed`, `conflict`,
 `notRemovedHere` and `nameTaken` open their section of Issues, `downloadFailed` and `updateFailed` open Status with
-History unfolded, `newerRelease` opens the release's page in the browser, the others Status. With the app quit nothing notifies, and what happened meanwhile
+History unfolded, `newerRelease` opens the release's page in the browser, `downloadsBlocked` opens Settings
+at Blocked and Allowed Apps (on the account already shown), the others Status. With the app quit nothing notifies, and what happened meanwhile
 is never announced later; the window's lists still show it.
 
 ## 7. Download and upload progress in Plasma
@@ -607,27 +617,64 @@ tests run under a poisoned allocator.
 
 The overlay plugin gives each file and folder an emblem from attributes it reads by name with
 `lstat` and `lgetxattr`, never opening anything (`dolphin/src/filestate.cpp`). Inside a mounted
-folder the mount answers those attributes from the item's row ([mount.md](mount.md) §4). The upload
-mark `user.konedrive.sync` is read first, and decides alone when it is there:
+folder the mount answers those attributes from the item's row ([mount.md](mount.md) §4); on a
+directory, `user.konedrive.state` and `user.konedrive.sync` sum up everything below it.
 
-| `user.konedrive.sync` | Emblem |
+The emblems are the plugin's own, `dolphin/emblems/` (made by `generate.py` there), installed in
+`hicolor` so that every icon theme finds them. Each sits on a white plate in fixed colours, which
+no theme recolours, so it reads on coloured icons and on white pages in Breeze Dark alike; the
+error sign is square, so it is not told from the green discs by colour alone:
+
+| Emblem | Looks like |
 |---|---|
-| `pending`, `uploading` | `state-sync` |
-| `blocked` | `state-error` |
-| absent | by the state and the pin, below |
+| `konedrive-online-only` | a blue outline cloud |
+| `konedrive-syncing` | a solid blue disc, white circular arrows |
+| `konedrive-downloaded` | a green ring and check |
+| `konedrive-always-keep` | a solid green disc, white check |
+| `konedrive-error` | a red rounded square, white X |
 
-Otherwise `user.konedrive.state` and the pin decide:
+KIconLoader draws an emblem at 8 px on a 16–22 px icon (every icon of the Details view), at 16 px
+up to 48, at 22 px up to 96 and at 32 px above, times the screen's scale. The 8 px set is drawn on
+the pixel grid; `hicolor` has no 8×8 directory, so it is installed as the scalable one, which at
+scale 1 only 8 px reaches, every other size having a directory of its own (16, 22 and 32 px, the
+same at `@2`, and 48, 64 and 96 px for scale 3).
+
+An error comes first, then a change on its way:
+
+| Item | Emblem |
+|---|---|
+| `user.konedrive.sync` `blocked`, or `user.konedrive.state` `failed` (a download given up for now) | `konedrive-error` |
+| `user.konedrive.sync` `pending` or `uploading` | `konedrive-syncing` |
+| otherwise | by the state and the pin, below |
+
+A file:
 
 | State | Pinned | Emblem |
 |---|---|---|
-| `online-only` | no | `cloudstatus` |
-| `online-only` | yes (its download is queued) | `state-sync` |
-| `hydrating` | either | `state-sync` |
-| `hydrated` | no | `dialog-ok` (an outline check) |
-| `hydrated` | yes | `emblem-checked` (a filled check) |
-| a folder | yes | `emblem-checked` |
-| a folder | no | none |
+| `online-only` | no | `konedrive-online-only` |
+| `online-only` | yes (its download is queued) | `konedrive-syncing` |
+| `hydrating` | either | `konedrive-syncing` |
+| `hydrated` | no | `konedrive-downloaded` |
+| `hydrated` | yes | `konedrive-always-keep` |
 | outside a folder, or a state the plugin does not know | — | none |
+
+A folder, from what the mount sums up below it:
+
+| State | Pinned | Emblem |
+|---|---|---|
+| `hydrating` (something below is downloading) | either | `konedrive-syncing` |
+| any | yes | `konedrive-always-keep` |
+| `online-only` (a file below is) | no | `konedrive-online-only` |
+| `hydrated` (everything below is, or it is empty) | no | `konedrive-downloaded` |
+| none (a daemon that answers nothing on folders), or one the plugin does not know | no | none |
+
+The daemon exposes those states on every directory and the sync root. Directory state
+is the recursive file aggregate: failed, then hydrating (including pinned files awaiting
+content), then online-only, then hydrated (including empty directories). Directory sync
+is blocked, then uploading, then pending, then absent. The backend contract is specified
+in [mount.md](mount.md) §3.5. Aggregate changes use the same `IN_ATTRIB` bridge as file
+changes, debounced per directory for 100 ms. Reading an aggregate does not enumerate the
+subtree or download anything.
 
 "Pinned" is `user.konedrive.pin` on the item itself, read fresh at every call: the mount answers
 it on every item a pin holds for, and not on an item excepted from a directory's pin
@@ -636,15 +683,20 @@ it on every item a pin holds for, and not on an item excepted from a directory's
 symbolic link out of the folder does not count as inside. The root answer is cached per directory
 while an inotify watch on that directory stays in place, for the 256 most recently shown
 directories. `IN_ATTRIB` on a watched directory reports a change of a child's attributes, which the
-mount's announcements make ([mount.md](mount.md) §9), so the emblems update live. Emblems need no
+mount's announcements make ([mount.md](mount.md) §9), so the emblems update live. A change of a
+directory's own attributes rechecks what lies below it only when its root mark or pin changed: its
+summed-up state changes with every download below it, and each item that moved is announced on its
+own. Emblems need no
 call to the daemon. With the daemon stopped the folder is the backing directory, whose downloaded
 copies carry the marks the mount's steps leave on them ([mount.md](mount.md) §3.5): they show as
 downloaded, and the user's own files show none.
 
 ### 11.2 The context menu
 
-The action plugin adds a section "OneDrive" with **Always Keep on This Device** (checkable),
-**Free Up Space** and **Open in OneDrive** ([pinning.md](pinning.md) §4, §6).
+The action plugin adds a section "OneDrive" with **Always Keep on This Device** (checkable, with no
+icon: a check mark beside an empty box would say the opposite), **Free Up Space** (with the
+`konedrive-online-only` emblem, what the file will show) and **View Online** (`internet-services`)
+([pinning.md](pinning.md) §4, §6).
 
 **What is offered is the daemon's answer.** For a selection with something in a sync folder — by
 the marks alone: the nearest directory at or above a path carries `user.konedrive.root` — the
@@ -661,15 +713,15 @@ starts the daemon. An answer that comes after its menu is gone is dropped.
 |---|---|
 | `always-keep`: `off`, `on` | "Always Keep on This Device", unchecked or checked |
 | `free-up`: `enabled` | "Free Up Space" |
-| `free-up`: `disabled` | disabled, with the catalogue's tooltip for `free-up-why` (§2.12) |
-| `open-online`: `enabled`, `disabled` | "Open in OneDrive"; disabled with "Not in OneDrive yet." |
+| `free-up`: `disabled` | disabled, with the catalogue's tooltip for `free-up-why` (§2.12); with none for online-only files, which have nothing to free |
+| `open-online`: `enabled`, `disabled` | "View Online"; disabled with "Not in OneDrive yet." |
 | `hidden`, or a value the plugin does not know | hidden |
 
 **What an entry does.** Checking "Always Keep" calls `Pin`, unchecking it `Unpin`, and "Free Up
 Space" `FreeUp`, each with the answer's `paths`, not with the selection. Each is one asynchronous
 call on `Files` with no reply timeout, since downloads can take minutes; a click starts a daemon
 that stopped after the menu was built. A path already waiting in an earlier call is never sent
-again, and at most 1000 calls wait at once. "Open in OneDrive" calls `WebUrl` with the answer's
+again, and at most 1000 calls wait at once. "View Online" calls `WebUrl` with the answer's
 `open-online-path` and opens the address with `QDesktopServices::openUrl`, only an `https` one.
 Refusals are told by their error name, in the catalogue's words. The actions can be switched off
 in Dolphin's context-menu settings.
@@ -678,8 +730,15 @@ in Dolphin's context-menu settings.
 
 In the limitations log: Dolphin still reads some files itself (K1); "Move to Trash" needs KDE
 Frameworks 6.21 to delete without a download (K34); there is no desktop search inside the folder
-(W14); "Open in OneDrive" opens under whichever personal account the browser is signed in to
+(W14); "View Online" opens under whichever personal account the browser is signed in to
 (F295); with the daemon stopped the folder shows only what is on disk (F296). Others, in plain
 words: notifications need the app running (§6); there are no emblems in search results or Recent
 Files, which do not use `file://` URLs; and the Plasma side — how the tray, the popups and the job
 tracker render — is not covered by the tests, which run offscreen on private buses.
+
+## 13. Download guard API
+
+`org.konedrive.DownloadGuard` shares `/org/konedrive/Accounts` with the manager and files
+interfaces. Its [contract, properties, rows and notification handoff](download-guard.md#bus-and-lifetime)
+are independent of the desktop UI. The daemon records blocks while the app is absent; the app
+subscribes to `DownloadsBlocked` and reconciles `ListApps` before showing notifications.

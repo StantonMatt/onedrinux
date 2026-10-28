@@ -66,7 +66,7 @@ pub(crate) struct Settings {
     /// ([`Running::user_pause`]).
     pub(crate) paused_until: Option<i64>,
     /// How many gigabytes of the free space of this computer's disk the downloads of
-    /// pinned files leave (`Folder.FreeSpaceReserve`): one that would leave less is not
+    /// pinned files and read-triggered whole copies leave (`Folder.FreeSpaceReserve`): one that would leave less is not
     /// started (`sync_plan_task::disk_space`).
     pub(crate) free_space_reserve_gb: u64,
 }

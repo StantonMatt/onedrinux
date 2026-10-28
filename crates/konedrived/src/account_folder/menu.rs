@@ -40,12 +40,12 @@ impl AlwaysKeep {
     }
 }
 
-/// "Free up space" and "Open in OneDrive" in the menu.
+/// "Free up space" and "View online" in the menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Offer {
     Hidden,
     Enabled,
-    /// Shown, and the call behind it would be refused.
+    /// Shown, and the call behind it would be refused or have nothing to do.
     Disabled,
 }
 
@@ -82,7 +82,8 @@ pub struct Menu {
     pub(crate) paths: Vec<String>,
     pub(crate) always_keep: AlwaysKeep,
     pub(crate) free_up: Offer,
-    /// Why `free_up` is `Disabled`; `None` when it is not.
+    /// Why `free_up` is `Disabled`; `None` when it is not, or when it is for nothing
+    /// to free.
     pub(crate) free_up_why: Option<FreeUpWhy>,
     pub(crate) open_online: Offer,
     /// The path `WebUrl` is then called with; empty when `open_online` is `Hidden`.
@@ -162,7 +163,7 @@ pub fn decide(paths: &[String], parts: &[(Vec<usize>, Part)], account_folder: bo
         open_online: Offer::Hidden,
         open_online_path: String::new(),
     };
-    // "Open in OneDrive" is for one selected path: an item `Pin` takes, which has a page
+    // "View online" is for one selected path: an item `Pin` takes, which has a page
     // once OneDrive has it, or an account's folder itself.
     if let [only] = paths {
         let offer = match taken.as_slice() {
@@ -183,10 +184,13 @@ pub fn decide(paths: &[String], parts: &[(Vec<usize>, Part)], account_folder: bo
     // Checked when a pin holds for everything: unchecking it is `Unpin`, checking it `Pin`.
     menu.always_keep = if taken.iter().all(|(_, item)| item.pinned) { AlwaysKeep::On } else { AlwaysKeep::Off };
     // Offered for any folder, as on Windows, and for a file with something to free or a
-    // pin to be let go by.
+    // pin to be let go by; shown disabled for files with neither, so that the menu does not
+    // change shape from one file to the next.
     if taken.iter().any(|(_, item)| item.is_dir || item.hydrated || item.pinned) {
         menu.free_up_why = parts.iter().find_map(|(_, part)| part.free_up_refused);
         menu.free_up = if menu.free_up_why.is_some() { Offer::Disabled } else { Offer::Enabled };
+    } else {
+        menu.free_up = Offer::Disabled;
     }
     menu
 }

@@ -187,6 +187,14 @@ impl ItemFilesInterface {
     /// content is on disk has nothing to download.
     pub(crate) async fn download(&self, path: &Path) -> Result<(), FilesRefusal> {
         let (item, _) = self.find_onedrive_item(path).await?;
+        let (store, downloads, id) = (self.store.clone(), self.downloader.app_downloads.clone(), item.local_item_id);
+        let item = self.write_operation_thread.run_and_wait(move || {
+            forget_app_downloads_below(&store, &downloads, id)?;
+            // Re-read after the serialized keep request: an app free-up queued before
+            // it may just have removed the copy our first snapshot said was local.
+            store.call_blocking(move |store| store.item_store().reader().find_item(id))
+                .map_err(to_refusal)?.ok_or(FilesRefusal::NotInOneDrive)
+        }).await.map_err(|_| FilesRefusal::Io("the keep request was given up: the folder is no longer served".into()))??;
         if item.kind == ItemKind::File {
             return self.download_files(find_file_to_download(&item).into_iter().collect()).await;
         }
@@ -203,7 +211,14 @@ impl ItemFilesInterface {
     /// thread that is stopped drops the job: the free-up ends there, refused.
     async fn free_copy(&self, item: LocalItemId) -> Result<FreedCopy, FilesRefusal> {
         let free_up = Arc::clone(&self.free_up);
-        let freed = self.write_operation_thread.run_and_wait(move || free_up.free_downloaded_copy(item)).await;
+        let downloads = self.downloader.app_downloads.clone();
+        let freed = self.write_operation_thread.run_and_wait(move || {
+            let freed = free_up.free_downloaded_copy(item);
+            if matches!(freed, FreedCopy::Freed { .. } | FreedCopy::Left(FreeUpDecision::NothingToFree)) {
+                downloads.forget_item(item);
+            }
+            freed
+        }).await;
         freed.map_err(|_| FilesRefusal::Io("the free-up was given up: the folder is no longer served".into()))
     }
 
@@ -240,6 +255,27 @@ impl ItemFilesInterface {
         self.free_up(&folder).await
     }
 
+    /// Reclaims only still-attributed whole copies for this identity. Every snapshot
+    /// is rechecked on the write thread, and the normal free-up safety checks still run.
+    pub(crate) async fn free_app_downloads(&self, identity: &str) -> Result<FreedSpace, FilesRefusal> {
+        let mut freed = FreedSpace::default();
+        for copy in self.downloader.app_downloads.landed(identity) {
+            let (downloads, free_up) = (self.downloader.app_downloads.clone(), Arc::clone(&self.free_up));
+            let result = self.write_operation_thread.run_and_wait(move || {
+                if !downloads.contains(&copy) { return FreedCopy::Left(FreeUpDecision::NothingToFree); }
+                let result = free_up.free_app_copy(copy.item, &copy.content);
+                if matches!(result, FreedCopy::Freed { .. } | FreedCopy::Left(FreeUpDecision::NothingToFree)) {
+                    downloads.forget(&copy);
+                }
+                result
+            }).await;
+            // An account stopped during the call: it has no accessible copy to reclaim.
+            let Ok(result) = result else { break };
+            freed = count_freed_copy(freed, result);
+        }
+        Ok(freed)
+    }
+
     /// `Files.Pin` / `Unpin` / `FreeUp`: `ItemStore::set_item_pin` as one job of the
     /// store — a pin holds for the item from now on, or does not, whatever a directory
     /// above it has, and every mark below a directory is off — then the plan woken
@@ -251,7 +287,15 @@ impl ItemFilesInterface {
     pub(crate) async fn set_pin(&self, path: &Path, is_pinned: bool) -> Result<bool, FilesRefusal> {
         let (item, _) = self.find_onedrive_item(path).await?;
         let id = item.local_item_id;
-        match self.store.call(move |store| store.item_store().set_item_pin(id, is_pinned)).await.map_err(to_refusal)? {
+        let (store, downloads) = (self.store.clone(), self.downloader.app_downloads.clone());
+        let change = self.write_operation_thread.run_and_wait(move || {
+            let change = store.call_blocking(move |store| store.item_store().set_item_pin(id, is_pinned)).map_err(to_refusal)?;
+            if is_pinned && matches!(change, PinChange::Written | PinChange::AlreadySo) {
+                forget_app_downloads_below(&store, &downloads, id)?;
+            }
+            Ok::<_, FilesRefusal>(change)
+        }).await.map_err(|_| FilesRefusal::Io("the pin request was given up: the folder is no longer served".into()))??;
+        match change {
             PinChange::Written => {
                 self.sync_plan_wake.wake(WakeCause::UserAnswered);
                 // The emblem is read from the pin: whoever watches the folder is told it changed.
@@ -326,6 +370,25 @@ impl ItemFilesInterface {
         })
     }
 
+}
+
+/// Invalidate by item and its current row path, including downloads in flight and
+/// already-local copies below an explicitly hydrated/pinned directory. Run on the
+/// write thread so a landing or app free-up cannot cross the keep request.
+fn forget_app_downloads_below(store: &Store, downloads: &crate::download_guard::AccountDownloads, item: LocalItemId) -> Result<(), FilesRefusal> {
+    let candidates = downloads.items();
+    let ids = store.call_blocking(move |store| {
+        let item_store = store.item_store();
+        let reader = item_store.reader();
+        let Some(root) = reader.find_path(item)? else { return Ok(Vec::new()) };
+        let mut ids = Vec::new();
+        for id in candidates {
+            if reader.find_path(id)?.is_some_and(|path| path.starts_with(&root)) { ids.push(id); }
+        }
+        Ok(ids)
+    }).map_err(to_refusal)?;
+    for id in ids { downloads.forget_item(id); }
+    Ok(())
 }
 
 /// What a free-up did.

@@ -22,7 +22,7 @@ enum class Operation {
     Unpin,
     /// "Free up space": calls FreeUp(paths).
     FreeUpSpace,
-    /// "Open in OneDrive": calls WebUrl(path) for the one path, and the
+    /// "View online": calls WebUrl(path) for the one path, and the
     /// answer is the address to open.
     OpenOnline,
 };

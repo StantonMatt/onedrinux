@@ -123,3 +123,19 @@ pub struct FreedSpace {
 
 #[cfg(test)]
 mod tests;
+
+/// A program seen by the download guard, or with a persistent rule. No file paths or
+/// command-line arguments are exposed. `files` and `bytes` are the admission window's
+/// counters (retained at a block); bytes include reservations and unsuccessful requests.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct GuardApp {
+    pub identity: String,
+    pub display_name: String,
+    /// automatic, allowed-session, allowed-always or blocked-always.
+    pub policy: String,
+    pub blocked: bool,
+    /// Empty, background, bulk or user.
+    pub reason: String,
+    pub files: u64,
+    pub bytes: u64,
+}

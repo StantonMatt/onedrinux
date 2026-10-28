@@ -19,7 +19,11 @@ converse() {
     echo "$*" >&"$fd"
     for _ in $(seq 1200); do
         if [ "$(grep -c '^done ' "$answers")" -gt "$before" ]; then
-            grep '^done ' "$answers" | sed -n "$((before + 1))p" | sed 's/^done [^:]*: \{0,1\}//'
+            local answer prefix="done $*: "
+            answer=$(grep '^done ' "$answers" | sed -n "$((before + 1))p")
+            # App identities (exe:/..., app:...) contain colons. Strip the exact
+            # echoed command, rather than treating its first colon as the delimiter.
+            printf '%s\n' "${answer#"$prefix"}"
             return
         fi
         sleep 0.05

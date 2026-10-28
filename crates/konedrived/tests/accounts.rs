@@ -397,3 +397,42 @@ async fn a_call_that_reaches_the_daemon_before_its_objects_is_answered() {
     let manager = AccountsProxy::builder(&client).cache_properties(zbus::proxy::CacheProperties::No).build().await.unwrap();
     assert!(manager.list().await.unwrap().is_empty(), "the daemon is on the bus under its name, with its objects");
 }
+
+/// Guard methods operate on one machine-wide object, persist through ConfigStore, and
+/// expose the checked-in contract the desktop can implement independently.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn download_guard_contract_settings_and_app_rules() {
+    use konedrive_dbus::download_guard::DownloadGuardProxy;
+    let d = Daemon::start().await;
+    let guard = DownloadGuardProxy::builder(&d.client).cache_properties(zbus::proxy::CacheProperties::No).build().await.unwrap();
+    assert!(guard.enabled().await.unwrap());
+    assert_eq!(guard.max_files().await.unwrap(), 30);
+    assert_eq!(guard.max_bytes().await.unwrap(), 2 << 30);
+    assert_eq!(guard.window_seconds().await.unwrap(), 600);
+    assert!(guard.list_apps().await.unwrap().is_empty());
+    assert_eq!(guard.free_up_app_downloads("exe:/never-seen").await.unwrap(), (0, 0));
+    let mut changes = guard.receive_apps_changed().await.unwrap();
+    guard.allow_app("app:editor", false).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), changes.next()).await.unwrap().unwrap();
+    let apps = guard.list_apps().await.unwrap();
+    assert_eq!(apps[0].policy, "allowed-session");
+    guard.block_app("app:editor").await.unwrap();
+    let apps = guard.list_apps().await.unwrap();
+    assert!(apps[0].blocked);
+    assert_eq!(apps[0].policy, "blocked-always");
+    guard.allow_app("app:editor", true).await.unwrap();
+    assert_eq!(guard.list_apps().await.unwrap()[0].policy, "allowed-always");
+    guard.reset_app("app:editor").await.unwrap();
+    assert!(guard.list_apps().await.unwrap().is_empty());
+    guard.set_enabled(false).await.unwrap();
+    assert!(!guard.enabled().await.unwrap());
+    guard.set_thresholds(4, 1024, 60).await.unwrap();
+    assert_eq!(guard.max_files().await.unwrap(), 4);
+    assert_eq!(guard.max_bytes().await.unwrap(), 1024);
+    assert_eq!(guard.window_seconds().await.unwrap(), 60);
+    assert_eq!(refusal(guard.set_thresholds(0, 1024, 60).await), "org.freedesktop.DBus.Error.InvalidArgs");
+    assert_eq!(refusal(guard.allow_app("not-an-identity", true).await), "org.freedesktop.DBus.Error.InvalidArgs");
+    let live = introspect(&d.client, ACCOUNTS_PATH).await;
+    let xml = include_str!("../../../dbus/org.konedrive.DownloadGuard.xml");
+    assert_eq!(signature_lines(&live, "org.konedrive.DownloadGuard"), signature_lines(xml, "org.konedrive.DownloadGuard"));
+}

@@ -83,10 +83,11 @@ foreach(folder_interface Folder UploadQueue Conflicts ActivityLog)
 endforeach()
 
 find_package(KF6 ${KF_MIN_VERSION} REQUIRED COMPONENTS
-    I18n Config Notifications StatusNotifierItem DBusAddons KIO WindowSystem JobWidgets)
+    I18n Config Notifications StatusNotifierItem DBusAddons KIO WindowSystem JobWidgets Service)
 
 add_library(konedrive_core STATIC
     daemoncontroller.cpp
+    downloadguardcontroller.cpp
     accountcontroller.cpp
     synccontroller.cpp
     accountsmodel.cpp
@@ -119,7 +120,7 @@ add_library(konedrive_core STATIC
 target_include_directories(konedrive_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR})
 target_link_libraries(konedrive_core PUBLIC
     Qt6::Core Qt6::Gui Qt6::DBus Qt6::Network Qt6::Widgets
-    KF6::I18n KF6::ConfigCore KF6::Notifications KF6::StatusNotifierItem KF6::KIOGui KF6::KIOFileWidgets KF6::WindowSystem KF6::JobWidgets)
+    KF6::I18n KF6::ConfigCore KF6::Notifications KF6::StatusNotifierItem KF6::KIOGui KF6::KIOFileWidgets KF6::WindowSystem KF6::JobWidgets KF6::Service)
 # This build's version and commit: the window's version line (DaemonController)
 # KAboutData and the release check (main.cpp).
 target_compile_definitions(konedrive_core PUBLIC
@@ -161,6 +162,7 @@ set(KONEDRIVE_QML
     qml/IssuesPage.qml
     qml/OneDriveSettingsPage.qml
     qml/SettingsPage.qml
+    qml/GuardAppRow.qml
     qml/AccountSwitcher.qml
     qml/ServiceCard.qml)
 qt_add_qml_module(konedrive_window
@@ -215,6 +217,7 @@ if(BUILD_TESTING)
     konedrive_test(reasontextstest)
     konedrive_test(appstatustest)
     konedrive_test(notifiertest)
+    konedrive_test(downloadguardtest)
     konedrive_test(autostarttest)
     konedrive_test(downloadprogresssettingstest)
     konedrive_test(placescontrollertest)
@@ -225,6 +228,10 @@ if(BUILD_TESTING)
     # Loads Main.qml as the app does, to see what its dialogs act on.
     konedrive_test(dialogstest)
     target_link_libraries(dialogstest PRIVATE konedrive_windowplugin Qt6::Qml Qt6::Quick Qt6::QuickControls2 KF6::I18nQml)
+
+    # The download guard's controls on Settings, Status and OneDrive Settings, in the window.
+    konedrive_test(guardpagestest)
+    target_link_libraries(guardpagestest PRIVATE konedrive_windowplugin Qt6::Qml Qt6::Quick Qt6::QuickControls2 KF6::I18nQml)
 
     # Loads the window with Qt's disk cache on, in an empty cache of its own:
     # the window's files leave no unit there, since they are in the binary.

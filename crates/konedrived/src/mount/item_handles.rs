@@ -95,6 +95,9 @@ impl Handles {
 #[derive(Default)]
 pub(crate) struct ItemHandles {
     handles: Mutex<Handles>,
+    /// Serializes read-open registration with app-download free-up. Never held while
+    /// waiting for a write-operation job: that thread takes this gate to free a copy.
+    pub(super) reader_gate: Mutex<()>,
 }
 
 impl ItemHandles {
@@ -149,6 +152,13 @@ impl ItemHandles {
     /// before it touches or sends the file.
     pub(crate) fn is_open_for_writing(&self, item: LocalItemId) -> bool {
         crate::panic::lock(&self.handles).has_writer(item)
+    }
+
+    /// An open reader keeps its copy for the entire handle lifetime, including a
+    /// remote handle whose download has just landed.
+    pub(super) fn is_open_for_reading(&self, item: LocalItemId) -> bool {
+        crate::panic::lock(&self.handles).by_fh.values().any(|handle| matches!(handle,
+            OpenItemHandle::File(OpenItemFile::ReadingNotOnDisk { item: read, .. } | OpenItemFile::ReadingBackingFile { item: read, .. }) if *read == item))
     }
 
     /// Bytes were written through a handle of `item`, or it was cut: the last close then

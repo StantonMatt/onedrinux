@@ -96,9 +96,10 @@
              name and an account's folder itself are left out.
            always-keep (s): "hidden" (paths is empty); "off"; "on" (a pin
              holds for every path, its own or that of a folder above).
-           free-up (s): "hidden" (no path is a folder, a downloaded file or
-             a file a pin holds for); "enabled"; "disabled" (FreeUp of
-             paths would be refused: free-up-why says for what).
+           free-up (s): "hidden" (paths is empty); "enabled"; "disabled"
+             (FreeUp of paths would be refused: free-up-why says for what;
+             or, with free-up-why empty, no path is a folder, a downloaded
+             file or a file a pin holds for, so there is nothing to free).
            free-up-why (s): why free-up is "disabled"; empty otherwise.
              "not-uploaded": a downloaded file among the paths has a change
              waiting to be uploaded. Over several accounts' folders the

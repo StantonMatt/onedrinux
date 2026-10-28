@@ -118,6 +118,24 @@ fn hear(heard: oneshot::Receiver<Result<(), i32>>) -> Result<(), i32> {
     heard.blocking_recv().expect("the waiter is answered")
 }
 
+#[test]
+fn a_disk_admission_refusal_does_not_mark_the_file_or_its_parent_failed() {
+    let fixture = ItemFixture::new();
+    let row = fixture.show_onedrive_file("file.txt", b"content");
+    let states = super::super::directory_states::DirectoryStates::build(
+        &fixture.store, fixture.download_states.clone(), fixture.running_steps.clone(), fixture.published_plan.clone(), fixture.inotify_bridge.clone(),
+    ).unwrap();
+    let source = HeldSource::held(&fixture);
+    let mut downloader = make_downloader(&fixture, &source);
+    Arc::get_mut(&mut downloader).unwrap().read_reserve = Some((Arc::new(crate::download_guard::DiskReservations::default()), Arc::new(|| u64::MAX)));
+
+    assert_eq!(hear(ask(&downloader, &row, DownloadAsker::Read)), Err(libc::ENOSPC));
+    assert!(!fixture.download_states.is_downloading(row.local_item_id));
+    assert_eq!(states.file_state(row.local_item_id), Some(konedrive_fs::placeholder::State::OnlineOnly));
+    assert_eq!(states.directory_values(konedrive_tree::LocalItemId::ROOT).0, konedrive_fs::placeholder::State::OnlineOnly);
+    assert!(fixture.read_disk_file("file.txt").is_none());
+}
+
 /// What the waiter hears within five seconds; `None` when nothing answers it by then.
 fn hear_soon(fixture: &ItemFixture, heard: oneshot::Receiver<Result<(), i32>>) -> Option<Result<(), i32>> {
     fixture.runtime().block_on(async { tokio::time::timeout(Duration::from_secs(5), heard).await.ok().map(|heard| heard.expect("the waiter is answered")) })
@@ -1255,4 +1273,73 @@ fn the_first_file_refused_during_a_wait_is_told_and_no_failure_is_recorded() {
     assert_eq!(hear_soon(&fixture, ask(&downloader, &second, DownloadAsker::OpenForWriting)), Some(Err(THROTTLE_WAIT_ERRNO)));
     wait_until("the refused file is told", || refused_file(&fixture) == path_of("second.docx"));
     assert_eq!(count_failures(), 0);
+}
+
+fn charged_read(downloader: &Arc<ItemDownloader>, row: &Item) -> (String, oneshot::Receiver<Result<(), i32>>) {
+    let guard = Arc::new(crate::download_guard::DownloadGuard::default());
+    let charge = guard.charge(std::process::id(), "test-file", row.local.as_ref().unwrap().content.as_ref().unwrap().size()).unwrap().unwrap();
+    let identity = charge.identity().to_owned();
+    let (waiter, heard) = oneshot::channel();
+    downloader.download_charged(to_download(row), Some(waiter), Some(charge));
+    (identity, heard)
+}
+
+#[test]
+fn app_attribution_belongs_to_the_read_that_started_a_successfully_landed_download() {
+    let fixture = ItemFixture::new();
+    let row = fixture.show_onedrive_file("read.txt", b"read content");
+    let source = HeldSource::held(&fixture);
+    let downloader = make_downloader(&fixture, &source);
+    let (identity, first) = charged_read(&downloader, &row);
+    let (_, joined) = charged_read(&downloader, &row);
+    assert!(downloader.app_downloads.landed(&identity).is_empty());
+    source.let_go();
+    assert_eq!(hear(first), Ok(()));
+    assert_eq!(hear(joined), Ok(()));
+    assert_eq!(downloader.app_downloads.landed(&identity).len(), 1, "joins do not claim the copy twice");
+    // An already-local copy is not another landed read, even if a stale read request
+    // asks the downloader after its first run ended.
+    downloader.app_downloads.forget_item(row.local_item_id);
+    let (_, already_local) = charged_read(&downloader, &row);
+    assert_eq!(hear(already_local), Ok(()));
+    assert!(downloader.app_downloads.landed(&identity).is_empty());
+}
+
+#[test]
+fn explicit_hydrate_joining_a_read_and_a_failed_or_cancelled_read_leave_no_attribution() {
+    let fixture = ItemFixture::new();
+    let row = fixture.show_onedrive_file("kept.txt", b"kept content");
+    let source = HeldSource::held(&fixture);
+    let downloader = make_downloader(&fixture, &source);
+    let (identity, read) = charged_read(&downloader, &row);
+    let explicit = ask(&downloader, &row, DownloadAsker::FilesInterface);
+    source.let_go();
+    assert_eq!(hear(read), Ok(()));
+    assert_eq!(hear(explicit), Ok(()));
+    assert!(downloader.app_downloads.landed(&identity).is_empty(), "completion cannot undo explicit hydrate's keep");
+    let failed = fixture.show_onedrive_file("failed.txt", b"will fail");
+    source.refuse(Some(|| SourceError::Transient("failed read".into())));
+    let (_, read) = charged_read(&downloader, &failed);
+    assert!(hear(read).is_err());
+    assert!(downloader.app_downloads.landed(&identity).is_empty());
+    let held = HeldSource::held(&fixture);
+    let cancelled = make_downloader(&fixture, &held);
+    let row = fixture.show_onedrive_file("cancelled.txt", b"cancelled");
+    let (_, read) = charged_read(&cancelled, &row);
+    cancelled.stop();
+    assert!(hear(read).is_err());
+    assert!(cancelled.app_downloads.landed(&identity).is_empty());
+}
+
+#[test]
+fn an_unattributed_new_landing_invalidates_any_older_attribution_for_the_item() {
+    let fixture = ItemFixture::new();
+    let row = fixture.show_onedrive_file("again.txt", b"same content");
+    let source = HeldSource::open(&fixture);
+    let downloader = make_downloader(&fixture, &source);
+    // A stale record can survive a disappeared backing copy or the attribution cap.
+    let stale = downloader.app_downloads.begin("app:old-reader", row.local_item_id, to_download(&row).content).unwrap();
+    stale.landed();
+    assert_eq!(hear(ask(&downloader, &row, DownloadAsker::Read)), Ok(()));
+    assert!(downloader.app_downloads.landed("app:old-reader").is_empty());
 }

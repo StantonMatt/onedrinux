@@ -165,7 +165,7 @@ tests/fuse-probe/run.sh kio_trash                 # by name only
 ```
 
 - **The groups**: `service` (the daemon's service command by command; it prints lines for a
-  person and checks nothing), `mounted_folder`, `file_writes`, `file_reads` and
+  person and checks nothing), `mounted_folder`, `file_writes`, `file_reads`, `download_guard` and
   `daemon_restarts` (scenarios with checks, a file each in `tests/fuse-probe/`), and `cli`
   (`konedrivectl`'s tests of a mounted folder, `crates/konedrivectl/tests/sync_cli`).
 - **`kio_trash`** runs by name only: it builds `tests/kio/trash_probe.cpp`, which needs the Qt 6

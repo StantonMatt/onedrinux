@@ -79,13 +79,19 @@ Kirigami.ApplicationWindow {
     }
 
     /// Shows where a notification leads, by its name (sectionName() of a WindowSection):
-    /// Status, Status with its History opened, or a section of Issues brought to the top.
+    /// Status, Status with its History opened, a section of Issues brought to the top, or
+    /// Settings' apps the download guard blocked.
     function showSection(name) {
         if (name === "history") {
             showPage("status");
             if (currentPage === "status") {
                 statusPage.showHistory();
             }
+            return;
+        }
+        if (name === "guardApps") {
+            showPage("settings");
+            settingsPage.showGuardApps();
             return;
         }
         const issuesSections = ["cantUpload", "keptBothVersions", "notInFolder"];

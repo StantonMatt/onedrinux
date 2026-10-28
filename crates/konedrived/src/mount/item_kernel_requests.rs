@@ -184,6 +184,7 @@ const ROW_TRIES: usize = 3;
 pub(super) struct OpenedFile {
     pub(super) fh: Fh,
     pub(super) keeps_cache: bool,
+    pub(super) direct_io: bool,
 }
 
 /// Where the answer of a job or of a future goes: the kernel's reply, moved into it.
@@ -396,6 +397,7 @@ pub(crate) struct ItemKernelRequests {
     access_mode_switch: Arc<AccessModeSwitch>,
     reply_attributes: Arc<WriteReplyAttributes>,
     store: Store,
+    pub(super) download_guard: Arc<crate::download_guard::DownloadGuard>,
 }
 
 impl ItemKernelRequests {
@@ -420,7 +422,7 @@ impl ItemKernelRequests {
         store: Store,
     ) -> Self {
         let reply_attributes = Arc::new(WriteReplyAttributes { store: store.clone(), lookup: Arc::clone(&lookup) });
-        Self { lookup, read_connections, place_changes, item_handles, write_operations, write_operation_thread, inotify_bridge, downloader, download_states, range_fetcher, free_up, access_mode_switch, reply_attributes, store }
+        Self { lookup, read_connections, place_changes, item_handles, write_operations, write_operation_thread, inotify_bridge, downloader, download_states, range_fetcher, free_up, access_mode_switch, reply_attributes, store, download_guard: Arc::new(crate::download_guard::DownloadGuard::default()) }
     }
 
     /// lookup. For the inotify bridge's own thread (`ItemInotifyBridge::is_own_thread` of
@@ -515,9 +517,13 @@ impl ItemKernelRequests {
     /// row that says on disk: `ItemFreeUp::mend_missing_copy` as a job of the
     /// write-operation thread, waited for here, then decided once more; a second time it
     /// is `ENOENT`. No local version is written. Opening downloads nothing.
-    pub(super) fn answer_open_to_read(&self, node: LocalItemId) -> Result<OpenedFile, Errno> {
+    #[cfg(test)]
+    pub(super) fn answer_open_to_read(&self, node: LocalItemId) -> Result<OpenedFile, Errno> { self.open_to_read(node, None) }
+
+    pub(super) fn open_to_read(&self, node: LocalItemId, pid: Option<u32>) -> Result<OpenedFile, Errno> {
         let mut is_mended = false;
         for _try in 0..ROW_TRIES {
+            let readers = crate::panic::lock(&self.item_handles.reader_gate);
             match decide_open_to_read(&self.lookup.find_shown_item(node)?)? {
                 // While OneDrive asks the account to wait, the open is refused, not the read:
                 // an errno of an open reaches the program as it is, and one of a read through
@@ -525,7 +531,12 @@ impl ItemKernelRequests {
                 // VM: `cat` said "Input/output error"). A handle opened before the wait is
                 // refused at its read all the same (`fetch_range`).
                 OpenToRead::NotOnDisk { .. } if self.downloader.throttle_wait().seconds_left() > 0 => return Err(Errno::from_i32(THROTTLE_WAIT_ERRNO)),
-                OpenToRead::NotOnDisk { item, content } => return Ok(OpenedFile { fh: self.item_handles.add_file(OpenItemFile::ReadingNotOnDisk { item, content }), keeps_cache: true }),
+                OpenToRead::NotOnDisk { item, content } => {
+                    if let Some(pid) = pid { self.check_cloud_open(pid)?; }
+                    // Direct reads preserve caller attribution and EACCES, and avoid speculative
+                    // readahead. The kernel otherwise turns a page-cache read refusal into EIO.
+                    return Ok(OpenedFile { fh: self.item_handles.add_file(OpenItemFile::ReadingNotOnDisk { item, content }), keeps_cache: false, direct_io: true });
+                }
                 OpenToRead::BackingFile => {}
             }
             let opened = self.place_changes.open_at_row_path(|| {
@@ -535,11 +546,14 @@ impl ItemKernelRequests {
                 })
             });
             match opened {
-                Ok(Some((backing_file, ()))) => return Ok(OpenedFile { fh: self.item_handles.add_file(OpenItemFile::ReadingBackingFile { item: node, backing_file: Arc::new(backing_file) }), keeps_cache: true }),
+                Ok(Some((backing_file, ()))) => return Ok(OpenedFile { fh: self.item_handles.add_file(OpenItemFile::ReadingBackingFile { item: node, backing_file: Arc::new(backing_file) }), keeps_cache: true, direct_io: false }),
                 // The row is another since it was decided on: decided again.
                 Ok(None) => {}
                 Err(OpenAtRowError::NoFile { path }) if !is_mended => {
                     is_mended = true;
+                    // The write thread may itself be waiting for this gate to free a
+                    // copy. Release it before waiting for the missing-copy repair.
+                    drop(readers);
                     let free_up = Arc::clone(&self.free_up);
                     let mended = self.write_operation_thread.run_and_wait(move || free_up.mend_missing_copy(node)).blocking_recv().map_err(|_| Errno::EIO)?;
                     tracing::warn!("item {node} is opened, its row says its content is on disk, and nothing is at {}: {}", path.display(), if mended { "the row says not on disk now" } else { "the row is left as it is" });
@@ -629,10 +643,49 @@ impl ItemKernelRequests {
     /// `DownloadAsker::Read`, with no waiter, at the threshold). No row is read here. The
     /// caller keeps the task's abort handle for the kernel's interrupt
     /// (`interruptible_reads`).
-    pub(super) async fn fetch_read_range(&self, range: RangeToFetch) -> Result<Vec<u8>, Errno> {
+    #[cfg(test)]
+    pub(super) async fn fetch_read_range(&self, range: RangeToFetch) -> Result<Vec<u8>, Errno> { self.read_range(range, None).await }
+
+    pub(super) fn check_cloud_open(&self, pid: u32) -> Result<(), Errno> {
+        if self.inotify_bridge.is_own_thread(pid) { return Ok(()); }
+        self.download_guard.check_open(pid)
+    }
+
+    fn admit_remote(&self, pid: Option<u32>, range: &RangeToFetch, bytes: u64) -> Result<(), Errno> {
+        if let Some(pid) = pid {
+            if !self.inotify_bridge.is_own_thread(pid) {
+                self.download_guard.admit(pid, &format!("{}:{}", self.read_connections.store_path().display(), range.source.onedrive_item.item_id.as_str()), bytes)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn charge_download(&self, pid: Option<u32>, range: &RangeToFetch) -> Result<Option<Arc<crate::download_guard::DownloadCharge>>, Errno> {
+        if let Some(pid) = pid {
+            if !self.inotify_bridge.is_own_thread(pid) {
+                return self.download_guard.charge(pid, &format!("{}:{}", self.read_connections.store_path().display(), range.source.onedrive_item.item_id.as_str()), range.source.content.size());
+            }
+        }
+        Ok(None)
+    }
+
+    pub(super) fn admit_fill(&self, pid: u32, file: &ItemToDownload) -> Result<(), Errno> {
+        self.check_cloud_open(pid)?;
+        if !self.inotify_bridge.is_own_thread(pid) {
+            self.download_guard.admit(pid, &format!("{}:{}", self.read_connections.store_path().display(), file.onedrive_item.item_id.as_str()), file.content.size())?;
+        }
+        Ok(())
+    }
+
+    pub(super) async fn read_range(&self, range: RangeToFetch, pid: Option<u32>) -> Result<Vec<u8>, Errno> {
+        self.admit_remote(pid, &range, range.end.saturating_sub(range.from))?;
         let bytes = self.fetch_range(&range).await?;
         if self.download_states.count_bytes_read(range.item, bytes.len() as u64, range.source.content.size()) {
-            self.downloader.download(range.download_at_threshold, DownloadAsker::Read, None);
+            if !self.download_states.is_downloading(range.item) && self.downloader.read_fits(range.source.content.size()) {
+                if let Ok(charge) = self.charge_download(pid, &range) {
+                    self.downloader.download_charged(range.download_at_threshold, None, charge);
+                }
+            }
         }
         Ok(bytes)
     }
@@ -659,9 +712,17 @@ impl ItemKernelRequests {
     /// (`item_downloader::decide_end_news`).
     /// Nothing but the program's own reads bounds how often: a read is asked by a
     /// program, and each is answered what OneDrive states then.
-    pub(super) async fn fetch_range_after_download(&self, range: RangeToFetch) -> Result<Vec<u8>, Errno> {
+    #[cfg(test)]
+    pub(super) async fn fetch_range_after_download(&self, range: RangeToFetch) -> Result<Vec<u8>, Errno> { self.read_after_download(range, None).await }
+
+    pub(super) async fn read_after_download(&self, range: RangeToFetch, pid: Option<u32>) -> Result<Vec<u8>, Errno> {
+        // This case exists because a range cannot establish the version safely.
+        let running = self.download_states.is_running(&DownloadKey { item: range.item, content: range.source.content.clone() });
+        if !running && !self.downloader.read_fits(range.source.content.size()) { return Err(Errno::ENOSPC); }
+        self.admit_remote(pid, &range, range.end.saturating_sub(range.from))?;
+        let charge = if running { None } else { self.charge_download(pid, &range)? };
         let (waiter, downloaded) = oneshot::channel();
-        self.downloader.download(range.download_at_threshold.clone(), DownloadAsker::Read, Some(waiter));
+        self.downloader.download_charged(range.download_at_threshold.clone(), Some(waiter), charge);
         decide_read_after_download(downloaded.await.unwrap_or(Err(libc::EIO)))?;
         self.fetch_range(&range).await
     }
@@ -736,14 +797,14 @@ impl ItemKernelRequests {
     /// `open_to_write` as a job of the write-operation thread, which answers `reply`.
     pub(super) fn queue_open_to_write(&self, node: LocalItemId, reply: ReplyTo<OpenedFile>) {
         let write_operations = Arc::clone(&self.write_operations);
-        self.queue_change(reply, move || write_operations.open_to_write(node).map(|opened| OpenedFile { fh: opened.fh, keeps_cache: false }));
+        self.queue_change(reply, move || write_operations.open_to_write(node).map(|opened| OpenedFile { fh: opened.fh, keeps_cache: false, direct_io: false }));
     }
 
     /// open with `O_TRUNC`. `open_to_overwrite` on the write-operation thread: nothing is
     /// downloaded.
     pub(super) fn queue_open_to_overwrite(&self, node: LocalItemId, reply: ReplyTo<OpenedFile>) {
         let write_operations = Arc::clone(&self.write_operations);
-        self.queue_change(reply, move || write_operations.open_to_overwrite(node).map(|opened| OpenedFile { fh: opened.fh, keeps_cache: false }));
+        self.queue_change(reply, move || write_operations.open_to_overwrite(node).map(|opened| OpenedFile { fh: opened.fh, keeps_cache: false, direct_io: false }));
     }
 
     /// mkdir, mknod, create. `ItemWriteOperations::make` on the write-operation thread:

@@ -82,7 +82,7 @@ pub(in crate::mount) fn build(setup: ItemMountSetup, runtime: tokio::runtime::Ha
 
 /// Steps 1 to 7 over a backing directory that is open and has its write bits.
 fn build_over(backing_directory: Arc<BackingDirectory>, setup: ItemMountSetup, runtime: tokio::runtime::Handle) -> Result<(ItemMount, ItemKernelRequests), ItemMountError> {
-    let ItemMountSetup { root, store_path, store, drive_id, source, report, pool, split_download_share, download_after, tree_lock, ignore, sync_plan_wake, running_steps, published_plan, take_down_report, clock } = setup;
+    let ItemMountSetup { root, store_path, store, drive_id, source, report, pool, split_download_share, download_after, download_guard, free_space_reserve, tree_lock, ignore, sync_plan_wake, running_steps, published_plan, take_down_report, clock } = setup;
     let folder = root.path;
     let mount_started_at = clock();
     let upload_rules = Arc::new(UploadRules::new(ignore));
@@ -120,10 +120,14 @@ fn build_over(backing_directory: Arc<BackingDirectory>, setup: ItemMountSetup, r
         report.clone(),
         folder.clone(),
         runtime.clone(),
-    ));
+    ).with_read_reserve(Arc::clone(&download_guard.disks), free_space_reserve)
+        .with_app_downloads(download_guard.downloads.account(&store_path)));
 
     let free_up = Arc::new(ItemFreeUp::new(Arc::clone(&place_changes), store.clone(), Arc::clone(&item_handles), Arc::clone(&download_states), Arc::clone(&running_steps), Arc::clone(&inotify_bridge)));
     let item_content_files = Arc::new(ItemContentFiles::new(Arc::clone(&place_changes), store_path, Arc::clone(&item_handles)));
+    let directory_states = super::super::directory_states::DirectoryStates::build(
+        &store, Arc::clone(&download_states), Arc::clone(&running_steps), Arc::clone(&published_plan), Arc::clone(&inotify_bridge),
+    )?;
     let lookup = Arc::new(ItemLookup::new(
         Arc::clone(&read_connections),
         Arc::clone(&place_changes),
@@ -134,7 +138,7 @@ fn build_over(backing_directory: Arc<BackingDirectory>, setup: ItemMountSetup, r
         published_plan,
         Arc::clone(&backing_directory),
         mount_started_at,
-    ));
+    ).with_directory_states(directory_states));
     let write_operations = Arc::new(ItemWriteOperations::new(
         Arc::clone(&place_changes),
         Arc::clone(&backing_directory),
@@ -176,7 +180,7 @@ fn build_over(backing_directory: Arc<BackingDirectory>, setup: ItemMountSetup, r
         running_steps,
     ));
 
-    let kernel_requests = ItemKernelRequests::new(
+    let mut kernel_requests = ItemKernelRequests::new(
         lookup,
         Arc::clone(&read_connections),
         place_changes,
@@ -191,6 +195,7 @@ fn build_over(backing_directory: Arc<BackingDirectory>, setup: ItemMountSetup, r
         Arc::clone(&access_mode_switch),
         store.clone(),
     );
+    kernel_requests.download_guard = download_guard;
     let mount = ItemMount {
         backing_directory,
         access_mode_switch,

@@ -98,6 +98,7 @@ impl RunningStep {
 /// The running steps of one folder.
 pub(crate) struct RunningSteps {
     steps: std::sync::Mutex<Steps>,
+    pub(crate) changes: super::state_changes::StateChanges,
 }
 
 /// The steps by the item each is of, and for every row a step carries, the item of its
@@ -123,7 +124,7 @@ impl RunningSteps {
     /// No step runs. Made by the folder's start and given to the mount's setup and to the
     /// plan's task.
     pub fn new() -> Self {
-        RunningSteps { steps: std::sync::Mutex::default() }
+        RunningSteps { steps: std::sync::Mutex::default(), changes: Default::default() }
     }
 
     /// `step` runs from now on; `false`, and nothing begun, when one of its rows has a
@@ -136,7 +137,10 @@ impl RunningSteps {
         for row in step.list_rows() {
             steps.step_items_by_row.insert(row, step.item);
         }
+        let rows = step.list_rows().collect();
         steps.by_item.insert(step.item, Running { step, abort: None, phase: StepPhase::RequestInFlight });
+        drop(steps);
+        self.changes.changed(rows);
         true
     }
 
@@ -150,7 +154,8 @@ impl RunningSteps {
 
     /// The step of `item` was settled: none of its rows has a running step any more.
     pub(crate) fn end(&self, item: LocalItemId) {
-        crate::panic::lock(&self.steps).remove(item);
+        let removed = crate::panic::lock(&self.steps).remove(item);
+        if let Some(removed) = removed { self.changes.changed(removed.step.list_rows().collect()); }
     }
 
     /// Every row a step runs for: the plan's `items_with_running_step`.
@@ -220,6 +225,7 @@ impl RunningSteps {
             items.into_iter().filter_map(|item| steps.remove(item)).collect()
         };
         let items = aborted.iter().map(|running| running.step.item).collect();
+        self.changes.changed(aborted.iter().flat_map(|running| running.step.list_rows()).collect());
         for abort in aborted.into_iter().filter_map(|running| running.abort) {
             abort.abort();
         }

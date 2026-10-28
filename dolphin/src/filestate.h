@@ -17,6 +17,9 @@ namespace konedrive
 {
 
 /// The attribute names, as `crates/konedrive-fs/src/placeholder.rs` defines them.
+/// On a file, its own state; on a folder, the mount's summary of everything below it
+/// ("failed" first, then "hydrating", "online-only", "hydrated"). A daemon from before
+/// folders had one answers nothing on a folder.
 inline constexpr char StateAttribute[] = "user.konedrive.state";
 inline constexpr char RootAttribute[] = "user.konedrive.root";
 /// "Always keep on this device": the mount answers it on every item a pin
@@ -26,15 +29,19 @@ inline constexpr char RootAttribute[] = "user.konedrive.root";
 inline constexpr char PinAttribute[] = "user.konedrive.pin";
 /// Written by the daemon on an item with changes waiting to be uploaded
 /// (an unsent change, `docs/design/writes.md` §7): "pending", "uploading" or "blocked";
-/// removed once the upload is committed.
+/// removed once the upload is committed. On a folder, the same of everything below it.
 inline constexpr char SyncAttribute[] = "user.konedrive.sync";
 
 enum class FileState {
-    /// A regular file with no `user.konedrive.state`: not a OneDrive file.
+    /// No `user.konedrive.state`: a file that is not a OneDrive file, or a folder of
+    /// a daemon that answers nothing on folders.
     Unmanaged,
     OnlineOnly,
     Hydrating,
     Hydrated,
+    /// Its download was given up for now (it failed again and again, or would eat into
+    /// the free space kept); on a folder, that of something below it.
+    Failed,
     /// The attribute holds a value this plugin does not know.
     Unrecognised,
     /// A directory, a symbolic link, anything else that is not a regular
@@ -58,7 +65,8 @@ enum class UploadState {
 /// check for a hydrated file nobody asked to keep, a filled check for one
 /// that a pin holds for, and the syncing glyph for a file moving
 /// between states, for one pinned but not yet downloaded, and for one
-/// waiting to be uploaded; an error sign for one whose upload is blocked.
+/// waiting to be uploaded; an error sign for one whose upload is blocked or
+/// whose download was given up.
 enum class Emblem {
     None,
     Cloud,
@@ -71,6 +79,10 @@ enum class Emblem {
 /// `path`'s state, from lstat(2) and lgetxattr(2). Never opens `path`, and
 /// never follows a symbolic link: a link does not borrow its target's state.
 FileState readFileState(const QString &path);
+
+/// The state the mount answers on the folder `dir`, the summary of everything below
+/// it, from lgetxattr(2) alone: never opens `dir`, and never follows a symbolic link.
+FileState readFolderState(const QString &dir);
 
 /// `path`'s upload state, from lgetxattr(2) alone: never opens `path`, and
 /// never follows a symbolic link. Read on files and folders alike.
@@ -104,32 +116,37 @@ bool hasPinMark(const QString &path);
 
 using PinMarkReader = std::function<bool(const QString &path)>;
 
-/// `state`'s emblem, following `pinned` (whether a pin holds for the item)
-/// for the two hydrated cases and for an online-only file the sweep has
+/// A file's emblem for `state`, following `pinned` (whether a pin holds for the
+/// file) for the two hydrated cases and for an online-only file the sweep has
 /// queued.
 Emblem emblemFor(FileState state, bool pinned);
+
+/// A folder's emblem for the state the mount answers on it: an error below it, then
+/// something below it moving, then a pin that holds for it, then online-only files
+/// below it, then everything downloaded. With no state (an older daemon) only a pin
+/// shows.
+Emblem folderEmblemFor(FileState state, bool pinned);
 
 /// Whether `path`, by lstat(2) without following it, is a directory.
 bool isDirectory(const QString &path);
 
-/// The emblem for an item that may be a directory. An upload waiting or
-/// under way shows the syncing glyph and a blocked one the error sign,
-/// whatever else holds. Otherwise a directory shows the filled check when a
-/// pin holds for it, and nothing else (it has no `FileState` of its
-/// own); anything else follows `emblemFor`.
+/// The emblem for an item that may be a directory. A blocked upload or a
+/// failed state shows the error sign, and otherwise an upload waiting or
+/// under way the syncing glyph, whatever else holds. Otherwise a directory
+/// follows `folderEmblemFor`, and anything else `emblemFor`.
 Emblem emblemForItem(FileState state, bool isDir, bool pinned, UploadState upload = UploadState::None);
 
-/// `path`'s emblem, from its own attributes alone: its upload state first,
-/// and only without one its state and pin.
+/// `path`'s emblem, from its own attributes alone: a blocked upload needs
+/// nothing else read.
 Emblem itemEmblem(const QString &path, const PinMarkReader &hasPin = hasPinMark);
 
 /// The overlay icon names Dolphin draws for `emblem`; empty for `Emblem::None`.
 QStringList overlayNames(Emblem emblem);
 
-/// The icon of "Always keep on this device"; "Free up space" keeps the cloud
-/// icon it always had.
-inline constexpr char AlwaysKeepIcon[] = "window-pin";
-inline constexpr char FreeUpSpaceIcon[] = "cloudstatus";
+/// The icons of the menu's entries. "Always keep on this device" has none: it
+/// is a checkbox, and a check mark beside an empty box would say the opposite.
+/// "Free up space" shows the emblem the file will get.
+inline constexpr char FreeUpSpaceIcon[] = "konedrive-online-only";
 inline constexpr char OpenOnlineIcon[] = "internet-services";
 
 /// `/a/b` for `/a/b/c`, `/` for `/a`, empty for `/` or a relative name.

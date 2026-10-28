@@ -159,6 +159,7 @@ use crate::status::report::Report;
 use crate::status::throttle_wait::{decide_content_request, ContentAsker, ContentRequest};
 
 mod download_source;
+mod space_checked;
 
 use download_source::{wait_for_throttle_refusal, DownloadSource};
 
@@ -353,9 +354,46 @@ pub(crate) struct ItemDownloader {
     /// The folder's path, which is the mount: a download is shown under its file's path.
     folder: PathBuf,
     runtime: tokio::runtime::Handle,
+    pub(super) app_downloads: crate::download_guard::AccountDownloads,
+    read_reserve: Option<(Arc<crate::download_guard::DiskReservations>, Arc<dyn Fn() -> u64 + Send + Sync>)>,
 }
 
 impl ItemDownloader {
+    pub(super) fn with_app_downloads(mut self, downloads: crate::download_guard::AccountDownloads) -> Self {
+        self.app_downloads = downloads;
+        self
+    }
+
+    pub(super) fn with_read_reserve(mut self, disks: Arc<crate::download_guard::DiskReservations>, reserve: Arc<dyn Fn() -> u64 + Send + Sync>) -> Self {
+        self.read_reserve = Some((disks, reserve));
+        self
+    }
+
+    fn reserve_read(&self, size: u64) -> Option<Option<crate::download_guard::SpaceReservation>> {
+        let Some((disks, reserve)) = &self.read_reserve else { return Some(None); };
+        let space = self.backing_directory.measure_space().ok()?;
+        let free = (space.f_bavail as u64).saturating_mul(space.f_frsize as u64);
+        let allocation = size.div_ceil((space.f_frsize as u64).max(1)).saturating_mul((space.f_frsize as u64).max(1)).saturating_add(65536);
+        disks.reserve(space.f_fsid as u64, Some(free), reserve(), allocation).map(Some)
+    }
+
+    pub(super) fn read_fits(&self, size: u64) -> bool { self.reserve_read(size).is_some() }
+
+    fn keep_explicit_allocation(&self, size: u64, outside_plan: bool) -> Option<crate::download_guard::SpaceReservation> {
+        let (disks, _) = self.read_reserve.as_ref()?;
+        let space = self.backing_directory.measure_space().ok()?;
+        Some(disks.keep(space.f_fsid as u64, size.saturating_add(65536), outside_plan))
+    }
+
+    /// The plan already counts its running pins, but it must also leave room for reads
+    /// and explicit hydrate on this disk, including those of another account.
+    pub(super) fn free_space_for_plan(&self) -> Option<u64> {
+        let space = self.backing_directory.measure_space().ok()?;
+        let free = (space.f_bavail as u64).saturating_mul(space.f_frsize as u64);
+        Some(self.read_reserve.as_ref().map_or(free, |(disks, _)| disks.available_to_plan(space.f_fsid as u64, free)))
+    }
+
+
     /// Made by the mount's build, after the landing and the bridge.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -371,7 +409,8 @@ impl ItemDownloader {
         folder: PathBuf,
         runtime: tokio::runtime::Handle,
     ) -> Self {
-        Self { backing_directory, download_states, download_landing, inotify_bridge, write_operation_thread, source, pool, split_download_share, report, folder, runtime }
+        let app_downloads = Arc::new(crate::download_guard::AppDownloads::default()).account(&folder);
+        Self { backing_directory, download_states, download_landing, inotify_bridge, write_operation_thread, source, pool, split_download_share, report, folder, runtime, read_reserve: None, app_downloads }
     }
 
     /// Downloads `file` for `asker` unless a download of the same item and content runs
@@ -399,13 +438,17 @@ impl ItemDownloader {
     /// joins nothing: `waiter` hears `errno::THROTTLE_WAIT_ERRNO` at once, and the file is
     /// told as refused during the wait.
     pub(super) fn download(self: &Arc<Self>, file: ItemToDownload, asker: DownloadAsker, waiter: Option<Waiter>) {
-        self.start_or_join(file, asker, waiter, None);
+        self.start_or_join(file, asker, waiter, None, None);
+    }
+
+    pub(super) fn download_charged(self: &Arc<Self>, file: ItemToDownload, waiter: Option<Waiter>, charge: Option<Arc<crate::download_guard::DownloadCharge>>) {
+        self.start_or_join(file, DownloadAsker::Read, waiter, None, charge);
     }
 
     /// [`download`](Self::download), with who is told how the download ended, typed, when
     /// this asking starts it; an asking that joins hears its waiter alone, and `answer`
     /// is dropped.
-    fn start_or_join(self: &Arc<Self>, file: ItemToDownload, asker: DownloadAsker, waiter: Option<Waiter>, answer: Option<oneshot::Sender<DownloadEnd>>) {
+    fn start_or_join(self: &Arc<Self>, file: ItemToDownload, asker: DownloadAsker, waiter: Option<Waiter>, answer: Option<oneshot::Sender<DownloadEnd>>, charge: Option<Arc<crate::download_guard::DownloadCharge>>) {
         if let ContentRequest::Refused { .. } = decide_content_request(decide_content_asker(&asker), self.report.throttle_wait.seconds_left()) {
             if let Some(waiter) = waiter {
                 let _ = waiter.send(Err(THROTTLE_WAIT_ERRNO));
@@ -415,18 +458,33 @@ impl ItemDownloader {
             return;
         }
         let key = DownloadKey { item: file.item, content: file.content.clone() };
-        let (run, unfinished_file) = match self.download_states.start_or_join(&key, &asker, waiter) {
+        let attribution = charge.as_ref().and_then(|charge| self.app_downloads.begin(charge.identity(), file.item, file.content.clone()));
+        let started = self.download_states.start_or_join(&key, &asker, waiter);
+        if matches!(asker, DownloadAsker::FilesInterface | DownloadAsker::PlanPin { .. }) {
+            // A join is an explicit keep request too. Do this after start-or-join so
+            // an already-started read cannot register its ticket after invalidation.
+            self.app_downloads.forget_item(file.item);
+        }
+        let (run, unfinished_file) = match started {
             ItemDownloadStart::Started { run, unfinished_file } => (Arc::new(run), unfinished_file),
-            // The waiter hears the download's end, or heard `EIO` after the stop.
             ItemDownloadStart::Joined | ItemDownloadStart::Stopped => return,
         };
+        // Only a new allocation needs space. A join must not reserve the file twice.
+        // End before announcements or activity: this refusal changes no sync row.
+        let space = if matches!(asker, DownloadAsker::Read | DownloadAsker::OpenForWriting) {
+            match self.reserve_read(file.content.size()) {
+                Some(space) => space,
+                None => { self.download_states.finish_with_failure(&run, Err(libc::ENOSPC), false); return; }
+            }
+        } else { self.keep_explicit_allocation(file.content.size(), !matches!(asker, DownloadAsker::PlanPin { .. })) };
         // Made before the spawn and moved into the task: a task that is aborted before
         // its first line still says its download is over.
         let running = RunningDownload { download_states: Arc::clone(&self.download_states), run: Arc::clone(&run) };
         let downloader = Arc::clone(self);
         let task = self.runtime.spawn(async move {
             let running = running;
-            let end = downloader.run_download(&file, &asker, &running.run, unfinished_file).await;
+            let _space = space;
+            let end = downloader.run_download(&file, &asker, &running.run, unfinished_file, charge, attribution.as_ref()).await;
             if let Some(answer) = answer {
                 let _ = answer.send(end.clone());
             }
@@ -434,7 +492,8 @@ impl ItemDownloader {
             // an answer that stated another content is remembered as one.
             match &end {
                 Err(DownloadRefusal::AnotherContent) => downloader.download_states.finish_as_another_content(&running.run),
-                end => downloader.download_states.finish(&running.run, decide_waiters_answer(end)),
+                end => downloader.download_states.finish_with_failure(&running.run, decide_waiters_answer(end),
+                    matches!(end, Err(DownloadRefusal::Transient { .. }) | Ok(ItemLandingOutcome::Failed { .. } | ItemLandingOutcome::PlaceHeld { .. }))),
             }
         });
         self.download_states.keep_abort_handle(&run, task.abort_handle());
@@ -452,13 +511,13 @@ impl ItemDownloader {
     /// OneDrive anew, and nothing is known to change yet. Where it ends as
     /// [`DownloadEndNews::AnotherContentAgain`] or [`DownloadEndNews::SameFailureAgain`],
     /// nothing is told at its end either.
-    async fn run_download(self: &Arc<Self>, file: &ItemToDownload, asker: &DownloadAsker, run: &DownloadRun, unfinished_file: Option<Arc<File>>) -> DownloadEnd {
+    async fn run_download(self: &Arc<Self>, file: &ItemToDownload, asker: &DownloadAsker, run: &DownloadRun, unfinished_file: Option<Arc<File>>, charge: Option<Arc<crate::download_guard::DownloadCharge>>, attribution: Option<&crate::download_guard::DownloadTicket>) -> DownloadEnd {
         let Some((place, path)) = self.download_landing.find_shown_place(file.item).await else { return Ok(ItemLandingOutcome::RowsChanged) };
         let shown_path = self.folder.join(&path).display().to_string();
         if !self.download_states.is_another_content(run.key()) {
             self.inotify_bridge.announce(vec![ItemAnnouncement::ContentChanged { item: file.item, place: place.clone() }]);
         }
-        let end = self.fetch_and_land(file, asker, run, unfinished_file, &shown_path).await;
+        let end = self.fetch_and_land(file, asker, run, unfinished_file, &shown_path, charge, attribution).await;
         // Asked before the end is told to the states, which remember the key anew then.
         match decide_end_news(&end, self.download_states.find_another_content(run.key())) {
             DownloadEndNews::AnotherContentAgain | DownloadEndNews::SameFailureAgain => return end,
@@ -512,7 +571,7 @@ impl ItemDownloader {
     /// the slot, from the slot to the landing; checks it is the content asked
     /// for; gives it the content's time and the marks of a whole copy; syncs it, with no
     /// lock held; and lands it as one job of the write-operation thread.
-    async fn fetch_and_land(self: &Arc<Self>, file: &ItemToDownload, asker: &DownloadAsker, run: &DownloadRun, unfinished_file: Option<Arc<File>>, shown_path: &str) -> DownloadEnd {
+    async fn fetch_and_land(self: &Arc<Self>, file: &ItemToDownload, asker: &DownloadAsker, run: &DownloadRun, unfinished_file: Option<Arc<File>>, shown_path: &str, charge: Option<Arc<crate::download_guard::DownloadCharge>>, attribution: Option<&crate::download_guard::DownloadTicket>) -> DownloadEnd {
         let fail = |error: std::io::Error| ItemLandingOutcome::Failed { errno: error.raw_os_error().unwrap_or(libc::EIO) };
         let size = file.content.size();
         // Given up the moment OneDrive asks the account to wait while a program waits for
@@ -541,7 +600,11 @@ impl ItemDownloader {
         // raised by the source alone, and only for answers of the asked content. The
         // source also tells the states of the first such answer.
         let written_up_to = self.download_states.begin_writing(run, Arc::clone(&staged));
-        let source = DownloadSource::new(self.source.as_ref(), file.content.clone(), written_up_to, &self.download_states, run, self.report.throttle_wait.clone());
+        let checked = space_checked::SpaceChecked {
+            charge, inner: self.source.as_ref(), backing: Arc::clone(&self.backing_directory),
+            reserve: if !matches!(asker, DownloadAsker::FilesInterface) { self.read_reserve.as_ref().map(|(_, reserve)| Arc::clone(reserve)) } else { None },
+        };
+        let source = DownloadSource::new(&checked, file.content.clone(), written_up_to, &self.download_states, run, self.report.throttle_wait.clone());
         let tracked = Tracked::new(&source, shown.handle());
         // A large file that nothing waits to open (a pinned one) goes in parallel parts,
         // the slot held here being its first stream's.
@@ -574,11 +637,11 @@ impl ItemDownloader {
             Ok(Err(error)) => return Ok(fail(error)),
             Err(_) => return Ok(ItemLandingOutcome::Failed { errno: libc::EIO }),
         }
-        let mut outcome = self.land(&staged, decide_landing_condition(file, asker)).await;
+        let mut outcome = self.land(&staged, decide_landing_condition(file, asker), attribution.cloned()).await;
         if outcome == ItemLandingOutcome::StepStopped {
             // The plan's step was stopped and this download still runs: somebody else
             // asked for it too. Their file lands as a read's does.
-            outcome = self.land(&staged, LandingCondition::ContentUnchanged { item: file.item, downloaded: file.content.clone() }).await;
+            outcome = self.land(&staged, LandingCondition::ContentUnchanged { item: file.item, downloaded: file.content.clone() }, attribution.cloned()).await;
         }
         if matches!(outcome, ItemLandingOutcome::Landed { .. }) {
             slot.succeeded();
@@ -589,9 +652,10 @@ impl ItemDownloader {
     /// The landing of `staged` as one job of the write-operation thread, which is no
     /// thread of the runtime. A thread that is stopped drops the job: the folder is no
     /// longer served, and nothing lands.
-    async fn land(&self, staged: &Arc<File>, condition: LandingCondition) -> ItemLandingOutcome {
+    async fn land(&self, staged: &Arc<File>, condition: LandingCondition, attribution: Option<crate::download_guard::DownloadTicket>) -> ItemLandingOutcome {
         let (landing, staged) = (Arc::clone(&self.download_landing), Arc::clone(staged));
-        self.write_operation_thread.run_and_wait(move || landing.land(&staged, &condition)).await.unwrap_or(ItemLandingOutcome::Failed { errno: libc::EIO })
+        let downloads = self.app_downloads.clone();
+        self.write_operation_thread.run_and_wait(move || landing.land_tracked(&staged, &condition, attribution.as_ref(), Some(&downloads))).await.unwrap_or(ItemLandingOutcome::Failed { errno: libc::EIO })
     }
 
     /// As [`download`](Self::download) for the plan's pin (`DownloadAsker::PlanPin {
@@ -603,7 +667,7 @@ impl ItemDownloader {
     /// asked for after the stop — the mount stops — is `DownloadRefusal::Transient`.
     pub(crate) async fn download_and_land(self: &Arc<Self>, file: ItemToDownload, planned_from: ItemVersions) -> Result<ItemLandingOutcome, DownloadRefusal> {
         let ((waiter, heard), (answer, answered)) = (oneshot::channel(), oneshot::channel());
-        self.start_or_join(file, DownloadAsker::PlanPin { planned_from }, Some(waiter), Some(answer));
+        self.start_or_join(file, DownloadAsker::PlanPin { planned_from }, Some(waiter), Some(answer), None);
         // The waiter is answered by the download's last act: awaited also where the typed
         // answer came, so that the download is over, and its key free, when this returns.
         let (answered, heard) = (answered.await, heard.await);

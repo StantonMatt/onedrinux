@@ -2,6 +2,7 @@
 
 #include "accountcontroller.h"
 #include "activitymodel.h"
+#include "downloadguardcontroller.h"
 #include "skipreasons.h"
 #include "uploadreasons.h"
 #include "synccontroller.h"
@@ -14,6 +15,7 @@
 
 #include <QElapsedTimer>
 #include <QFileInfo>
+#include <QLocale>
 #include <QTimer>
 #include <QUrl>
 
@@ -42,10 +44,24 @@ KNotificationSink::KNotificationSink(OpenWindow openWindow)
 
 void KNotificationSink::send(const Notice &notice)
 {
+    if (!notice.key.isEmpty()) {
+        withdraw(notice.key);
+    }
     auto *notification = new KNotification(notice.event);
     notification->setComponentName(QStringLiteral("konedrive"));
     notification->setTitle(notice.title);
     notification->setText(notice.text);
+    if (!notice.iconName.isEmpty()) {
+        notification->setIconName(notice.iconName);
+    }
+    for (const NoticeAction &action : notice.actions) {
+        const std::function<void()> run = action.run;
+        QObject::connect(notification->addAction(action.text), &KNotificationAction::activated, notification, [run] {
+            if (run) {
+                run();
+            }
+        });
+    }
     if (!notice.showPath.isEmpty()) {
         const QString path = notice.showPath;
         KNotificationAction *show = notification->addAction(i18nc("@action:button", "Show in Folder"));
@@ -77,7 +93,18 @@ void KNotificationSink::send(const Notice &notice)
             openWindow(account, section);
         });
     }
+    if (!notice.key.isEmpty()) {
+        m_keyed.insert(notice.key, notification);
+    }
     notification->sendEvent();
+}
+
+void KNotificationSink::withdraw(const QString &key)
+{
+    const QPointer<KNotification> shown = m_keyed.take(key);
+    if (shown) {
+        shown->close();
+    }
 }
 
 Notifier::Notifier(AccountController *account, SyncController *sync, NotificationSink *sink, Clock clock, QObject *parent)
@@ -119,7 +146,8 @@ Notifier::Notifier(AccountController *account, SyncController *sync, Notificatio
 
 void Notifier::onActivity(qint64, const QString &kind, const QString &path, const QString &detail)
 {
-    const QString name = fileName(path);
+    // Plasma renders notification bodies as markup; filenames are untrusted text.
+    const QString name = fileName(path).toHtmlEscaped();
     if (kind == QLatin1String("not-removed-here")) {
         // The path is the directory; rmdir itself could only say "not empty". Nothing to press.
         post({QStringLiteral("notRemovedHere"),
@@ -140,7 +168,7 @@ void Notifier::onActivity(qint64, const QString &kind, const QString &path, cons
     }
     if (kind == QLatin1String("conflict")) {
         // A file changed on both sides: the daemon's detail is the copy kept beside it.
-        post({QStringLiteral("conflict"), WindowSection::KeptBothVersions, copyTitle(), i18n("%1 changed here and in OneDrive. Kept both versions: yours is %2.", name, fileName(detail)), detail});
+        post({QStringLiteral("conflict"), WindowSection::KeptBothVersions, copyTitle(), i18n("%1 changed here and in OneDrive. Kept both versions: yours is %2.", name, fileName(detail).toHtmlEscaped()), detail});
         return;
     }
     switch (classifyFailure(kind, detail)) {
@@ -153,7 +181,7 @@ void Notifier::onActivity(qint64, const QString &kind, const QString &path, cons
         post({QStringLiteral("updateFailed"),
               WindowSection::History,
               i18nc("@title notification", "A file could not be updated"),
-              i18n("%1 changed in OneDrive but could not be updated here: %2", name, detail),
+              i18n("%1 changed in OneDrive but could not be updated here: %2", name, detail.toHtmlEscaped()),
               {}});
         return;
     case ActivityFailure::Upload:
@@ -172,7 +200,7 @@ void Notifier::onActivity(qint64, const QString &kind, const QString &path, cons
         post({QStringLiteral("downloadFailed"),
               WindowSection::History,
               i18nc("@title notification", "Download failed"),
-              detail.isEmpty() ? i18n("%1 could not be downloaded.", name) : i18n("%1 could not be downloaded: %2", name, detail),
+              detail.isEmpty() ? i18n("%1 could not be downloaded.", name) : i18n("%1 could not be downloaded: %2", name, detail.toHtmlEscaped()),
               {}});
         return;
     }
@@ -199,7 +227,7 @@ void Notifier::onSyncChanged()
     // once for the wait, with the first file refused, never per read.
     const QString refused = m_sync->retryAfterRefusal();
     if (m_waitRefusal.isEmpty() && !refused.isEmpty()) {
-        const QString name = fileName(refused);
+        const QString name = fileName(refused).toHtmlEscaped();
         const int minutes = int((m_sync->retryAfter() + 59) / 60);
         post({QStringLiteral("throttled"),
               WindowSection::Status,
@@ -326,4 +354,162 @@ void Notifier::arm()
         next = qMin(next, window.endsAt);
     }
     m_timer->start(int(qBound<qint64>(0, next - m_clock(), WindowMs)));
+}
+
+GuardNotifier::GuardNotifier(DownloadGuardController *guard, NotificationSink *sink, QObject *parent)
+    : QObject(parent)
+    , m_guard(guard)
+    , m_sink(sink)
+{
+    connect(guard, &DownloadGuardController::downloadsBlocked, this, &GuardNotifier::onBlocked);
+    connect(guard, &DownloadGuardController::appsChanged, this, &GuardNotifier::reconcile);
+    connect(guard, &DownloadGuardController::changed, this, &GuardNotifier::reconcile);
+}
+
+void GuardNotifier::onBlocked(const GuardApp &app)
+{
+    if (app.reason == QLatin1String("unidentified")) {
+        post(app.identity,
+             {QStringLiteral("downloadsBlocked"),
+              WindowSection::GuardApps,
+              i18nc("@title notification", "Download blocked"),
+              i18n("A program was blocked from downloading from OneDrive because KOneDrive couldn't tell which program it was."),
+              {}});
+        return;
+    }
+    // A background reader is refused whatever it reads; an app always blocked was blocked by
+    // the user. Neither is news.
+    if (app.reason != QLatin1String("bulk") || !m_guard) {
+        return;
+    }
+    // Plasma reads a notification's text as markup: the name is the program's own say.
+    const QString name = app.name.toHtmlEscaped();
+    const QString window = m_guard->windowText();
+    QString text;
+    if (app.files >= m_guard->maxFiles()) {
+        text = i18nc("@info notification: the app, how many files, how long",
+                     "%1 downloaded %2 from OneDrive in %3. To save space, its downloads are blocked until you allow them.",
+                     name,
+                     m_guard->filesText(app.files),
+                     window);
+    } else if (app.bytes > 0) {
+        text = i18nc("@info notification: the app, how much, how long",
+                     "%1 downloaded %2 from OneDrive in %3. To save space, its downloads are blocked until you allow them.",
+                     name,
+                     QLocale().formattedDataSize(qint64(app.bytes)),
+                     window);
+    } else {
+        // One file over the byte limit on its own.
+        text = i18nc("@info notification: the app, the byte limit",
+                     "%1 tried to download a file larger than %2 from OneDrive. To save space, its downloads are blocked until you allow them.",
+                     name,
+                     DownloadGuardController::bytesText(m_guard->maxBytes()));
+    }
+    const QPointer<GuardNotifier> self(this);
+    const QString identity = app.identity;
+    const QString shownName = app.name;
+    const QString iconName = app.iconName;
+    const auto refusedThen = [self, identity, shownName](const QString &error) {
+        if (self) {
+            self->refused(identity, shownName, error);
+        }
+    };
+    Notice notice{QStringLiteral("downloadsBlocked"), WindowSection::GuardApps, i18nc("@title notification", "Too many downloads by %1", app.name), text, {}};
+    notice.iconName = iconName;
+    notice.actions = {
+        {i18nc("@action:button", "Allow for This Session"),
+         [self, identity, refusedThen] {
+             if (self && self->m_guard) {
+                 self->m_guard->allowApp(identity, false, refusedThen);
+             }
+         }},
+        {i18nc("@action:button", "Always Allow"),
+         [self, identity, refusedThen] {
+             if (self && self->m_guard) {
+                 self->m_guard->allowApp(identity, true, refusedThen);
+             }
+         }},
+        {i18nc("@action:button", "Always Block"),
+         [self, identity, refusedThen] {
+             if (self && self->m_guard) {
+                 self->m_guard->blockApp(identity, refusedThen);
+             }
+         }},
+        {i18nc("@action:button", "Free Up What It Downloaded"),
+         [self, identity, shownName, iconName] {
+             if (self) {
+                 self->freeUp(identity, shownName, iconName);
+             }
+         }},
+    };
+    post(identity, notice);
+}
+
+void GuardNotifier::freeUp(const QString &identity, const QString &name, const QString &iconName)
+{
+    if (!m_guard) {
+        return;
+    }
+    const QPointer<GuardNotifier> self(this);
+    m_guard->freeUpAppDownloads(
+        identity,
+        [self, identity, name, iconName](qulonglong files, qulonglong bytes) {
+            if (!self) {
+                return;
+            }
+            Notice notice{QStringLiteral("downloadsBlocked"),
+                          WindowSection::GuardApps,
+                          i18nc("@title notification", "Freed up what %1 downloaded", name),
+                          DownloadGuardController::freedText(files, bytes),
+                          {}};
+            notice.iconName = iconName;
+            self->post(identity, notice);
+        },
+        [self, identity, name, iconName](const QString &error) {
+            if (!self) {
+                return;
+            }
+            Notice notice{QStringLiteral("downloadsBlocked"),
+                          WindowSection::GuardApps,
+                          i18nc("@title notification", "Could not free up what %1 downloaded", name),
+                          error.toHtmlEscaped(),
+                          {}};
+            notice.iconName = iconName;
+            self->post(identity, notice);
+        });
+}
+
+void GuardNotifier::refused(const QString &identity, const QString &name, const QString &error)
+{
+    post(identity,
+         {QStringLiteral("downloadsBlocked"),
+          WindowSection::GuardApps,
+          i18nc("@title notification", "Could not change what %1 may download", name),
+          error.toHtmlEscaped(),
+          {}});
+}
+
+void GuardNotifier::post(const QString &identity, Notice notice)
+{
+    notice.key = QStringLiteral("downloadGuard:") + identity;
+    m_shown.insert(identity);
+    m_sink->send(notice);
+}
+
+void GuardNotifier::reconcile()
+{
+    if (!m_guard) {
+        return;
+    }
+    for (auto it = m_shown.begin(); it != m_shown.end();) {
+        const GuardApp *app = m_guard->app(*it);
+        const QString state = app ? m_guard->stateOf(*app) : QString();
+        // Still blocked and waiting for the user, as the list says: what is shown stays.
+        if (m_guard->enabled() && (state == QLatin1String("blocked") || state == QLatin1String("unidentified"))) {
+            ++it;
+            continue;
+        }
+        m_sink->withdraw(QStringLiteral("downloadGuard:") + *it);
+        it = m_shown.erase(it);
+    }
 }

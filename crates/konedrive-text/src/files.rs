@@ -29,7 +29,7 @@ pub enum Operation {
     Unpin,
     /// "Free up space"; `sync free`.
     FreeUp,
-    /// "Open in OneDrive"; `sync open`.
+    /// "View Online"; `sync open`.
     OpenOnline,
 }
 
@@ -254,7 +254,7 @@ pub static REFUSALS: [RefusalText; 27] = [
         without_detail: None,
         several: OF_ONE,
     },
-    // "Open in OneDrive" asks OneDrive each time. The daemon's message is the
+    // "View Online" asks OneDrive each time. The daemon's message is the
     // cause (no network, a locked secret storage, an answer that cannot be read).
     RefusalText {
         refusal: Refusal::Unreachable,

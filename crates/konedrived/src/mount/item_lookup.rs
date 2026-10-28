@@ -212,6 +212,7 @@ pub(super) struct ItemLookup {
     backing_directory: Arc<BackingDirectory>,
     /// Unix seconds: the time of a directory that has none of its own.
     mount_started_at: i64,
+    directory_states: Option<Arc<super::directory_states::DirectoryStates>>,
 }
 
 impl ItemLookup {
@@ -228,7 +229,12 @@ impl ItemLookup {
         backing_directory: Arc<BackingDirectory>,
         mount_started_at: i64,
     ) -> Self {
-        Self { read_connections, place_changes, item_handles, download_states, access_mode_switch, running_steps, published_plan, backing_directory, mount_started_at }
+        Self { read_connections, place_changes, item_handles, download_states, access_mode_switch, running_steps, published_plan, backing_directory, mount_started_at, directory_states: None }
+    }
+
+    pub(super) fn with_directory_states(mut self, states: Arc<super::directory_states::DirectoryStates>) -> Self {
+        self.directory_states = Some(states);
+        self
     }
 
     /// The row of `node`, as the folder shows it or not. Calls `ItemReader::find_item` on
@@ -451,6 +457,18 @@ impl ItemLookup {
             return Err(Errno::ENODATA);
         }
         let (item, facts) = self.read_xattr_facts(node, Some(name))?;
+        if let Some(states) = &self.directory_states {
+            if item.kind == ItemKind::Directory {
+                let (state, sync) = states.directory_values(node);
+                match name {
+                    XATTR_STATE => return Ok(state.as_str().as_bytes().to_vec()),
+                    XATTR_SYNC => return sync.map(|mark| mark.as_str().as_bytes().to_vec()).ok_or(Errno::ENODATA),
+                    _ => {}
+                }
+            } else if name == XATTR_STATE {
+                return states.file_state(node).map(|state| state.as_str().as_bytes().to_vec()).ok_or(Errno::ENODATA);
+            }
+        }
         decide_xattr_value(name, &item, &facts).ok_or(Errno::ENODATA)
     }
 

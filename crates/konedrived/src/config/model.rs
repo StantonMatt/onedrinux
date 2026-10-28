@@ -41,6 +41,12 @@ pub struct Config {
     /// not know cannot make the whole file unreadable ([`Config::on_battery`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_battery: Option<String>,
+    /// Guard remote reads by programs; absent means on. Explicit hydrate and pin bypass it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_guard: Option<bool>,
+    /// Machine-wide thresholds, reader roles and persistent app rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_guard_limits: Option<crate::download_guard::GuardConfig>,
     /// Every account, in the order it was added.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub accounts: Vec<AccountConfig>,
@@ -77,7 +83,7 @@ pub struct TransfersConfig {
 pub const DOWNLOAD_AFTER: u64 = 1 << 20;
 
 /// How many gigabytes of the free space of the disk an account's folder is on the
-/// downloads of its pinned files leave, when its section names none.
+/// downloads of its pinned files and read-triggered whole copies leave, when its section names none.
 pub const DEFAULT_FREE_SPACE_RESERVE_GB: u64 = 10;
 
 impl Config {
@@ -137,6 +143,8 @@ impl Default for Config {
             write_test_drive_ids: Vec::new(),
             pause_on_metered: None,
             on_battery: None,
+            download_guard: None,
+            download_guard_limits: None,
             accounts: Vec::new(),
             transfers: None,
         }
@@ -192,7 +200,7 @@ pub struct AccountConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) paused_until: Option<i64>,
     /// How many gigabytes of the free space of the disk the account's folder is on the
-    /// downloads of pinned files leave; `None` for
+    /// downloads of pinned files and read-triggered whole copies leave; `None` for
     /// [`DEFAULT_FREE_SPACE_RESERVE_GB`]. 0 keeps nothing free.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) free_space_reserve_gb: Option<u64>,

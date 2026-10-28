@@ -104,7 +104,9 @@ fn to_fh(fh: FileHandle) -> Fh {
 }
 
 fn to_fopen_flags(opened: &OpenedFile) -> FopenFlags {
-    if opened.keeps_cache {
+    if opened.direct_io {
+        FopenFlags::FOPEN_DIRECT_IO
+    } else if opened.keeps_cache {
         FopenFlags::FOPEN_KEEP_CACHE
     } else {
         FopenFlags::empty()
@@ -237,11 +239,12 @@ impl KernelRequests {
     /// request's number until it ends, for the kernel's interrupt.
     fn fetch_on_runtime(&self, req: &Request, range: RangeToFetch, fetch: RangeFetch, reply: ReplyData) {
         let request = req.unique().0;
+        let pid = req.pid();
         let (requests, reads) = (Arc::clone(&self.requests), Arc::clone(&self.interruptible_reads));
         let read = async move {
             let fetched = match fetch {
-                RangeFetch::Range => requests.fetch_read_range(range).await,
-                RangeFetch::AfterWholeDownload => requests.fetch_range_after_download(range).await,
+                RangeFetch::Range => requests.read_range(range, Some(pid)).await,
+                RangeFetch::AfterWholeDownload => requests.read_after_download(range, Some(pid)).await,
             };
             reads.remove(request);
             match fetched {
@@ -256,6 +259,7 @@ impl KernelRequests {
 impl Filesystem for KernelRequests {
     fn init(&mut self, _req: &Request, config: &mut KernelConfig) -> io::Result<()> {
         let _ = config.set_max_readahead(1 << 20);
+        let _ = config.add_capabilities(InitFlags::FUSE_DIRECT_IO_ALLOW_MMAP);
         // The truncate to nothing comes with the open: a file that is not downloaded and is
         // overwritten whole is never downloaded first.
         let _ = config.add_capabilities(InitFlags::FUSE_DO_READDIRPLUS | InitFlags::FUSE_READDIRPLUS_AUTO | InitFlags::FUSE_PARALLEL_DIROPS | InitFlags::FUSE_ATOMIC_O_TRUNC);
@@ -280,14 +284,14 @@ impl Filesystem for KernelRequests {
         self.interruptible_reads.interrupt(unique.0);
     }
 
-    fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
+    fn open(&self, req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
         let node = to_local_item_id(ino);
         // Opening to write is a change of the folder.
         if flags.0 & libc::O_TRUNC != 0 {
             return self.requests.queue_open_to_overwrite(node, reply_to_open(reply));
         }
         if flags.0 & libc::O_ACCMODE == libc::O_RDONLY {
-            return match self.requests.answer_open_to_read(node) {
+            return match self.requests.open_to_read(node, Some(req.pid())) {
                 Ok(opened) => reply.opened(to_file_handle(opened.fh), to_fopen_flags(&opened)),
                 Err(errno) => {
                     if errno.code() == THROTTLE_WAIT_ERRNO {
@@ -301,6 +305,7 @@ impl Filesystem for KernelRequests {
         match self.requests.decide_open_to_write(node) {
             Ok(FileToFill::Nothing) => self.requests.queue_open_to_write(node, reply_to_open(reply)),
             Ok(FileToFill::Download(file)) => {
+                if let Err(errno) = self.requests.admit_fill(req.pid(), &file) { return reply.error(errno); }
                 let (requests, reply) = (Arc::clone(&self.requests), reply_to_open(reply));
                 self.runtime.spawn(async move { requests.fill_and_open_to_write(node, file, reply).await });
             }
@@ -460,6 +465,9 @@ impl Filesystem for KernelRequests {
             (Some(size), _, _) => match self.requests.decide_truncate(node, size) {
                 Ok(FileToFill::Nothing) => self.requests.queue_truncate(node, fh, size, reply_to_attributes(reply)),
                 Ok(fill @ FileToFill::Download(_)) => {
+                    if let FileToFill::Download(file) = &fill {
+                        if let Err(errno) = self.requests.admit_fill(req.pid(), file) { return reply.error(errno); }
+                    }
                     let (requests, reply) = (Arc::clone(&self.requests), reply_to_attributes(reply));
                     self.runtime.spawn(async move { requests.fill_and_truncate(node, fh, size, fill, reply).await });
                 }

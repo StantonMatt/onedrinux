@@ -1474,3 +1474,64 @@ fn while_onedrive_asks_to_wait_what_needs_its_content_fails_at_once_and_the_rest
     let fh = mount.open_to_read(other).unwrap().fh;
     assert_eq!(mount.read(fh, 0, 4).unwrap(), b"klmn");
 }
+
+#[test]
+fn download_guard_refuses_remote_opens_and_reads_without_changing_rows() {
+    let mount = Requests::new();
+    let remote = mount.fixture.show_onedrive_file("remote.txt", b"remote").local_item_id;
+    let here = mount.fixture.show_onedrive_file("here.txt", b"here").local_item_id;
+    mount.fixture.land_copy(here, b"here");
+    let before = mount.row(remote);
+    // An uninspectable PID fails closed; an on-disk open never asks who it was.
+    assert_eq!(mount.ask(move |r| r.open_to_read(remote, Some(u32::MAX))).err(), Some(Errno::EACCES));
+    let opened = mount.ask(move |r| r.open_to_read(here, Some(u32::MAX))).unwrap();
+    assert_eq!(mount.read(opened.fh, 0, 4).unwrap(), b"here");
+    mount.release(opened.fh);
+    let opened = mount.open_to_read(remote).unwrap();
+    let range = mount.ask(move |r| match r.decide_read(opened.fh, 0, 6).unwrap() {
+        ReadAnswer::Range(range) => range,
+        _ => panic!("cloud-only range"),
+    });
+    assert_eq!(mount.fixture.runtime().block_on(mount.requests.read_range(range, Some(u32::MAX))), Err(Errno::EACCES));
+    mount.release(opened.fh);
+    assert_eq!(mount.row(remote), before);
+    assert!(mount.list_fetched_ranges().is_empty());
+    assert!(mount.fixture.read_disk_file("remote.txt").is_none());
+}
+
+#[test]
+fn download_guard_explicit_hydrate_and_pin_bypass_the_reader_policy() {
+    let fixture = ItemFixture::new();
+    let file = fixture.show_onedrive_file("remote.txt", b"remote").local_item_id;
+    let pinned = fixture.show_onedrive_file("pin.txt", b"pin").local_item_id;
+    let mut setup = fixture.mount_setup();
+    let exe = std::env::current_exe().unwrap();
+    setup.download_guard = Arc::new(crate::download_guard::DownloadGuard::new(true, crate::download_guard::GuardConfig {
+        background_readers: vec![exe.file_name().unwrap().to_str().unwrap().into()],
+        ..Default::default()
+    }));
+    let (mount, requests) = crate::mount::item_mount::build_order::build(setup, fixture.runtime()).unwrap();
+    assert_eq!(requests.open_to_read(file, Some(std::process::id())).err(), Some(Errno::EACCES));
+    let files = mount.files_interface();
+    fixture.runtime().block_on(files.download(&fixture.disk_path("remote.txt"))).unwrap();
+    assert_eq!(fixture.read_disk_file("remote.txt").as_deref(), Some(&b"remote"[..]));
+    assert!(requests.open_to_read(file, Some(u32::MAX)).is_ok());
+    assert!(fixture.runtime().block_on(files.set_pin(&fixture.disk_path("pin.txt"), true)).unwrap());
+    assert!(fixture.runtime().block_on(fixture.store.read_items(move |reader| reader.is_pinned(pinned))).unwrap());
+}
+
+#[test]
+fn download_guard_low_space_serves_ranges_without_a_whole_download() {
+    let fixture = ItemFixture::new();
+    let file = fixture.show_onedrive_file("remote.txt", b"remote").local_item_id;
+    let mut setup = fixture.mount_setup();
+    setup.free_space_reserve = Arc::new(|| u64::MAX);
+    let (mount, requests) = crate::mount::item_mount::build_order::build(setup, fixture.runtime()).unwrap();
+    let opened = requests.open_to_read(file, Some(std::process::id())).unwrap();
+    let ReadAnswer::Range(range) = requests.decide_read(opened.fh, 0, 6).unwrap() else { panic!("range expected"); };
+    assert_eq!(fixture.runtime().block_on(requests.read_range(range, Some(std::process::id()))).unwrap(), b"remote");
+    assert_eq!(fixture.find_item(file).unwrap().content_presence, ContentPresence::NotOnDisk);
+    assert!(!mount.folder_step_parts().download_states.is_downloading(file));
+    assert!(fixture.read_disk_file("remote.txt").is_none());
+    requests.answer_release(opened.fh);
+}

@@ -43,6 +43,7 @@ pub(crate) fn make_start_input(fixture: &ItemFixture, drive: DriveClient) -> Fol
         pool: Arc::clone(&fixture.pool),
         split_download_share: Arc::clone(&fixture.split_download_share),
         download_after: crate::mount::item_fixture::DOWNLOAD_AFTER,
+        download_guard: Arc::new(crate::download_guard::DownloadGuard::default()),
         tree_lock: Arc::clone(&fixture.tree_lock),
         lease: Lease::on(&Arc::new(tokio::sync::RwLock::new(()))),
         ignore: Arc::clone(&fixture.ignore),

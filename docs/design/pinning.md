@@ -98,8 +98,9 @@ default (`Folder.SetFreeSpaceReserve`, `konedrivectl sync free-space`, OneDrive 
 measured anew for every choice, on the filesystem the backing directory is on; a download that
 runs counts with its whole size; space that cannot be measured holds nothing. After a plan that
 held a download for space, the next is made 60 seconds later. `Folder.LastError` and `Trouble` say
-how many wait. A read of a file and `Files.Hydrate` are never held: the disk answers them
-`ENOSPC` itself.
+how many wait. Read-triggered whole downloads now have their own space reservations and
+stream checks; without room reads stay as ranges ([download-guard.md](download-guard.md#space)).
+Explicit `Files.Hydrate` keeps its existing behavior: the disk can answer `ENOSPC`.
 
 **New and changed items.** What OneDrive adds to a pinned directory, and what is moved into one,
 is a file the pin holds for whose content is not on disk: the next plan downloads it. A pinned
@@ -162,10 +163,10 @@ reading connection, which never waits for a sync that is writing. The keys:
   is pinned from the command line only;
 - `always-keep`: `hidden` when `paths` is empty, `on` when a pin holds for every path, else
   `off`;
-- `free-up`: shown for any directory, any downloaded file and any file a pin holds for, as on
-  Windows; `disabled`, with `free-up-why` `not-uploaded`, when a downloaded file among them holds
-  a change not uploaded yet;
-- `open-online`, `open-online-path`: "Open in OneDrive", for one selected path
+- `free-up`: shown when `paths` is nonempty; `disabled` on online-only files with no pin
+  to remove, and `disabled`, with `free-up-why` `not-uploaded`, when a downloaded file among
+  them holds a change not uploaded yet;
+- `open-online`, `open-online-path`: "View Online", for one selected path
   ([desktop.md](desktop.md)).
 
 ## 5. The command line

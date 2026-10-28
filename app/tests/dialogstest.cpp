@@ -625,6 +625,8 @@ private Q_SLOTS:
         fake.sync->folder->set({{QStringLiteral("Path"), QStringLiteral("/home/u/OneDrive")},
                                 {QStringLiteral("State"), QStringLiteral("ready")},
                                 {QStringLiteral("Source"), QStringLiteral("onedrive")}});
+        // The previews' warning is for a download guard that is off (guardpagestest has it on).
+        fake.guard->set({{QStringLiteral("Enabled"), false}});
         QVERIFY(fake.start());
 
         Autostart autostart;
@@ -637,7 +639,8 @@ private Q_SLOTS:
         ServiceUnit serviceUnit;
         DroppedNotices releaseNotices;
         ReleaseCheck releaseCheck(QStringLiteral(KONEDRIVE_VERSION), &releaseNotices);
-        registerKonedriveQml(&daemon, &accounts, &current, &autostart, &progress, &places, &trayIcons, &serviceUnit, &releaseCheck);
+        DownloadGuardController guard;
+        registerKonedriveQml(&daemon, &accounts, &current, &autostart, &progress, &places, &trayIcons, &serviceUnit, &releaseCheck, &guard);
 
         QQmlApplicationEngine engine;
         KLocalization::setupLocalizedContext(&engine);
@@ -648,6 +651,7 @@ private Q_SLOTS:
         window->show();
         QTRY_COMPARE(accounts.count(), 1);
         QTRY_VERIFY(accounts.at(0)->sync()->serviceAvailable() && accounts.at(0)->account()->state() == QLatin1String("signed-in"));
+        QTRY_VERIFY(guard.serviceAvailable() && !guard.enabled());
         QMetaObject::invokeMethod(window, "showPage", Q_ARG(QVariant, QStringLiteral("oneDriveSettings")));
         auto *thumbnails = window->findChild<QQuickItem *>(QStringLiteral("thumbnailsSwitch"));
         auto *offLine = window->findChild<QQuickItem *>(QStringLiteral("thumbnailsOffLine"));
@@ -1360,6 +1364,9 @@ private Q_SLOTS:
     {
         const QString root = QStringLiteral("/home/u/OneDrive");
         FakeDaemon fake;
+        // This case has only upload refusals. The fake's default Personal Vault row
+        // otherwise arrives asynchronously and adds an unrelated visible path.
+        fake.sync->skippedList.clear();
         fake.account->set({{QStringLiteral("State"), QStringLiteral("signed-in")}, {QStringLiteral("Mode"), QStringLiteral("read-write")}});
         fake.sync->folder->set({{QStringLiteral("Path"), root},
                                 {QStringLiteral("State"), QStringLiteral("ready")},

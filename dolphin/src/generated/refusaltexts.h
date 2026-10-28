@@ -38,7 +38,7 @@ QString tooManyWaitingSentence(Operation operation, const QString &file, int cou
 /// reason is said.
 QString freeUpWhyToolTip(MenuAnswer::FreeUpWhy why);
 
-/// "Open in OneDrive" is disabled.
+/// "View Online" is disabled.
 QString notInOneDriveToolTip();
 
 } // namespace konedrive

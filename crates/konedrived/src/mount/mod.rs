@@ -62,6 +62,7 @@ mod item_handles;
 mod item_inotify_bridge;
 mod item_kernel_requests;
 mod item_lookup;
+mod directory_states;
 mod item_mount;
 mod item_range_fetcher;
 mod item_read_origin;

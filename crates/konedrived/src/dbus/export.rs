@@ -87,6 +87,8 @@ impl Bus for OnBus {
         let server = connection.object_server();
         server.at(ACCOUNTS_PATH, Accounts { manager: Arc::clone(manager) }).await?;
         server.at(ACCOUNTS_PATH, Files { manager: Arc::clone(manager) }).await?;
+        server.at(ACCOUNTS_PATH, super::download_guard::DownloadGuard { config: Arc::clone(manager.config()), manager: Arc::clone(manager) }).await?;
+        super::download_guard::start_signals(connection, manager.config());
         #[cfg(feature = "dev-tools")]
         server.at(ACCOUNTS_PATH, crate::dbus::dev_tools::DevTools { manager: Arc::clone(manager) }).await?;
         Ok(())

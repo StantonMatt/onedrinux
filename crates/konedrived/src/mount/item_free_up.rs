@@ -138,9 +138,27 @@ impl ItemFreeUp {
         }
     }
 
+    /// App reclamation never interrupts a reader or frees another version. Called on
+    /// the write-operation thread, like ordinary free-up; opens register under the same
+    /// reader gate, and writers and landings are serialized by this thread.
+    pub(super) fn free_app_copy(&self, item: LocalItemId, content: &ContentVersion) -> FreedCopy {
+        let _readers = crate::panic::lock(&self.item_handles.reader_gate);
+        if self.item_handles.is_open_for_reading(item) {
+            return FreedCopy::RowsChanged;
+        }
+        match self.write_not_on_disk_if(item, Some(content)) {
+            Ok(freed) => self.remove_freed_copy(freed),
+            Err(left) => left,
+        }
+    }
+
     /// The first half of a free-up: the decision and the row. The copy whose row says not
     /// on disk now; or what the free-up answers when the row was left as it is.
     fn write_not_on_disk(&self, item: LocalItemId) -> Result<FreedRow, FreedCopy> {
+        self.write_not_on_disk_if(item, None)
+    }
+
+    fn write_not_on_disk_if(&self, item: LocalItemId, expected: Option<&ContentVersion>) -> Result<FreedRow, FreedCopy> {
         let fail = |error: TreeError| {
             tracing::warn!("the copy of item {item} is not freed: {error}");
             FreedCopy::RowsChanged
@@ -155,6 +173,9 @@ impl ItemFreeUp {
         let Some((is_pinned, row, path)) = read.map_err(fail)? else { return Err(FreedCopy::Left(FreeUpDecision::NothingToFree)) };
         // What is not on disk takes no space, whatever keeps it.
         let Some((content, place)) = find_copy_on_disk(&row) else { return Err(FreedCopy::Left(FreeUpDecision::NothingToFree)) };
+        if expected.is_some_and(|expected| expected != &content) {
+            return Err(FreedCopy::RowsChanged);
+        }
         let is_downloading_or_sent = self.download_states.is_downloading(item) || self.running_steps.has_running_step(item);
         match decide_item_free_up(&row, is_pinned, is_downloading_or_sent, self.item_handles.is_open_for_writing(item)) {
             FreeUpDecision::Free => {}

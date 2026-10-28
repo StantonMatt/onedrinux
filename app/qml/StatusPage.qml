@@ -8,10 +8,10 @@ import org.konedrive.app
 
 /// The OneDrive chosen in the sidebar on one page, the one the window opens on. In its header
 /// Sync Now, Pause (Resume while paused) and Open Folder. Then what its folder is doing or
-/// what stops it, with the one thing to do, and one line of what Issues lists; the space it
-/// takes, with Free Up Space and Unpin All; each way's speed over the last two minutes and
-/// what is left, the transfer pool, and the files moving now; and its History, folded until
-/// it is opened, with a search. An account with no folder yet has Choose Folder… in its head,
+/// what stops it, with the one thing to do, and one line of what Issues lists; the apps the
+/// download guard blocked, with Allow; the space it takes, with Free Up Space and Unpin All;
+/// each way's speed over the last two minutes and what is left, the transfer pool, and the
+/// files moving now; and its History, folded until it is opened, with a search. An account with no folder yet has Choose Folder… in its head,
 /// and one whose syncing stopped only why, with Try Again and Use Another Folder….
 ///
 /// One list: what is above History is its header, and History's events are its rows, built
@@ -368,6 +368,59 @@ ListPage {
                     description: i18n("Issues says why, and what to do.")
                     icon.name: "dialog-warning"
                     onClicked: page.window.showPage("issues")
+                }
+            }
+
+            // The apps the download guard blocked, which wait for the user: the guard's, for
+            // every account, and here as long as they are blocked, after their notification is
+            // gone. What else it does is in Settings.
+            FormCard.FormHeader {
+                visible: blockedAppsCard.visible
+                title: i18nc("@title:group", "Blocked apps")
+            }
+            FormCard.FormCard {
+                id: blockedAppsCard
+                objectName: "blockedAppsCard"
+                visible: DownloadGuard.serviceAvailable && DownloadGuard.enabled && DownloadGuard.blockedApps.length > 0
+
+                Kirigami.InlineMessage {
+                    Layout.fillWidth: true
+                    Layout.margins: Kirigami.Units.smallSpacing
+                    type: Kirigami.MessageType.Error
+                    text: DownloadGuard.actionError
+                    visible: text.length > 0
+                }
+                // What the last Free Up What It Downloaded did, until it is closed.
+                Kirigami.InlineMessage {
+                    Layout.fillWidth: true
+                    Layout.margins: Kirigami.Units.smallSpacing
+                    visible: text.length > 0
+                    type: Kirigami.MessageType.Information
+                    text: DownloadGuard.freeUpResult
+                    actions: Kirigami.Action {
+                        text: i18nc("@action:button", "Close")
+                        icon.name: "dialog-close"
+                        displayHint: Kirigami.DisplayHint.IconOnly
+                        onTriggered: DownloadGuard.clearFreeUpResult()
+                    }
+                }
+                Repeater {
+                    model: DownloadGuard.blockedApps
+                    delegate: ColumnLayout {
+                        required property var modelData
+                        required property int index
+
+                        Layout.fillWidth: true
+                        spacing: 0
+
+                        FormCard.FormDelegateSeparator {
+                            visible: parent.index > 0
+                        }
+                        GuardAppRow {
+                            Layout.fillWidth: true
+                            app: parent.modelData
+                        }
+                    }
                 }
             }
 

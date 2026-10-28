@@ -49,6 +49,8 @@ fn closed() -> TreeError {
 }
 
 impl ReadConnections {
+    pub(super) fn store_path(&self) -> &std::path::Path { &self.store_path }
+
     /// The connections of the store at `store_path`; none is opened yet. Called by the
     /// mount's build, after the check at start and before the mount goes over the folder.
     pub(super) fn new(store_path: PathBuf) -> Self {

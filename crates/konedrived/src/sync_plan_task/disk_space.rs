@@ -12,9 +12,9 @@
 //! started, one that does not is left, and a smaller one after it is still started. A
 //! download that runs counts with its whole size although part of it is on disk already
 //! and counted in what is free no more: nothing here knows how far it got. So a file may
-//! wait until the downloads that run ended although it fitted beside them. A read of a
-//! file and `Files.Hydrate` are not asked: the program that reads is answered `ENOSPC`
-//! by the disk itself.
+//! wait until the downloads that run ended although it fitted beside them. Read-triggered whole downloads have their own reservation and stream checks
+//! (`mount::item_downloader`); low-space reads stay as ranges. Explicit `Files.Hydrate`
+//! retains its existing disk behavior.
 //!
 //! **When it is asked again.** With every plan and every round that starts steps, and
 //! `SPACE_CHECKED_EVERY` seconds after a plan that left a download for lack of space:

@@ -655,7 +655,7 @@ answer a user already knows, it is followed.
 - **Why.** Work or school accounts need another authority, an app registration that allows them,
   often an administrator's consent, and testing against SharePoint-backed drives: a phase of its
   own.
-- **Trade-off.** No Microsoft 365 or OneDrive for Business accounts. "Open in OneDrive" opens under
+- **Trade-off.** No Microsoft 365 or OneDrive for Business accounts. "View Online" opens under
   whichever personal account the browser is signed in to (F295).
 
 ## 6. The desktop
@@ -826,3 +826,14 @@ answer a user already knows, it is followed.
   the wire sees every request whatever code made it, so a bug in a check cannot write elsewhere, and
   the look of the drive refuses a real account even if its id were listed by mistake.
 - **Trade-off.** It runs by hand, with exported tokens.
+
+## 8. Programs cannot silently hydrate the drive
+
+The [download guard](download-guard.md) refuses known automatic content readers and bounds
+other programs by a shared app identity and a sliding admission window. The mount cannot tell
+a human open from every possible background reader, so explicit hydrate/pin bypass the app
+guard, while app allowances cover deliberate bulk operations. Dolphin itself cannot fetch
+cloud content because its MIME sniffing is automatic; KIO file workers remain eligible for
+user copies. `EACCES` describes a policy refusal without implying a broken or conflicting file.
+The read-triggered downloader also leaves the account's disk reserve, independently of the
+guard switch. The UI receives structured app identities and reasons, never file paths or args.

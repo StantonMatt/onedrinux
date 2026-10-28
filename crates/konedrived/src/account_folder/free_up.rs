@@ -65,6 +65,21 @@ impl SyncService {
         Ok(total)
     }
 
+    /// Reclaim the clean whole copies this app's reads landed in this daemon
+    /// session. Stopped accounts and unsafe copies are skipped, without changing pins.
+    pub async fn free_app_downloads(&self, identity: &str) -> (u64, u64) {
+        let Ok(mount) = self.require_mount() else { return (0, 0) };
+        let Ok(freed) = mount.files_interface().free_app_downloads(identity).await else { return (0, 0) };
+        if freed.files > 0 {
+            if let Some(root) = self.root() {
+                let event = activity::event(Kind::Freed, root.path.display().to_string(), freed_detail(freed.files as u32, freed.bytes));
+                self.report.activity.record(vec![event]).await;
+            }
+            self.report.space.kick();
+        }
+        (freed.files, freed.bytes)
+    }
+
     /// What `FreeUp` checks before it frees anything, on its own:
     /// [`check_pinnable`](Self::check_pinnable)'s rule, and no file named itself has a
     /// change waiting to be uploaded (`NotUploaded`). `Files` asks every account whose

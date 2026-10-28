@@ -201,7 +201,12 @@ impl ItemDownloadLanding {
     ///
     /// Called as a job of the write-operation thread, under the tree lock, by
     /// `ItemDownloader` alone.
+    #[cfg(test)]
     pub(super) fn land(&self, file: &File, condition: &LandingCondition) -> ItemLandingOutcome {
+        self.land_tracked(file, condition, None, None)
+    }
+
+    pub(super) fn land_tracked(&self, file: &File, condition: &LandingCondition, attribution: Option<&crate::download_guard::DownloadTicket>, downloads: Option<&crate::download_guard::AccountDownloads>) -> ItemLandingOutcome {
         if let LandingCondition::VersionsUnchanged { item } = condition {
             if !self.running_steps.begin_commit(item.local_item_id) {
                 return ItemLandingOutcome::StepStopped;
@@ -213,7 +218,12 @@ impl ItemDownloadLanding {
                 if let Some(hook) = crate::panic::lock(&self.before_commit).take() {
                     hook();
                 }
-                self.commit_linked(&change, linked, condition)
+                let outcome = self.commit_linked(&change, linked, condition);
+                if matches!(outcome, ItemLandingOutcome::Landed { .. }) {
+                    if let Some(attribution) = attribution { attribution.landed(); }
+                    else if let Some(downloads) = downloads { downloads.forget_item(condition.item()); }
+                }
+                outcome
             }
             Err(outcome) => outcome,
         }

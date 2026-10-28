@@ -9,7 +9,7 @@ set(KONEDRIVE_TEST_SERVICE_DIR ${CMAKE_CURRENT_BINARY_DIR}/activation)
 configure_file(failing-daemon.service.in ${KONEDRIVE_TEST_SERVICE_DIR}/org.konedrive.Daemon.service @ONLY)
 configure_file(activating-bus.conf.in ${CMAKE_CURRENT_BINARY_DIR}/activating-bus.conf @ONLY)
 
-# "Open in OneDrive" opens an address, and no test may start a browser: each
+# "View Online" opens an address, and no test may start a browser: each
 # test takes the https scheme itself (QDesktopServices::setUrlHandler), and
 # should anything get past that, every program the desktop could start for an
 # address is, first in PATH, a stand-in that only logs what it was given.
@@ -58,6 +58,16 @@ konedrive_dolphin_test(noopentest)
 # The plugin's words as they were before they were generated from the catalogue.
 konedrive_dolphin_test(refusaltextstest)
 target_compile_definitions(refusaltextstest PRIVATE KONEDRIVE_EXPECTED_TEXTS="${CMAKE_CURRENT_SOURCE_DIR}/refusaltexts.expected")
+
+# The emblems as the install puts them, for the tests that look for icon names;
+# under a DESTDIR of the build's own, so that nothing is ever installed elsewhere.
+set(installed ${CMAKE_CURRENT_BINARY_DIR}/installed)
+add_test(NAME install_emblems COMMAND ${CMAKE_COMMAND} -E env DESTDIR=${installed} ${CMAKE_COMMAND} --install ${CMAKE_BINARY_DIR} --component emblems)
+set_tests_properties(install_emblems PROPERTIES FIXTURES_SETUP emblems)
+foreach(test overlayenginetest actionplugintest)
+    set_tests_properties(${test} PROPERTIES FIXTURES_REQUIRED emblems)
+    target_compile_definitions(${test} PRIVATE KONEDRIVE_INSTALLED_ICONS="${installed}${KDE_INSTALL_FULL_ICONDIR}")
+endforeach()
 
 # Two functions of actionplugintest need a bus of their own, or half a minute.
 add_test(NAME actionplugintest_activation

@@ -1,0 +1,10 @@
+#!/bin/sh
+set -e
+# On-demand activation only: do not enable the unit or start it on first install.
+if [ "$1" = configure ] && [ -z "${DPKG_ROOT:-}" ] && [ -d /run/systemd/system ]; then
+    deb-systemd-invoke --user daemon-reload >/dev/null || true
+    if [ -n "${2:-}" ]; then
+        # The helper skips disabled, inactive units; existing active daemons restart.
+        deb-systemd-invoke --user restart konedrived.service >/dev/null || true
+    fi
+fi

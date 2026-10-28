@@ -252,9 +252,11 @@ FormCard.FormCardPage {
                 page.sync.setThumbnails(wanted);
             }
         }
+        // With the download guard on, the thumbnailer is refused: a file only in OneDrive shows
+        // no preview rather than being downloaded for one.
         FormCard.FormTextDelegate {
             objectName: "thumbnailsOffLine"
-            visible: !thumbnailsSwitch.on
+            visible: !thumbnailsSwitch.on && !(DownloadGuard.serviceAvailable && DownloadGuard.enabled)
             text: i18n("While Dolphin shows previews, it downloads a file that is only in OneDrive in full to make its preview.")
             textItem.wrapMode: Text.Wrap
             leading: Kirigami.Icon {

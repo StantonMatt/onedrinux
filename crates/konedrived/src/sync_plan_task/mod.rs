@@ -805,6 +805,7 @@ impl SyncPlanTask {
     fn hold_downloads_for_space(&self, planned: Vec<SyncStep>, running: &[RunningStep]) -> (Vec<SyncStep>, Vec<SyncStep>) {
         let parts = &self.parts;
         let choice = disk_space::hold_downloads_for_space(planned, running, (parts.free_space_reader)(), (parts.free_space_reserve_reader)());
+        parts.published_plan.set_downloads_held(choice.held.iter().map(SyncStep::local_item_id).collect());
         let before = parts.state.get().transfers.disk_space_shortage;
         parts.state.update_if_changed(|state| state.transfers.disk_space_shortage = choice.shortage);
         match (before, choice.shortage) {

@@ -98,6 +98,8 @@ fn decide_is_reason_shown_blocked(reason: &Reason) -> bool {
 /// The plan's answers of one folder.
 pub(crate) struct PublishedPlan {
     answers: std::sync::RwLock<BTreeMap<LocalItemId, ItemAnswer>>,
+    pub(crate) changes: super::state_changes::StateChanges,
+    downloads_held: std::sync::RwLock<std::collections::BTreeSet<LocalItemId>>,
     /// How many unsent items the last plan answered will not be sent by themselves
     /// (`plan_input::count_unsent_not_to_send`); 0 before the first plan.
     unsent_not_to_send_count: std::sync::atomic::AtomicU64,
@@ -107,13 +109,30 @@ impl PublishedPlan {
     /// Nothing published: before the first plan. Made by the folder's start and given to
     /// the mount's setup and to the plan's task.
     pub fn new() -> Self {
-        PublishedPlan { answers: std::sync::RwLock::default(), unsent_not_to_send_count: std::sync::atomic::AtomicU64::new(0) }
+        PublishedPlan { changes: Default::default(), downloads_held: Default::default(), answers: std::sync::RwLock::default(), unsent_not_to_send_count: std::sync::atomic::AtomicU64::new(0) }
     }
 
     /// The answers of the plan made now replace those of the one before. Called by the
     /// plan's task after each plan.
     pub(crate) fn publish(&self, answers: BTreeMap<LocalItemId, ItemAnswer>) {
-        *crate::panic::write(&self.answers) = answers;
+        let mut old = crate::panic::write(&self.answers);
+        let changed = old.keys().chain(answers.keys()).copied().collect::<std::collections::BTreeSet<_>>()
+            .into_iter().filter(|item| old.get(item) != answers.get(item)).collect();
+        *old = answers;
+        drop(old);
+        self.changes.changed(changed);
+    }
+
+    pub(crate) fn set_downloads_held(&self, held: std::collections::BTreeSet<LocalItemId>) {
+        let mut old = crate::panic::write(&self.downloads_held);
+        let changed = old.symmetric_difference(&held).copied().collect();
+        *old = held;
+        drop(old);
+        self.changes.changed(changed);
+    }
+
+    pub(crate) fn is_download_held(&self, item: LocalItemId) -> bool {
+        crate::panic::read(&self.downloads_held).contains(&item)
     }
 
     /// The last plan answered that `count` unsent items will not be sent by themselves.

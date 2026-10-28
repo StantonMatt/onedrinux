@@ -115,7 +115,7 @@ pub enum ManagerError {
 impl From<ConfigError> for ManagerError {
     fn from(error: ConfigError) -> Self {
         match error {
-            ConfigError::InvalidLabel(_) | ConfigError::InvalidClientId => ManagerError::InvalidArgs(error.to_string()),
+            ConfigError::InvalidLabel(_) | ConfigError::InvalidClientId | ConfigError::InvalidGuard(_) => ManagerError::InvalidArgs(error.to_string()),
             ConfigError::NoAccount(id) => ManagerError::NoAccount(id.to_string()),
             other => ManagerError::Failed(other.to_string()),
         }
@@ -502,7 +502,7 @@ impl AccountManager {
     /// ([`menu::decide`]). Each path is routed as `Pin` routes
     /// it, and each account says what it would take and refuse of its own
     /// ([`SyncService::menu_part`]); a path in no account's folder is in nobody's share,
-    /// and neither is an account's folder itself, which is offered "Open in OneDrive"
+    /// and neither is an account's folder itself, which is offered "View Online"
     /// alone. Nothing is changed and no file is opened.
     ///
     /// One pass: the accounts' folders are resolved once for the call, and one blocking

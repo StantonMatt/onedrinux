@@ -24,7 +24,7 @@ pub static FREE_UP_WHY: [WhyText; 1] = [
     WhyText { why: "not-uploaded", refusal: Some(Refusal::NotUploaded), tooltip: "Not uploaded yet: freeing it up would lose the changes made here." },
 ];
 
-/// "Open in OneDrive" is disabled: the item has no page there yet.
+/// "View Online" is disabled: the item has no page there yet.
 pub const NOT_IN_ONEDRIVE: &str = "Not in OneDrive yet.";
 
 /// The tooltip of a code; `None` for one this build does not know.

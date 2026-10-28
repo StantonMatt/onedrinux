@@ -185,6 +185,7 @@ pub(crate) struct FolderStartInput {
     pub(crate) report: Report,
     pub(crate) pool: Arc<TransferPool>,
     pub(crate) split_download_share: Arc<Share>,
+    pub(crate) download_guard: Arc<crate::download_guard::DownloadGuard>,
     /// `[transfers] download_after`.
     pub(crate) download_after: u64,
     /// The folder's tree lock, kept with the folder's record.
@@ -358,6 +359,8 @@ pub(crate) async fn start_folder_sync(input: FolderStartInput) -> Result<Started
         pool: Arc::clone(&input.pool),
         split_download_share: Arc::clone(&input.split_download_share),
         download_after: input.download_after,
+        download_guard: Arc::clone(&input.download_guard),
+        free_space_reserve: { let running = Arc::clone(&input.running); Arc::new(move || crate::sync_plan_task::disk_space::count_reserve_bytes(running.settings().free_space_reserve_gb)) },
         tree_lock: Arc::clone(&input.tree_lock),
         ignore: Arc::clone(&input.ignore),
         sync_plan_wake: Arc::clone(&sync_plan_wake),

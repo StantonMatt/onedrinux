@@ -16,6 +16,7 @@
 #include <QDBusConnection>
 #include <QDBusConnectionInterface>
 #include <QElapsedTimer>
+#include <QIcon>
 #include <QMenu>
 #include <QScopeGuard>
 #include <QSignalSpy>
@@ -92,6 +93,8 @@ private Q_SLOTS:
     void initTestCase()
     {
         QStandardPaths::setTestModeEnabled(true);
+        // The emblems as installed, one of which is an entry's icon.
+        QIcon::setThemeSearchPaths(QStringList{QStringLiteral(KONEDRIVE_INSTALLED_ICONS)} + QIcon::themeSearchPaths());
         m_urls = std::make_unique<UrlCatcher>();
         QVERIFY(createPlugin());
     }
@@ -130,6 +133,7 @@ private Q_SLOTS:
         QTest::newRow("always keep, unchecked") << true << off << hidden << none << hidden << QStringList{Section, AlwaysKeep, SectionEnd} << false << false << none << false;
         QTest::newRow("always keep checked, free up, open") << true << QStringLiteral("on") << enabled << none << enabled
                                                             << QStringList{Section, AlwaysKeep, FreeUp, OpenOnline, SectionEnd} << true << true << none << true;
+        QTest::newRow("free up: nothing to free") << true << off << disabled << none << hidden << keepAndFreeUp << false << false << none << false;
         QTest::newRow("free up: not uploaded") << true << off << disabled << QStringLiteral("not-uploaded") << hidden << keepAndFreeUp << false << false
                                                << QStringLiteral("Not uploaded yet: freeing it up would lose the changes made here.") << false;
         QTest::newRow("free up refused for a reason this plugin does not know")
@@ -138,7 +142,7 @@ private Q_SLOTS:
         QTest::newRow("a reason on an enabled entry") << true << off << enabled << QStringLiteral("not-uploaded") << hidden << keepAndFreeUp << false << true << none << false;
         QTest::newRow("not in OneDrive yet") << true << off << hidden << none << disabled << QStringList{Section, AlwaysKeep, OpenOnline, SectionEnd} << false << false << none
                                              << false;
-        QTest::newRow("open in OneDrive alone") << false << hidden << hidden << none << enabled << QStringList{Section, OpenOnline, SectionEnd} << false << false << none << true;
+        QTest::newRow("view online alone") << false << hidden << hidden << none << enabled << QStringList{Section, OpenOnline, SectionEnd} << false << false << none << true;
         QTest::newRow("values this plugin does not know") << true << QStringLiteral("sideways") << QStringLiteral("perhaps") << none << QStringLiteral("later") << QStringList()
                                                           << false << false << none << false;
         // Entries with nothing to call the daemon with are not shown.
@@ -173,19 +177,24 @@ private Q_SLOTS:
         QCOMPARE(m_fake->menuCalls(), QList<QStringList>{{doc}});
         if (QAction *keep = find(actions, AlwaysKeep)) {
             QCOMPARE(keep->text(), QStringLiteral("Always Keep on This Device"));
+            // A checkbox, with no icon beside it to contradict the box.
+            QVERIFY(keep->icon().isNull());
             QVERIFY(keep->isCheckable());
             QCOMPARE(keep->isChecked(), keepChecked);
             QVERIFY(keep->isEnabled());
         }
         if (QAction *free = find(actions, FreeUp)) {
             QCOMPARE(free->text(), QStringLiteral("Free Up Space"));
+            // The emblem the file will get.
+            QCOMPARE(free->icon().name(), QStringLiteral("konedrive-online-only"));
             QCOMPARE(free->isEnabled(), freeUpEnabled);
             // With no reason the plugin knows there are no words of its
             // own: Qt then shows the entry's text.
             QCOMPARE(free->toolTip(), freeUpToolTip.isEmpty() ? QStringLiteral("Free Up Space") : freeUpToolTip);
         }
         if (QAction *online = find(actions, OpenOnline)) {
-            QCOMPARE(online->text(), QStringLiteral("Open in OneDrive"));
+            QCOMPARE(online->text(), QStringLiteral("View Online"));
+            QCOMPARE(online->icon().name(), QStringLiteral("internet-services"));
             QCOMPARE(online->isEnabled(), openOnlineEnabled);
             if (!openOnlineEnabled) {
                 QCOMPARE(online->toolTip(), QStringLiteral("Not in OneDrive yet."));
@@ -438,7 +447,7 @@ private Q_SLOTS:
             QVERIFY(tree.file(QStringLiteral("OneDrive/") + parts.at(0), parts.at(2).toLatin1()));
             items.append(KFileItem(url(tree.path(QStringLiteral("OneDrive/") + parts.at(0))), parts.at(1), S_IFREG));
         }
-        // The stand-in takes every path, and offers "Open in OneDrive" for one.
+        // The stand-in takes every path, and offers "View Online" for one.
         QVERIFY(startFake());
 
         // Only the plugins built here, not whatever else is installed.
@@ -476,7 +485,7 @@ private Q_SLOTS:
     }
 
     /// The account's folder itself, as the daemon answers about it: the
-    /// heading, "Open in OneDrive" and the closing separator, nothing else.
+    /// heading, "View Online" and the closing separator, nothing else.
     /// A click asks for the path the answer named.
     void theAccountsFolderItselfOpensInOneDrive()
     {

@@ -1,0 +1,16 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: KOneDrive
+Source: https://github.com/kartas39/konedrive
+Comment: Local-use binary packaging, matching the upstream RPM license scope.
+ The Rust binaries statically link third-party crates under their own licenses
+ (including MIT and Apache-2.0). This is not a complete dependency license
+ inventory for redistribution; see packaging/rpm/konedrive.spec in the source.
+
+Files: *
+Copyright: KOneDrive contributors (see the source files)
+License: GPL-3.0+
+ The project is licensed under the GNU General Public License, version 3
+ or (at your option) any later version.
+ .
+ The full license is in LICENSE.gz in this directory and in
+ /usr/share/common-licenses/GPL-3 on Debian/Ubuntu systems.
