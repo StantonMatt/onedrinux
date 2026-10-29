@@ -220,12 +220,33 @@ konedrivectl --account ACCOUNT account write-scope clear
   **Kept Both Versions**.
 - **What stays on this computer**, listed on Issues under **Can't Upload**: a file whose name
   OneDrive refuses (rename it to upload it), a file larger than OneDrive takes, and, while OneDrive
-  is full, every file with new content. Editors' temporary files stay too; the list of such names is
-  on OneDrive Settings ("Never uploaded").
+  is full, every file with new content.
 - **What the folder does not take**: symbolic and hard links, device files, pipes and sockets.
   OneDrive holds none of them.
 - **Moving a file out of the folder** removes it in OneDrive. The file is copied to where it
   goes first, so one that was not downloaded is downloaded on the way.
+
+### The ignore list
+
+Editors' temporary, swap, lock and backup files stay on this computer: `*.swp`, `*.swo`,
+`*.swx`, `~$*`, `.~lock.*#`, `*.part`, `*.crdownload`, `*.tmp`, `*~`, `.#*`, `#*#`,
+`.goutputstream-*`, `*.kate-swp`, `.fuse_hidden*` and `.nfs*`. Build and dependency folders
+`node_modules`, `.venv`, `venv`, `__pycache__` and `.gradle` stay here too, with everything
+inside them. They remain visible in the sync folder; their bytes are kept here.
+
+The list matches names at any depth, case-sensitively. Edit it in OneDrive Settings
+("Never uploaded") or with `konedrivectl sync ignore`. Your own saved list replaces the
+defaults; accounts using the defaults receive new defaults after an upgrade.
+
+Anything already in OneDrive keeps syncing whatever its name, including a downloaded or
+pinned build folder. The ignore list never removes or hides it. A new file inside such a
+cloud folder also syncs unless its own name is ignored, so a `node_modules` made inside a
+`node_modules` that is in OneDrive (npm nests them) stays on this computer. New local-only
+matching folders are skipped, including ones that were waiting to upload before the upgrade.
+One exception: something in OneDrive that you move into a folder kept on this computer waits
+there, and syncs again once you move it out. If OneDrive gets a new folder with the very name
+of one kept here, your folder keeps its name and stays here, and OneDrive's appears once you
+rename or remove yours.
 
 ### Removing files
 

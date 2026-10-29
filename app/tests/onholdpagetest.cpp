@@ -15,6 +15,8 @@
 #include <QTemporaryDir>
 #include <QTest>
 
+#include <algorithm>
+
 namespace
 {
 qint64 today(int hours, int minutes)
@@ -27,6 +29,7 @@ KonedriveHeldChangeList deletions(int count = 3)
     KonedriveHeldChangeList rows;
     for (int i = 0; i < count; ++i) {
         rows << heldRow(QStringLiteral("removal"), QStringLiteral("Documents/file-%1.txt").arg(i), 1024, today(14, 2));
+        rows.back().item = i + 1;
     }
     return rows;
 }
@@ -102,6 +105,20 @@ struct App {
             }
         }
         return nullptr;
+    }
+
+    /// Every shown item called `name` under `root`, in the tree's order.
+    QList<QQuickItem *> allShown(const QString &name, QQuickItem *root = nullptr) const
+    {
+        QList<QQuickItem *> found;
+        const auto children = (root ? root : window->contentItem())->childItems();
+        for (QQuickItem *item : children) {
+            if (item->objectName() == name && item->isVisible()) {
+                found << item;
+            }
+            found << allShown(name, item);
+        }
+        return found;
     }
 
     void showPage(const QString &name) const { QMetaObject::invokeMethod(window, "showPage", Q_ARG(QVariant, name)); }
@@ -221,6 +238,15 @@ private Q_SLOTS:
         QCOMPARE(app.shown(QStringLiteral("heldHeadline"))->property("text").toString(), QStringLiteral("12 deletions and 1 changed file are on hold"));
         QVERIFY(app.shown(QStringLiteral("allowAllButton")));
         QVERIFY(app.shown(QStringLiteral("restoreAllButton")));
+        // The undo first, everywhere; each group's buttons say how many they act on.
+        QTRY_VERIFY(app.shown(QStringLiteral("restoreAllButton"))->x() < app.shown(QStringLiteral("allowAllButton"))->x());
+        QQuickItem *removals = app.shown(QStringLiteral("heldGroup-removal"));
+        QQuickItem *restoreRemovals = app.shown(QStringLiteral("restoreButton"), removals);
+        QQuickItem *deleteRemovals = app.shown(QStringLiteral("allowButton"), removals);
+        QCOMPARE(restoreRemovals->property("text").toString(), QStringLiteral("Restore 12"));
+        QCOMPARE(deleteRemovals->property("text").toString(), QStringLiteral("Delete 12 in OneDrive"));
+        QTRY_VERIFY(restoreRemovals->x() < deleteRemovals->x());
+        QCOMPARE(app.shown(QStringLiteral("allowButton"), app.shown(QStringLiteral("heldGroup-rewrite")))->property("text").toString(), QStringLiteral("Upload 1 Change"));
 
         // Opened: a search (more than 10 rows) and the rows, built by the list.
         QQuickItem *page = app.find(QStringLiteral("onHoldPage"));
@@ -230,6 +256,14 @@ private Q_SLOTS:
         QTRY_COMPARE(list->property("count").toInt(), 12);
         page->setProperty("searchText", QStringLiteral("FILE-1"));
         QTRY_COMPARE(list->property("count").toInt(), 3); // file-1, file-10, file-11
+        // The buttons still act on every one of the kind, and say so.
+        QCOMPARE(deleteRemovals->property("text").toString(), QStringLiteral("Delete 12 in OneDrive"));
+        // Nothing found, with no folder rows: nothing more to say.
+        page->setProperty("searchText", QStringLiteral("nothing like it"));
+        QTRY_VERIFY(app.shown(QStringLiteral("nothingMatches")));
+        QCOMPARE(app.shown(QStringLiteral("nothingMatches"))->property("explanation").toString(), QString());
+        page->setProperty("searchText", QStringLiteral("FILE-1"));
+        QTRY_COMPARE(list->property("count").toInt(), 3);
 
         // A group's Restore acts on what the page listed.
         const QString token = app.held()->token();
@@ -309,7 +343,7 @@ private Q_SLOTS:
         QVERIFY(!app.shown(QStringLiteral("nothingHeldCard")));
         QTRY_VERIFY(app.shown(QStringLiteral("heldListingError")));
         QCOMPARE(app.shown(QStringLiteral("heldListingError"))->property("text").toString(),
-                 QStringLiteral("Could not read &lt;ledger&gt; &amp; state"));
+                 QStringLiteral("Could not read the changes on hold: Could not read &lt;ledger&gt; &amp; state. What is shown may be out of date."));
         QVERIFY(!app.shown(QStringLiteral("restoreButton"))->isEnabled());
         capture(app, QStringLiteral("u5-listing-error"));
         auto *retry = app.window->findChild<QObject *>(QStringLiteral("retryHeldListing"));
@@ -332,6 +366,156 @@ private Q_SLOTS:
         // Only a successful empty listing can resolve the cached holds.
         fake.changeGuard->hold(fake::idFor(1), {});
         QTRY_VERIFY(app.shown(QStringLiteral("nothingHeldCard")));
+    }
+
+    /// Allow All asks first while deletions are among the held kinds, naming all it sends;
+    /// Cancel sends nothing, and the question goes once the deletions are resolved. Without
+    /// deletions, it sends at once.
+    void allowAllAsksFirstWhileDeletionsAreHeld()
+    {
+        FakeDaemon fake;
+        prepare(fake);
+        fake.changeGuard->held.insert(fake::idFor(1), deletions() + rewrites());
+        QVERIFY(fake.start());
+        App app;
+        QVERIFY(app.load());
+        QTRY_VERIFY(app.held() && app.held()->count() == 4);
+        app.showPage(QStringLiteral("onHold"));
+        QTRY_VERIFY(app.shown(QStringLiteral("allowAllButton")));
+        auto *dialog = app.window->findChild<QObject *>(QStringLiteral("sendAllDialog"));
+        QVERIFY(dialog);
+        auto &calls = fake.changeGuard->calls;
+
+        click(app.shown(QStringLiteral("allowAllButton")));
+        QTRY_VERIFY(dialog->property("opened").toBool());
+        QCOMPARE(dialog->property("title").toString(), QStringLiteral("Send All 4 Changes to OneDrive?"));
+        QCOMPARE(dialog->property("subtitle").toString(), QStringLiteral("3 items will be deleted in OneDrive and 1 changed file will be uploaded."));
+        capture(app, QStringLiteral("m2-send-all"));
+        QMetaObject::invokeMethod(dialog, "close");
+        QTRY_VERIFY(!dialog->property("opened").toBool());
+        QTest::qWait(50);
+        QVERIFY(calls.filter(QStringLiteral("AllowHeld:")).isEmpty());
+
+        click(app.shown(QStringLiteral("allowAllButton")));
+        QTRY_VERIFY(dialog->property("opened").toBool());
+        QObject *send = dialog->findChild<QObject *>(QStringLiteral("sendAll"));
+        QVERIFY(send);
+        const QString token = app.held()->token();
+        QMetaObject::invokeMethod(send, "trigger");
+        QTRY_VERIFY(calls.contains(QStringLiteral("AllowHeld:%1:%2:removal,rewrite").arg(fake::idFor(1), token)));
+        QTRY_VERIFY(!dialog->property("opened").toBool());
+        QTRY_VERIFY(app.shown(QStringLiteral("nothingHeldCard")));
+
+        // The deletions resolved while it asks: no longer the question.
+        fake.changeGuard->hold(fake::idFor(1), deletions() + rewrites());
+        QTRY_VERIFY(app.shown(QStringLiteral("allowAllButton")));
+        click(app.shown(QStringLiteral("allowAllButton")));
+        QTRY_VERIFY(dialog->property("opened").toBool());
+        fake.changeGuard->hold(fake::idFor(1), rewrites() + KonedriveHeldChangeList{heldRow(QStringLiteral("move"), QStringLiteral("Work/a.odt"), 0, today(15, 0))});
+        QTRY_VERIFY(!dialog->property("opened").toBool());
+
+        // No deletions: one click.
+        QTRY_VERIFY(app.shown(QStringLiteral("allowAllButton")));
+        click(app.shown(QStringLiteral("allowAllButton")));
+        QTRY_VERIFY(calls.contains(QStringLiteral("AllowHeld:%1:%2:rewrite,move").arg(fake::idFor(1), app.held()->token())));
+        QVERIFY(!dialog->property("opened").toBool());
+    }
+
+    /// Allow All's question says and sends what was held when it opened: what is held while it
+    /// is open (an rm -rf still running) neither changes its words nor goes with Send.
+    void sendAllSendsWhatItAsked()
+    {
+        FakeDaemon fake;
+        prepare(fake);
+        fake.changeGuard->held.insert(fake::idFor(1), deletions() + rewrites());
+        QVERIFY(fake.start());
+        App app;
+        QVERIFY(app.load());
+        QTRY_VERIFY(app.held() && app.held()->count() == 4);
+        app.showPage(QStringLiteral("onHold"));
+        QTRY_VERIFY(app.shown(QStringLiteral("allowAllButton")));
+        auto *dialog = app.window->findChild<QObject *>(QStringLiteral("sendAllDialog"));
+        QVERIFY(dialog);
+        const QString asked = app.held()->token();
+
+        click(app.shown(QStringLiteral("allowAllButton")));
+        QTRY_VERIFY(dialog->property("opened").toBool());
+        fake.changeGuard->hold(fake::idFor(1), deletions(9) + rewrites() + KonedriveHeldChangeList{heldRow(QStringLiteral("move"), QStringLiteral("Work/a.odt"), 0, today(15, 0))});
+        QTRY_COMPARE(app.held()->count(), 11);
+        QVERIFY(app.held()->token() != asked);
+        QVERIFY(dialog->property("opened").toBool());
+        QCOMPARE(dialog->property("title").toString(), QStringLiteral("Send All 4 Changes to OneDrive?"));
+        QCOMPARE(dialog->property("subtitle").toString(), QStringLiteral("3 items will be deleted in OneDrive and 1 changed file will be uploaded."));
+
+        QObject *send = dialog->findChild<QObject *>(QStringLiteral("sendAll"));
+        QVERIFY(send);
+        QMetaObject::invokeMethod(send, "trigger");
+        auto &calls = fake.changeGuard->calls;
+        QTRY_COMPARE(calls.filter(QStringLiteral("AllowHeld:")), QStringList(QStringLiteral("AllowHeld:%1:%2:removal,rewrite").arg(fake::idFor(1), asked)));
+    }
+
+    /// The search does not look into the folders its rows stand for, and says so when it finds
+    /// nothing; a change a decision left on hold says why on its row, in the daemon's words.
+    void searchesAndReasonsOnTheRows()
+    {
+        FakeDaemon fake;
+        prepare(fake);
+        KonedriveHeldChange src = heldRow(QStringLiteral("removal"), QStringLiteral("Projects/site/src"), 4096, today(14, 2));
+        src.item = 12;
+        src.directory = true;
+        src.descendants = 52;
+        fake.changeGuard->held.insert(fake::idFor(1), deletions(11) + KonedriveHeldChangeList{src});
+        QVERIFY(fake.start());
+        App app;
+        QVERIFY(app.load());
+        QTRY_VERIFY(app.held() && app.held()->count() == 64);
+        app.showPage(QStringLiteral("onHold"));
+        QTRY_VERIFY(app.shown(QStringLiteral("heldGroup-removal")));
+        QQuickItem *page = app.find(QStringLiteral("onHoldPage"));
+        QMetaObject::invokeMethod(page, "toggle", Q_ARG(QVariant, QStringLiteral("removal")), Q_ARG(QVariant, false));
+        auto *list = app.find(QStringLiteral("onHoldList"));
+        QTRY_COMPARE(list->property("count").toInt(), 12);
+        page->setProperty("searchText", QStringLiteral("index.tsx"));
+        QTRY_VERIFY(app.shown(QStringLiteral("nothingMatches")));
+        QCOMPARE(app.shown(QStringLiteral("nothingMatches"))->property("text").toString(), QStringLiteral("Nothing matches “index.tsx”"));
+        QCOMPARE(app.shown(QStringLiteral("nothingMatches"))->property("explanation").toString(), QStringLiteral("What is in the deleted folders isn't searched."));
+        capture(app, QStringLiteral("s4-search-in-folders"));
+        page->setProperty("searchText", QString());
+        QTRY_COMPARE(list->property("count").toInt(), 12);
+
+        fake.changeGuard->answer = KonedriveGuardResult{
+            61,
+            0,
+            3,
+            0,
+            {{1, QStringLiteral("Documents/file-0.txt"), QStringLiteral("it is open in another program")},
+             {2, QStringLiteral("Documents/file-1.txt"), QStringLiteral("a file of the same name is in its place")},
+             {12, QStringLiteral("Projects/site/src"), QStringLiteral("the folder it belongs in is missing or has moved")}}};
+        click(app.shown(QStringLiteral("restoreButton"), app.shown(QStringLiteral("heldGroup-removal"))));
+        QTRY_VERIFY(app.shown(QStringLiteral("heldResult")));
+        QCOMPARE(app.shown(QStringLiteral("heldResult"))->property("text").toString(),
+                 QStringLiteral("Restored 61 of 64 items. 3 are still on hold, each with its reason in the list."));
+        QTRY_COMPARE(list->property("count").toInt(), 3);
+        // Each row's second line, top to bottom.
+        QStringList details;
+        QTRY_VERIFY_WITH_TIMEOUT(
+            [&] {
+                QList<QQuickItem *> rows = app.allShown(QStringLiteral("heldRow"));
+                std::sort(rows.begin(), rows.end(), [](QQuickItem *a, QQuickItem *b) {
+                    return a->y() < b->y();
+                });
+                details.clear();
+                for (QQuickItem *row : std::as_const(rows)) {
+                    details << app.shown(QStringLiteral("heldRowDetail"), row)->property("text").toString();
+                }
+                return details.size() == 3;
+            }(),
+            5000);
+        QCOMPARE(details,
+                 QStringList({QStringLiteral("It is open in another program"),
+                              QStringLiteral("A file of the same name is in its place"),
+                              QStringLiteral("The folder it belongs in is missing or has moved")}));
+        capture(app, QStringLiteral("s8-reasons-on-rows"));
     }
 
     /// Status: the card of what is held, its head, and Review…, which leads to On Hold.

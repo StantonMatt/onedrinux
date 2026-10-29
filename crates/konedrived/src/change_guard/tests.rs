@@ -18,6 +18,7 @@ fn event(item: i64, kind: Kind, bytes: u64, generation: &str, at: i64) -> Change
         first_held_revision: 0,
         at,
         generation: generation.into(),
+        remote_generation: None,
         write_count: None,
         provisional: false,
         disposition: Disposition::Pending,
@@ -633,7 +634,7 @@ fn a_snapshot_never_decides_later_generations_or_later_holds() {
             .iter()
             .all(|c| c.item != second.local_item_id.as_i64()));
         assert_eq!(result.failed, 1);
-        assert!(result.failures[0].2.contains("Review"));
+        assert_eq!(result.failures[0].2, "it changed after it was held");
         assert!(guard.blocks(second.local_item_id));
     }
 }
@@ -1100,4 +1101,23 @@ fn local_only_edits_update_generations_without_charging_until_upload_local() {
     let inner = crate::panic::lock(&guard.inner);
     assert_eq!(inner.ledger.events.iter().map(|c| c.count).sum::<u64>(), 2);
     assert_eq!(inner.ledger.events.iter().map(|c| c.bytes).sum::<u64>(), 20);
+}
+
+#[test]
+fn allow_and_restore_report_an_open_provisional_file_in_plain_words() {
+    for restore in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = ChangeGuard::open(dir.path().join("guard.json"), GuardConfig { uploads: 0, ..Default::default() });
+        let fixture = ItemFixture::new();
+        let row = fixture.make_own_file("new", b"still being written");
+        guard.observe(&[(row.clone(), "new".into())], 100).unwrap();
+        fixture.write_rows(move |s| s.item_store().apply(&konedrive_tree::LocalVersionChange::OpenedForWriting { item: row.local_item_id }));
+        let open = fixture.find_item(row.local_item_id).unwrap();
+        guard.observe(&[(open, "new".into())], 101).unwrap();
+        let token = guard.snapshot().unwrap().0;
+        let (batch, result) = guard.decide_batch(&token, &[], restore).unwrap();
+        assert!(batch.is_empty());
+        assert_eq!(result.failed, 1);
+        assert_eq!(result.failures, [(row.local_item_id.as_i64(), "new".into(), "it is open in another program".into())]);
+    }
 }

@@ -12,7 +12,11 @@
 //!    id (`WriteOperationThread::thread_id`);
 //! 3. THE CHECK AT START (`start_check::check_backing_directory_at_start`), over the
 //!    writer, before anything else reads the rows: it undoes or finishes, from the
-//!    record the store keeps, a change of a name the daemon died in; and only AFTER it
+//!    record the store keeps, a change of a name the daemon died in; then the flags of
+//!    ignored names gone over by the list as it is now (`rewrite_ignored_names`: defaults
+//!    an upgrade changed), and the change guard's restore receipts settled
+//!    (`reconcile_restores`) and its held uploads of rows now left here retired
+//!    (`retire_left_here_uploads`); and only AFTER the check
 //!    `PlaceChanges::remove_aside_entries`: what is still set aside then goes (before
 //!    it, the entry the check is to put back would be deleted);
 //! 4. `ReadConnections::new(store_path)`; `ItemHandles::new`;
@@ -85,7 +89,7 @@ fn build_over(backing_directory: Arc<BackingDirectory>, setup: ItemMountSetup, r
     let ItemMountSetup { root, store_path, store, drive_id, source, report, pool, split_download_share, download_after, download_guard, change_guard, free_space_reserve, tree_lock, ignore, write_scope, sync_plan_wake, running_steps, published_plan, take_down_report, clock } = setup;
     let folder = root.path;
     let mount_started_at = clock();
-    let upload_rules = Arc::new(UploadRules::new(ignore).with_write_scope(write_scope));
+    let upload_rules = Arc::new(UploadRules::new(Arc::clone(&ignore)).with_write_scope(write_scope));
 
     let access_mode_switch = Arc::new(AccessModeSwitch::new(AccessMode::ReadOnly));
     let mount_take_down = Arc::new(MountTakeDown::new(Arc::clone(&access_mode_switch), take_down_report));
@@ -100,9 +104,19 @@ fn build_over(backing_directory: Arc<BackingDirectory>, setup: ItemMountSetup, r
 
     // Before anything else reads the rows: afterwards they say what the disk has.
     let start_check_findings = check_backing_directory_at_start(Arc::clone(&backing_directory), Arc::clone(&upload_rules), drive_id, &store)?;
+    // Defaults can change on upgrade even when config still says `ignore: None`.
+    // Refresh only row flags: bindings, pins, paths and local bytes stay as they are.
+    // One read of the shared list for the whole scan, not one per row.
+    let current_list = crate::panic::read(&ignore).clone();
+    store.call_blocking(move |s| s.item_store().rewrite_ignored_names(&|name| current_list.matches(name)))?;
     if let Some(guard) = &change_guard {
         let guard = Arc::clone(guard);
-        store.call_blocking(move |s| guard.reconcile_restores(&s.item_store().reader()))?;
+        store.call_blocking(move |s| {
+            let item_store = s.item_store();
+            let items = item_store.reader();
+            guard.reconcile_restores(&items)?;
+            guard.retire_left_here_uploads(&items)
+        })?;
     }
     // Only now: before the check, the entry a record puts back would be deleted.
     let removed = place_changes.remove_aside_entries()?;

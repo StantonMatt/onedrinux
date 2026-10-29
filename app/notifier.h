@@ -192,13 +192,15 @@ private:
 /// every account, so they name none. An app blocked for downloading too much (DownloadsBlocked,
 /// reason bulk) gets one, with Allow for This Session and Always Allow, the two buttons a
 /// Plasma popup has room for (Always Block and Free Up What It Downloaded are in the window's
-/// row of the app); a program that could not be identified (unidentified) gets one with
+/// row of the app); a terminal or an IDE, which downloads for whatever runs in it, gets "A
+/// program in Konsole downloaded …" and Allow for This Session only, Always Allow staying in
+/// the window; a program that could not be identified (unidentified) gets one with
 /// nothing to press, since it can't be allowed. A reader the guard always refuses (background)
 /// and an app the user always blocks (user) notify nothing. One notification for each block,
 /// never one per refused read, and never summed up with others: each has its own buttons. An
 /// app has one at a time: a new one takes the place of the one shown, and one whose app is no
 /// longer blocked (allowed in the window, removed, the daemon gone) is withdrawn. A click opens
-/// the window on Settings' list of apps.
+/// the window on the apps it blocked (WindowSection::GuardApps).
 class GuardNotifier : public QObject
 {
     Q_OBJECT
@@ -222,12 +224,14 @@ private:
 
 /// The change guard's notification for one account (event changesHeld): one at a time, keyed
 /// `changeGuard:<account id>`, never summed up with others, since it has buttons of its own.
-/// It says what is held, kind by kind, with Review… (the window's On Hold) and Restore (Move
-/// Back for moves, Don't Upload for new files, Restore All for several kinds): allowing is on
-/// the On Hold page only. A kind that comes on hold shows it (again, if it was closed); more
+/// It says what is held, kind by kind (for deletions, the folder deleted with what was in it,
+/// or the folder they were in), and what of those kinds went out just before the hold, with
+/// Review… (the window's On Hold) and Restore (Move Back for moves, Don't Upload for new files,
+/// Restore All for several kinds): allowing is on the On Hold page only. A kind that comes on hold shows it (again, if it was closed); more
 /// of a kind it shows, or fewer, change its words in place; nothing held any more takes it
 /// back. Its buttons act on what it says (the token of that listing): what was held after it
-/// stays on hold. What a button did takes its place; a decision asked in the window notifies
+/// stays on hold. What a button did takes its place, with Open Recycle Bin when deletions went
+/// out before the hold; a decision asked in the window notifies
 /// nothing. The holds the daemon has when the app starts are its baseline, not news.
 class ChangeNotifier : public QObject
 {
@@ -240,14 +244,18 @@ public:
     void setAccountName(std::function<QString()> name);
     /// The window's limits, for "within 10 minutes"; none: the words without them.
     void setGuard(ChangeGuardController *guard);
+    /// Opens OneDrive's recycle bin in the browser: a restore's result offers it when deletions
+    /// went out before the hold. None: no button.
+    void setOpenRecycleBin(std::function<void()> open);
 
 private:
     void onChanged();
     /// The notice for the kinds held now, with the token that lists them.
     Notice heldNotice() const;
-    void restore(quint64 generation, const QString &token, const QList<HeldChanges::Kind> &counts);
-    /// What the Restore of `kinds` did, in place of the notification.
-    void result(const QList<HeldChanges::Kind> &kinds, const KonedriveGuardResult &result);
+    void restore(quint64 generation, const QString &token, const QList<HeldChanges::Kind> &counts, const QList<HeldChanges::Kind> &sent);
+    /// What the Restore of `kinds` did, in place of the notification, and where what was `sent`
+    /// of them before the hold is.
+    void result(const QList<HeldChanges::Kind> &kinds, const QList<HeldChanges::Kind> &sent, const KonedriveGuardResult &result);
     void refused(const QString &error);
     /// Sends `notice` as this account's, or with `update` changes the shown one in place:
     /// false when it was closed.
@@ -259,6 +267,7 @@ private:
     NotificationSink *m_sink;
     QPointer<ChangeGuardController> m_guard;
     std::function<QString()> m_accountName;
+    std::function<void()> m_openRecycleBin;
     /// The kinds held at the last listing; null until the daemon's first answer.
     std::optional<QStringList> m_kinds;
     /// What is shown: nothing, the held changes, or what a button did.

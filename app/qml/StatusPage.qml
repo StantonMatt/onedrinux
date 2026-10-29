@@ -93,6 +93,21 @@ ListPage {
         });
     }
 
+    /// The apps the download guard blocked brought into sight, from the top when they fit: where
+    /// its notification leads.
+    function showBlockedApps() {
+        Qt.callLater(() => {
+            const head = list.headerItem;
+            if (!head) {
+                return;
+            }
+            const end = head.blockedAppsY + head.blockedAppsHeight;
+            const wanted = end <= list.height ? list.originY : head.y + head.blockedAppsY;
+            const last = list.originY + list.contentHeight - list.height;
+            list.contentY = Math.max(list.originY, Math.min(wanted, last));
+        });
+    }
+
     objectName: "statusPage"
     title: window ? window.accountTitle(i18nc("@title", "Status")) : i18nc("@title", "Status")
 
@@ -187,6 +202,9 @@ ListPage {
         header: ColumnLayout {
             /// Where History begins, in the header: showHistory() brings it into sight.
             readonly property real historyY: historyCard.y
+            /// Where Blocked apps begins and how tall it is: showBlockedApps() brings it into sight.
+            readonly property real blockedAppsY: blockedAppsHeader.y
+            readonly property real blockedAppsHeight: blockedAppsCard.y + blockedAppsCard.height - blockedAppsHeader.y
 
             width: ListView.view.width
             spacing: 0
@@ -435,6 +453,7 @@ ListPage {
             // every account, and here as long as they are blocked, after their notification is
             // gone. What else it does is in Settings.
             FormCard.FormHeader {
+                id: blockedAppsHeader
                 visible: blockedAppsCard.visible
                 title: i18nc("@title:group", "Blocked apps")
             }
@@ -479,6 +498,7 @@ ListPage {
                         GuardAppRow {
                             Layout.fillWidth: true
                             app: parent.modelData
+                            offersAlways: !DownloadGuard.hostsPrograms(parent.modelData.identity)
                         }
                     }
                 }

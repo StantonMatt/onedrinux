@@ -39,7 +39,7 @@ mod sync_plan;
 pub use activity::{ActivityKind, ActivityRow, ACTIVITY_KEPT};
 pub use conflicts::ConflictRow;
 pub use folded_name::FoldedName;
-pub use item_store::{ConfirmedItem, ConfirmedOneDriveVersion, ItemStore, ListedChangeOutcome, ListedChangeRefusal, ListedPageOutcome, ListingId, ListingKind, ListingLink, ListingUnderWay, StepCommitOutcome};
+pub use item_store::{GuardRestoreFailure, ConfirmedItem, ConfirmedOneDriveVersion, ItemStore, ListedChangeOutcome, ListedChangeRefusal, ListedPageOutcome, ListingId, ListingKind, ListingLink, ListingUnderWay, StepCommitOutcome};
 pub use step_memory::{
     is_content_of, EmptyFileSession, FactStanding, FailedTries, FailedTryStanding, ItemMemory, ItemMemoryParts, ItemRefusalReason, ItemTakenName, MismatchedItem, MismatchedItemStanding, MismatchedItemUpload, OpeningTry, OpeningWindow, RecordedRequest, Refusal, RefusedVersion, RequestRecord,
     SpaceFit, SpaceRefusal, StepMemory, TakenName, TemporaryName, TimedWait, UploadSession, UploadSessionAddress, UploadSessionStanding, UploadTag,
@@ -72,6 +72,8 @@ const MAX_CHAIN: usize = konedrive_fs::MAX_DEPTH + 2;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TreeError {
+    #[error("{0}")]
+    GuardRestore(#[from] GuardRestoreFailure),
     #[error("the tree store: {0}")]
     Sql(#[from] rusqlite::Error),
     #[error("the tree store: {0}")]

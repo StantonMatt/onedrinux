@@ -232,3 +232,5 @@ fn a_mount_that_asked_to_be_taken_down_refuses_the_switch_to_read_write() {
     assert!(!fixture.runtime().block_on(mount.switch_to_read_only()).expect("the thread runs"), "it is read-only already");
     assert_eq!(crate::panic::lock(&fixture.take_downs).len(), 1, "the owner was told once");
 }
+
+mod ignore;

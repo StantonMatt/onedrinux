@@ -232,7 +232,7 @@ QString reasonSentence(const ReasonParts &parts, const QString &needs, const QSt
     }
     if (parts.key == QLatin1String("held-for-approval")) {
         if (!parts.hasDetail) {
-            return i18n("Changes are held for approval: allow them or restore the cloud version.");
+            return i18n("On hold for your review: see On Hold in KOneDrive.");
         }
         return QString();
     }

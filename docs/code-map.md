@@ -235,7 +235,7 @@ Where a download gets its bytes from, and the download of a whole file.
 Which names stay here, and which OneDrive refuses.
 
 - `mod.rs` — the list of the modules.
-- `ignore.rs` — the ignore list: names that are never uploaded. `[tests]`
+- `ignore.rs` — default temporary/build names left local only while unbound; explicit lists replace defaults. `[tests]`
 - `names.rs` — the names OneDrive refuses, found before a request is spent; the computer's
   name for a conflict copy. `[tests]`
 
@@ -270,6 +270,9 @@ mount.
 - `item_mount.rs` — `ItemMount`: the holder of the mount's parts, what it is made with, `serve`
   and `stop`, and the parts it hands to the folder's sync. `[tests]`
 - `item_mount/build_order.rs` — the order the parts are built in: the one place a part is made.
+- `item_mount/tests/ignore.rs` — default build-folder names: new local folders left here, cloud-bound
+  names kept syncing, the start's refresh (pins, bytes and held uploads) and a new OneDrive folder at
+  a left-here name; mounted equivalents run in `tests/fuse-probe/file_writes.sh`.
 - `kernel_requests.rs` — `KernelRequests`: the one `fuser::Filesystem`, a thin wrapper over
   `ItemKernelRequests`; what the folder never takes (links, special files, set attributes).
   `[tests]`
@@ -1337,9 +1340,9 @@ checks folder conditions and atomic saves crossing upload requests, without a mo
 - `crates/konedrived/src/change_guard/ledger.rs`: durable values, time buckets, thresholds and atomic state-file writes.
 - `crates/konedrived/src/change_guard/tests.rs`: window, repeated rewrite, concurrency, restart, descendant and cleanup tests.
 - `crates/konedrived/src/config/change_guard.rs` and `config/change_guard/tests.rs`: daemon-wide settings, legacy per-account migration and the guard registry.
-- `crates/konedrive-tree/src/item_store/guard_restore.rs` and `guard_restore/tests.rs`: conditional removal/rewrite restore transactions; reserved retained paths are validated in `place_change_records.rs`.
+- `crates/konedrive-tree/src/item_store/guard_restore.rs` and `guard_restore/tests.rs`: conditional removal/rewrite restore transactions and typed per-item failure reasons; reserved retained paths are validated in `place_change_records.rs`.
 - `crates/konedrive-tree/src/sync_plan/tests/change_guard.rs`: outgoing and reconciliation holds, descendants and quiet time.
-- `crates/konedrived/src/mount/item_mount/guard_restore.rs`: serialized no-replace disk restoration and conflict copies.
+- `crates/konedrived/src/mount/item_mount/guard_restore.rs`: serialized no-replace disk restoration, conflict copies and specific plain-text failures.
 - `crates/konedrived/src/mount/item_write_operations/tests/change_guard.rs`: offline retained copies and collision tests.
 - `crates/konedrived/src/account_folder/change_guard/tests.rs`: offline admission, partial restore results and terminal progress.
 - `crates/konedrived/src/account_folder/change_guard.rs`: token-scoped account Allow/Restore results and progress orchestration.

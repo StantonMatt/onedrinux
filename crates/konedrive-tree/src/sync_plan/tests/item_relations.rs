@@ -192,22 +192,19 @@ fn a_conflict_copys_name_is_free_on_both_sides_as_onedrive_compares_names() {
     assert_eq!(answer(&given, 4), folder_step(FolderStep::RenameToConflictCopy { item: versions(&given, 4), name: "a-pc-2.TXT".into() }));
 }
 
-/// Open: an item that is left here (its name is ignored) at the name an item of OneDrive
-/// comes to.
-///
-/// - Reading 1 (implemented): the item that is left here is renamed to a conflict
-///   copy's name, and OneDrive's appears. It is never merged with OneDrive's: an ignored
-///   directory that became one with a directory of OneDrive would have all in it sent.
-/// - Reading 2: OneDrive's item is not shown while the other has its name: it waits for
-///   the user.
+/// An item that is left here (its name is ignored) keeps its name when an item of OneDrive
+/// comes to it, and OneDrive's waits for the user. It is never merged with OneDrive's: an
+/// ignored directory that became one with a directory of OneDrive would have all in it
+/// sent. Nor is it renamed: `node_modules-pc` matches no exact ignored name, and would be
+/// sent with all in it.
 #[test]
-fn open_an_item_that_is_left_here_at_the_name_of_an_item_of_onedrive_is_renamed_to_a_conflict_copys_name() {
-    let mut given = input(vec![made_directory(2, ROOT, "build"), listed(3, ItemKind::Directory, ROOT, "build"), made_file(4, ROOT, "x.tmp"), moved_in_onedrive(synced_file(5, ROOT, "was"), ROOT, "x.tmp")]);
+fn an_item_that_is_left_here_keeps_its_name_and_the_item_of_onedrive_at_it_waits_for_the_user() {
+    let mut given = input(vec![made_directory(2, ROOT, "node_modules"), listed(3, ItemKind::Directory, ROOT, "node_modules"), made_file(4, ROOT, "x.tmp"), moved_in_onedrive(synced_file(5, ROOT, "was"), ROOT, "x.tmp")]);
     given.ignored_items = [id(2), id(4)].into();
-    assert_eq!(answer(&given, 2), folder_step(FolderStep::RenameToConflictCopy { item: versions(&given, 2), name: "build-pc".into() }));
-    assert_eq!(answer(&given, 3), waits_for(2));
-    assert_eq!(answer(&given, 4), folder_step(FolderStep::RenameToConflictCopy { item: versions(&given, 4), name: "x-pc.tmp".into() }));
-    assert_eq!(answer(&given, 5), waits_for(4));
+    assert_eq!(answer(&given, 2), Answer::Exclusion(ExclusionReason::NameIgnored));
+    assert_eq!(answer(&given, 3), Answer::Wait(WaitReason::User(Reason::Parent)));
+    assert_eq!(answer(&given, 4), Answer::Exclusion(ExclusionReason::NameIgnored));
+    assert_eq!(answer(&given, 5), Answer::Wait(WaitReason::User(Reason::Parent)));
 }
 
 /// Found by the convergence run in which OneDrive is a state of its own (seed 82): an item

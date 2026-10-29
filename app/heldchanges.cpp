@@ -82,6 +82,7 @@ QHash<int, QByteArray> HeldRowsModel::roleNames() const
         {EmptiedRole, "emptied"},
         {CountRole, "countText"},
         {LocalPathRole, "localPath"},
+        {FailureRole, "failure"},
     };
 }
 
@@ -144,12 +145,40 @@ QVariant HeldRowsModel::data(const QModelIndex &index, int role) const
             return QString();
         }
         return QString(m_root + QLatin1Char('/') + row.path);
+    case FailureRole:
+        return failure(row);
     default:
         return {};
     }
 }
 
-void HeldRowsModel::setRows(KonedriveHeldChangeList rows, const QString &root)
+QString HeldRowsModel::failure(const KonedriveHeldChange &row) const
+{
+    if (m_failures.isEmpty()) {
+        return QString();
+    }
+    QString reason = m_failures.value(row.path);
+    // A folder that stands for what was in it: the reason of what failed nearest its top, the
+    // shortest path first and, between paths as long, the first by path.
+    if (reason.isEmpty() && row.directory) {
+        const QString inside = row.path + QLatin1Char('/');
+        QString nearest;
+        for (auto it = m_failures.cbegin(); it != m_failures.cend(); ++it) {
+            const QString &path = it.key();
+            if (path.startsWith(inside) && (nearest.isEmpty() || path.size() < nearest.size() || (path.size() == nearest.size() && path < nearest))) {
+                nearest = path;
+                reason = it.value();
+            }
+        }
+    }
+    // The daemon's words go on a line of their own: "it is open in another program" begins it.
+    if (!reason.isEmpty()) {
+        reason[0] = reason.at(0).toUpper();
+    }
+    return reason;
+}
+
+void HeldRowsModel::setRows(KonedriveHeldChangeList rows, const QString &root, const QHash<QString, QString> &failures)
 {
     // By path, a part at a time, as Dolphin sorts names: numbers by value, case aside.
     QCollator collator;
@@ -166,12 +195,20 @@ void HeldRowsModel::setRows(KonedriveHeldChangeList rows, const QString &root)
         return pa.size() < pb.size();
     });
     const bool countChanges = rows.size() != m_rows.size();
+    const bool folders = std::any_of(rows.cbegin(), rows.cend(), [](const KonedriveHeldChange &row) {
+        return row.directory;
+    });
     beginResetModel();
     m_rows = std::move(rows);
     m_root = root;
+    m_failures = failures;
     endResetModel();
     if (countChanges) {
         Q_EMIT countChanged();
+    }
+    if (folders != m_folders) {
+        m_folders = folders;
+        Q_EMIT foldersChanged();
     }
 }
 
@@ -264,6 +301,31 @@ void HeldChanges::take(const QString &token, const KonedriveHeldChangeList &rows
     m_listingError.clear();
     m_token = token;
     m_held = held;
+    // A reason goes with its change: once it is no longer held, it is no longer said. The held
+    // paths and folders by kind, once: a reason's path is held, or is in a held folder.
+    QHash<QString, QSet<QString>> heldPaths;
+    QHash<QString, QSet<QString>> heldFolders;
+    if (!m_failures.isEmpty()) {
+        for (const KonedriveHeldChange &row : held) {
+            heldPaths[row.kind].insert(row.path);
+            if (row.directory) {
+                heldFolders[row.kind].insert(row.path);
+            }
+        }
+    }
+    for (auto kind = m_failures.begin(); kind != m_failures.end();) {
+        const QSet<QString> paths = heldPaths.value(kind.key());
+        const QSet<QString> folders = heldFolders.value(kind.key());
+        for (auto it = kind->begin(); it != kind->end();) {
+            const QString &path = it.key();
+            bool stillHeld = paths.contains(path);
+            for (qsizetype slash = path.lastIndexOf(QLatin1Char('/')); !stillHeld && slash > 0; slash = path.lastIndexOf(QLatin1Char('/'), slash - 1)) {
+                stillHeld = folders.contains(path.left(slash));
+            }
+            it = stillHeld ? std::next(it) : kind->erase(it);
+        }
+        kind = kind->isEmpty() ? m_failures.erase(kind) : std::next(kind);
+    }
     // What was sent before a hold that is over stays while the page shows it.
     if (!sent.isEmpty() || !held.isEmpty() || !m_reviewing) {
         m_sent = sent;
@@ -338,7 +400,7 @@ void HeldChanges::refreshRows()
             }
         }
     }
-    m_rows->setRows(rows, m_root);
+    m_rows->setRows(rows, m_root, m_rowsSent ? QHash<QString, QString>() : m_failures.value(m_rowsKind));
 }
 
 QList<HeldChanges::Kind> HeldChanges::summed(bool sent) const
@@ -363,6 +425,22 @@ QList<HeldChanges::Kind> HeldChanges::summed(bool sent) const
 QList<HeldChanges::Kind> HeldChanges::held() const
 {
     return summed(false);
+}
+
+QList<HeldChanges::Kind> HeldChanges::sent() const
+{
+    return summed(true);
+}
+
+QList<HeldChanges::Kind> HeldChanges::sentOf(const QStringList &kinds) const
+{
+    QList<Kind> sent;
+    for (const Kind &kind : summed(true)) {
+        if (kinds.contains(kind.kind)) {
+            sent << kind;
+        }
+    }
+    return sent;
 }
 
 int HeldChanges::count() const
@@ -442,32 +520,32 @@ QVariantMap HeldChanges::kindMap(const Kind &kind) const
         title = i18nc("@title a kind of held change", "Deletions");
         amount = i18ncp("@info deleted items", "%1 item", "%1 items", kind.count);
         iconName = QStringLiteral("edit-delete");
-        allowText = i18nc("@action:button", "Delete in OneDrive");
+        allowText = i18ncp("@action:button deleted items", "Delete %1 in OneDrive", "Delete %1 in OneDrive", kind.count);
         allowIcon = QStringLiteral("edit-delete");
-        restoreText = i18nc("@action:button bring deleted items back", "Restore");
+        restoreText = i18ncp("@action:button bring deleted items back", "Restore %1", "Restore %1", kind.count);
     } else if (k == QLatin1String("rewrite")) {
         title = i18nc("@title a kind of held change", "Changed files");
         amount = i18ncp("@info changed files", "%1 file", "%1 files", kind.count);
         iconName = QStringLiteral("document-edit");
         note = i18n("Restore puts back OneDrive's version and keeps yours beside it as a copy.");
-        allowText = i18nc("@action:button", "Upload Changes");
+        allowText = i18ncp("@action:button changed files", "Upload 1 Change", "Upload %1 Changes", kind.count);
         allowIcon = QStringLiteral("cloud-upload");
-        restoreText = i18nc("@action:button put back OneDrive's version", "Restore");
+        restoreText = i18ncp("@action:button put back OneDrive's version of changed files", "Restore %1", "Restore %1", kind.count);
     } else if (k == QLatin1String("move")) {
         title = i18nc("@title a kind of held change", "Moves and renames");
         amount = i18ncp("@info moved items", "%1 item", "%1 items", kind.count);
         iconName = QStringLiteral("transform-move");
-        allowText = i18nc("@action:button", "Move in OneDrive");
+        allowText = i18ncp("@action:button moved items", "Move %1 in OneDrive", "Move %1 in OneDrive", kind.count);
         allowIcon = QStringLiteral("transform-move");
-        restoreText = i18nc("@action:button", "Move Back");
+        restoreText = i18ncp("@action:button moved items", "Move %1 Back", "Move %1 Back", kind.count);
     } else {
         title = i18nc("@title a kind of held change", "New files");
         amount = i18ncp("@info new files", "%1 file", "%1 files", kind.count);
         iconName = QStringLiteral("document-new");
         note = i18n("Don't Upload keeps them on this computer only; Issues lists them.");
-        allowText = i18nc("@action:button upload new files", "Upload");
+        allowText = i18ncp("@action:button upload new files", "Upload %1", "Upload %1", kind.count);
         allowIcon = QStringLiteral("cloud-upload");
-        restoreText = i18nc("@action:button", "Don't Upload");
+        restoreText = i18ncp("@action:button new files", "Don't Upload %1", "Don't Upload %1", kind.count);
         restoreIcon = QStringLiteral("dialog-cancel");
     }
     // Moves have no size.
@@ -633,6 +711,32 @@ QString HeldChanges::summary() const
     return i18ncp("@info status", "%1 change on hold", "%1 changes on hold", count());
 }
 
+QString HeldChanges::sendAllTitle() const
+{
+    return i18ncp("@title:window", "Send the Change to OneDrive?", "Send All %1 Changes to OneDrive?", count());
+}
+
+QString HeldChanges::sendAllText() const
+{
+    QStringList parts;
+    for (const Kind &kind : held()) {
+        const qulonglong n = kind.count;
+        if (kind.kind == QLatin1String("removal")) {
+            parts << i18ncp("@info what Allow All does, joined with the others", "1 item will be deleted in OneDrive", "%1 items will be deleted in OneDrive", n);
+        } else if (kind.kind == QLatin1String("rewrite")) {
+            parts << i18ncp("@info what Allow All does, joined with the others", "1 changed file will be uploaded", "%1 changed files will be uploaded", n);
+        } else if (kind.kind == QLatin1String("move")) {
+            parts << i18ncp("@info what Allow All does, joined with the others", "1 item will be moved in OneDrive", "%1 items will be moved in OneDrive", n);
+        } else {
+            parts << i18ncp("@info what Allow All does, joined with the others", "1 new file will be uploaded", "%1 new files will be uploaded", n);
+        }
+    }
+    if (parts.isEmpty()) {
+        return QString();
+    }
+    return i18nc("@info what Allow All does: the kinds' sentences, joined", "%1.", joined(parts));
+}
+
 void HeldChanges::onRestoreProgress(const QString &account, const QString &token, const QStringList &kinds, qulonglong done, qulonglong total)
 {
     if (account != m_id) {
@@ -675,7 +779,7 @@ void HeldChanges::decide(bool restore,
                                                   restore ? QStringLiteral("RestoreHeld") : QStringLiteral("AllowHeld"));
     message << m_id << token << kinds;
     auto *watcher = new QDBusPendingCallWatcher(m_bus.asyncCall(message, std::numeric_limits<int>::max()), this);
-    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, number, done, failed](QDBusPendingCallWatcher *w) {
+    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, number, kinds, done, failed](QDBusPendingCallWatcher *w) {
         w->deleteLater();
         m_calls.remove(number);
         const QDBusPendingReply<KonedriveGuardResult> reply = *w;
@@ -683,12 +787,49 @@ void HeldChanges::decide(bool restore,
             if (failed) {
                 failed(reply.error().message());
             }
-        } else if (done) {
-            done(reply.value());
+        } else {
+            takeFailures(kinds, reply.value());
+            if (done) {
+                done(reply.value());
+            }
         }
         Q_EMIT changed();
         requestList();
     });
+}
+
+void HeldChanges::takeFailures(const QStringList &kinds, const KonedriveGuardResult &result)
+{
+    // The decision's reasons replace those of the last one for its kinds. A reason names no
+    // kind: it goes with the kinds decided of its item's held rows, or of the held folders
+    // that stand for it, and shows on the row at its path.
+    for (const QString &kind : kinds) {
+        m_failures.remove(kind);
+    }
+    QHash<qint64, QStringList> itemKinds;
+    QHash<QString, QStringList> folderKinds;
+    for (const KonedriveHeldChange &row : std::as_const(m_held)) {
+        if (kinds.contains(row.kind)) {
+            itemKinds[row.item] << row.kind;
+            if (row.directory) {
+                folderKinds[row.path] << row.kind;
+            }
+        }
+    }
+    for (const KonedriveGuardFailure &failure : result.failures) {
+        if (failure.reason.isEmpty() || failure.path.isEmpty()) {
+            continue;
+        }
+        const QString &path = failure.path;
+        QStringList decided = itemKinds.value(failure.item);
+        for (qsizetype slash = path.lastIndexOf(QLatin1Char('/')); slash > 0; slash = path.lastIndexOf(QLatin1Char('/'), slash - 1)) {
+            decided << folderKinds.value(path.left(slash));
+        }
+        for (const QString &kind : std::as_const(decided)) {
+            m_failures[kind].insert(path, failure.reason);
+        }
+    }
+    refreshRows();
 }
 
 void HeldChanges::allow(const QString &kind)
@@ -701,39 +842,81 @@ void HeldChanges::restore(const QString &kind)
     decideHere(true, kind);
 }
 
+QVariantMap HeldChanges::sendAllQuestion() const
+{
+    QVariantList kinds;
+    for (const Kind &kind : held()) {
+        kinds << QVariantMap{{QStringLiteral("kind"), kind.kind}, {QStringLiteral("count"), QVariant::fromValue(kind.count)}};
+    }
+    return {
+        {QStringLiteral("token"), m_token},
+        {QStringLiteral("title"), sendAllTitle()},
+        {QStringLiteral("text"), sendAllText()},
+        {QStringLiteral("kinds"), kinds},
+    };
+}
+
+void HeldChanges::allowAsked(const QVariantMap &question)
+{
+    QList<Kind> selected;
+    for (const QVariant &value : question.value(QStringLiteral("kinds")).toList()) {
+        const QVariantMap map = value.toMap();
+        Kind kind;
+        kind.kind = map.value(QStringLiteral("kind")).toString();
+        kind.count = map.value(QStringLiteral("count")).toULongLong();
+        selected << kind;
+    }
+    decideOn(false, selected, question.value(QStringLiteral("token")).toString());
+}
+
 void HeldChanges::decideHere(bool restore, const QString &kind)
 {
     QList<Kind> selected;
-    QStringList kinds;
-    qulonglong shown = 0;
     for (const Kind &held : held()) {
         if (kind.isEmpty() || held.kind == kind) {
             selected << held;
-            kinds << held.kind;
-            shown += held.count;
         }
     }
-    if (kinds.isEmpty() || m_token.isEmpty()) {
+    decideOn(restore, selected, m_token);
+}
+
+void HeldChanges::decideOn(bool restore, const QList<Kind> &selected, const QString &token)
+{
+    QStringList kinds;
+    qulonglong shown = 0;
+    for (const Kind &held : selected) {
+        kinds << held.kind;
+        shown += held.count;
+    }
+    if (kinds.isEmpty() || token.isEmpty()) {
         return;
     }
+    // What of them went out before the hold, as listed now: a restore does not bring it back.
+    const QList<Kind> sent = sentOf(kinds);
     decide(
         restore,
         kinds,
-        m_token,
-        [this, restore, selected, kinds, shown](const KonedriveGuardResult &result) {
+        token,
+        [this, restore, selected, kinds, shown, sent](const KonedriveGuardResult &result) {
             // Every kind done as shown: what each became, in the page's order.
             if (selected.size() > 1 && result.failed == 0 && result.pendingOffline == 0 && result.done == shown) {
                 for (auto it = selected.crbegin(); it != selected.crend(); ++it) {
                     KonedriveGuardResult one;
                     one.done = it->count;
+                    QList<Kind> sentOfKind;
+                    for (const Kind &kind : sent) {
+                        if (kind.kind == it->kind) {
+                            sentOfKind << kind;
+                        }
+                    }
                     QString type;
-                    const QString text = resultText(restore, {it->kind}, it->count, one, &type);
+                    const QString text = resultText(restore, {it->kind}, it->count, one, &type, sentOfKind);
                     addResult(type, text);
                 }
                 return;
             }
             QString type;
-            const QString text = resultText(restore, kinds, shown, result, &type);
+            const QString text = resultText(restore, kinds, shown, result, &type, sent);
             addResult(type, text);
         },
         [this, restore](const QString &error) {
@@ -752,16 +935,79 @@ QString HeldChanges::failureText(const KonedriveGuardResult &result)
     return reasons.join(QLatin1Char(' '));
 }
 
-QString HeldChanges::resultText(bool restore, const QStringList &kinds, qulonglong shown, const KonedriveGuardResult &result, QString *type)
+QString HeldChanges::stillHeldText(const KonedriveGuardResult &result, bool onPage)
+{
+    const qulonglong failed = result.failed;
+    QStringList reasons;
+    for (const KonedriveGuardFailure &failure : result.failures) {
+        if (!failure.reason.isEmpty() && !reasons.contains(failure.reason)) {
+            reasons << failure.reason;
+        }
+    }
+    if (reasons.isEmpty()) {
+        return i18ncp("@info changes that stay on hold", "1 is still on hold.", "%1 are still on hold.", failed);
+    }
+    if (reasons.size() > 1) {
+        // Each row says its own.
+        return onPage ? i18ncp("@info changes that stay on hold, each for its own reason", "1 is still on hold.", "%1 are still on hold, each with its reason in the list.", failed)
+                      : i18ncp("@info notification: changes that stay on hold, each for its own reason",
+                               "1 is still on hold.",
+                               "%1 are still on hold for different reasons: On Hold shows why for each.",
+                               failed);
+    }
+    const QString &why = reasons.constFirst();
+    // A sentence of its own, or what finishes one: "it is open in another program".
+    if (why.endsWith(QLatin1Char('.')) || why.endsWith(QLatin1Char('!')) || why.endsWith(QLatin1Char('?'))) {
+        return i18nc("@info what stays, why",
+                     "%1 %2",
+                     i18ncp("@info changes that stay on hold", "1 is still on hold.", "%1 are still on hold.", failed),
+                     why);
+    }
+    return i18ncp("@info changes that stay on hold, and the daemon's reason, such as \"it is open in another program\"",
+                  "1 is still on hold because %2.",
+                  "%1 are still on hold, each because %2.",
+                  failed,
+                  why);
+}
+
+QString HeldChanges::sentText(const QList<Kind> &sent)
+{
+    if (sent.isEmpty()) {
+        return QString();
+    }
+    if (sent.size() > 1) {
+        return i18nc("@info the kinds sent before the hold, joined", "%1 made before the hold were already sent to OneDrive.", kindsText(sent));
+    }
+    const Kind &kind = sent.constFirst();
+    const qulonglong n = kind.count;
+    if (kind.kind == QLatin1String("removal")) {
+        return i18np("1 deleted before the hold is already in OneDrive's recycle bin.", "%1 deleted before the hold are already in OneDrive's recycle bin.", n);
+    }
+    if (kind.kind == QLatin1String("rewrite")) {
+        return i18np("1 changed before the hold is already uploaded.", "%1 changed before the hold are already uploaded.", n);
+    }
+    if (kind.kind == QLatin1String("move")) {
+        return i18np("1 moved before the hold is already moved in OneDrive.", "%1 moved before the hold are already moved in OneDrive.", n);
+    }
+    return i18np("1 added before the hold is already uploaded.", "%1 added before the hold are already uploaded.", n);
+}
+
+QString HeldChanges::resultText(bool restore,
+                                const QStringList &kinds,
+                                qulonglong shown,
+                                const KonedriveGuardResult &result,
+                                QString *type,
+                                const QList<Kind> &sent)
 {
     const qulonglong done = result.done + result.pendingOffline;
     if (result.failed > 0) {
         *type = QStringLiteral("warning");
         const qulonglong asked = done + result.failed;
-        const QString stays = i18ncp("@info changes that stay on hold", "1 is still on hold.", "%1 are still on hold.", result.failed);
         const QString what = restore ? i18nc("@info some failed", "Restored %1 of %2 items.", done, asked) : i18nc("@info some failed", "Allowed %1 of %2 changes.", done, asked);
-        const QString why = failureText(result);
-        return why.isEmpty() ? i18nc("@info what was done, what stays", "%1 %2", what, stays) : i18nc("@info what was done, what stays, why", "%1 %2 %3", what, stays, why);
+        const QString text = i18nc("@info what was done, what stays and why", "%1 %2", what, stillHeldText(result, true));
+        // What went out before the hold is not brought back either.
+        const QString before = restore ? sentText(sent) : QString();
+        return before.isEmpty() ? text : i18nc("@info what was restored, what stays, what was sent before the hold", "%1 %2", text, before);
     }
     const QString kind = kinds.size() == 1 ? kinds.constFirst() : QString();
     if (result.pendingOffline > 0) {
@@ -786,21 +1032,32 @@ QString HeldChanges::resultText(bool restore, const QStringList &kinds, qulonglo
     }
     *type = QStringLiteral("positive");
     const qulonglong n = result.done;
+    if (restore) {
+        // What went out before the hold is not brought back: it says where it is.
+        const QString restored = restoredText(kind, n, shown);
+        const QString before = sentText(sent);
+        return before.isEmpty() ? restored : i18nc("@info what was restored, what was sent before the hold", "%1 %2", restored, before);
+    }
     if (kind.isEmpty() || n != shown) {
         // Several kinds at once: what each became is on the page.
-        return restore ? i18np("Restored 1 change.", "Restored %1 changes.", n) : i18np("Sending 1 change to OneDrive.", "Sending %1 changes to OneDrive.", n);
+        return i18np("Sending 1 change to OneDrive.", "Sending %1 changes to OneDrive.", n);
     }
-    if (!restore) {
-        if (kind == QLatin1String("removal")) {
-            return i18np("Deleting 1 item in OneDrive: it goes to its recycle bin.", "Deleting %1 items in OneDrive: they go to its recycle bin.", n);
-        }
-        if (kind == QLatin1String("rewrite")) {
-            return i18np("Uploading 1 changed file.", "Uploading %1 changed files.", n);
-        }
-        if (kind == QLatin1String("move")) {
-            return i18np("Moving 1 item in OneDrive.", "Moving %1 items in OneDrive.", n);
-        }
-        return i18np("Uploading 1 new file.", "Uploading %1 new files.", n);
+    if (kind == QLatin1String("removal")) {
+        return i18np("Deleting 1 item in OneDrive: it goes to its recycle bin.", "Deleting %1 items in OneDrive: they go to its recycle bin.", n);
+    }
+    if (kind == QLatin1String("rewrite")) {
+        return i18np("Uploading 1 changed file.", "Uploading %1 changed files.", n);
+    }
+    if (kind == QLatin1String("move")) {
+        return i18np("Moving 1 item in OneDrive.", "Moving %1 items in OneDrive.", n);
+    }
+    return i18np("Uploading 1 new file.", "Uploading %1 new files.", n);
+}
+
+QString HeldChanges::restoredText(const QString &kind, qulonglong n, qulonglong shown)
+{
+    if (kind.isEmpty() || n != shown) {
+        return i18np("Restored 1 change.", "Restored %1 changes.", n);
     }
     if (kind == QLatin1String("removal")) {
         return i18np("Restored 1 item: it is back in the folder.", "Restored %1 items: they are back in the folder.", n);

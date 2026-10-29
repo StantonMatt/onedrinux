@@ -1,7 +1,7 @@
 //! A name of a directory that an item of the folder is to have in OneDrive, and what else
 //! has or wants that name there, as OneDrive compares names: what frees a name goes before
-//! what takes it, two new items of one name are one, and otherwise the user's own item
-//! steps aside under a conflict copy's name.
+//! what takes it, two new items of one name are one, an item that is left here keeps its
+//! name, and otherwise the user's own item steps aside under a conflict copy's name.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -69,6 +69,8 @@ pub(crate) enum NameContestOutcome {
     HashesLocalContent,
     /// It is renamed here to a conflict copy's name.
     StepsAside,
+    /// It is left here and keeps the name: the holder waits for it, and so for the user.
+    KeepsItsName,
 }
 
 /// What becomes of the claimant of `claim`. The first that holds:
@@ -94,10 +96,13 @@ pub(crate) enum NameContestOutcome {
 /// - the holder stays, and a listing is under way: the claimant waits for the listing;
 /// - the holder stays, and both are new, each on its side, and of one kind: two
 ///   directories are one item, and so are two files of one content; where only hashing the
-///   local content says whether they are, it is hashed first. An item that is left here is
-///   never one with an item of OneDrive, and nothing is one with an item the folder cannot
-///   show: what the user made would leave the folder with it;
-/// - otherwise the claimant steps aside.
+///   local content says whether they are, it is hashed first. Nothing is one with an item
+///   the folder cannot show: what the user made would leave the folder with it;
+/// - otherwise the claimant steps aside. An item that is left here never does, nor is it
+///   one with an item of OneDrive: it keeps its name, and the holder waits for the user. A
+///   left-here directory one with OneDrive's would have all in it sent, and one renamed to
+///   a conflict copy's name would no longer match an exact ignored name, such as
+///   `node_modules`, and be sent.
 pub(crate) fn decide_name_contest(claim: &NameClaim<'_>) -> NameContestOutcome {
     let claimant = claim.claimant;
     if claim.has_earlier_rival {
@@ -117,11 +122,12 @@ pub(crate) fn decide_name_contest(claim: &NameClaim<'_>) -> NameContestOutcome {
         // A file that cannot remove its leftover any more — it came to be left here, or has a binding — holds it no longer: the schema takes the leftover to the daemon's own removals then (the trigger `mismatched_item_file_unable`), and the holder is one with no file.
         Some(NameHolder::IsLeftByUpload { file: Some(file) }) => return NameContestOutcome::WaitsFor(file),
         Some(NameHolder::IsLeftByUpload { file: None }) => return NameContestOutcome::WaitsForRemovalOfHolder,
+        Some(NameHolder::Stays(_)) if claim.is_left_here => return NameContestOutcome::KeepsItsName,
         Some(NameHolder::Stays(_)) if claim.is_listing_under_way => return NameContestOutcome::WaitsForListing,
         Some(NameHolder::Stays(holder)) => holder,
     };
     let is_new_in_onedrive = holder.local.is_none() && holder.synced_place.is_none() && holder.synced_content.is_none();
-    if claim.is_left_here || claimant.onedrive_item.is_some() || !is_new_in_onedrive || claim.holder_cannot_be_shown || claimant.kind != holder.kind {
+    if claimant.onedrive_item.is_some() || !is_new_in_onedrive || claim.holder_cannot_be_shown || claimant.kind != holder.kind {
         return NameContestOutcome::StepsAside;
     }
     let content = |version: &'_ Option<ItemVersion>| version.as_ref().and_then(|version| version.content.clone());
@@ -174,9 +180,10 @@ pub(crate) struct NameContests {
 
 /// Decides every item whose place here is to be its place in OneDrive against what else has
 /// or wants that name there ([`decide_name_contest`]), the items by their ids. An item
-/// that is left here is decided too: it steps aside for an item of OneDrive that stays at
-/// its name, the same byte for byte — it is never sent, so a name of OneDrive that only
-/// folds to its own takes nothing from it, and the folder shows both. An item that is held back — a step is running for it, a program holds it open
+/// that is left here is decided too: it keeps its name against an item of OneDrive that
+/// stays at it, the same byte for byte, which waits for the user — it is never sent, so a
+/// name of OneDrive that only folds to its own takes nothing from it, and the folder shows
+/// both. An item that is held back — a step is running for it, a program holds it open
 /// for writing — is not decided, and as a holder it is waited for.
 /// `places_taken_in_onedrive` is what OneDrive answered is taken, and
 /// `items_left_by_uploads` the items an upload of this folder left in OneDrive, each with
@@ -247,7 +254,7 @@ pub(crate) fn settle_name_contests(
             _ => None,
         };
         match (decide_name_contest(&claim), sending) {
-            (NameContestOutcome::NameIsFree, _) | (NameContestOutcome::WaitsFor(_) | NameContestOutcome::WaitsForListing | NameContestOutcome::WaitsForRemovalOfHolder, None) => {}
+            (NameContestOutcome::NameIsFree | NameContestOutcome::KeepsItsName, _) | (NameContestOutcome::WaitsFor(_) | NameContestOutcome::WaitsForListing | NameContestOutcome::WaitsForRemovalOfHolder, None) => {}
             (NameContestOutcome::WaitsFor(holder), Some(sending)) => {
                 sendings_that_wait.insert(id, sending);
                 answers.overrule(id, ItemDecision::Wait(WaitReason::AnotherItem(holder)));

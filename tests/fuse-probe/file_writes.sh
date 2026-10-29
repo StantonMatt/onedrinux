@@ -926,11 +926,60 @@ write_scope_allows_only_the_trial_subtree() {
     check_sent
 }
 
+# Default build names apply only to unbound local work, including after a restart.
+default_build_folders_stay_local_with_all_bytes_after_restart() {
+    local build_name
+    begin_folder
+    register_folder
+    for build_name in node_modules .venv venv __pycache__ .gradle; do
+        user "mkdir -p '$build_name/deep' && printf 'unique local bytes' > '$build_name/deep/kept.txt'"
+    done
+    user "printf 'sent after build folders' > sentinel.txt"
+    check_onedrive_holds sentinel.txt 'sent after build folders'
+    check_sent
+    check "only ordinary work reached OneDrive" "$(onedrive paths)" sentinel.txt
+    check "stopped cleanly" "$(stop_service)" Finished
+    restart_service
+    for build_name in node_modules .venv venv __pycache__ .gradle; do
+        check_folder_holds "$build_name/deep/kept.txt" 'unique local bytes'
+        check "build folder still stays local: $build_name" "$(onedrive id "$build_name")" absent
+    done
+    check "nothing was deleted remotely" "$(onedrive bin)" ""
+}
+
+cloud_build_folders_remain_visible_pinned_and_writable_after_restart() {
+    begin_folder
+    local n=0 build_name
+    for build_name in node_modules .venv venv __pycache__ .gradle; do
+        n=$((n + 1))
+        seed_folder "D$n" R "$build_name"
+        seed_file "F$n" "D$n" cloud.txt 'cloud bytes'
+    done
+    register_folder
+    for build_name in node_modules .venv venv __pycache__ .gradle; do
+        check "pinned cloud build folder: $build_name" "$(daemon pin "$F/$build_name")" '1 pinned'
+        check_state "$build_name/cloud.txt" hydrated
+    done
+    check "stopped cleanly" "$(stop_service)" Finished
+    restart_service
+    for build_name in node_modules .venv venv __pycache__ .gradle; do
+        check_folder_holds "$build_name/cloud.txt" 'cloud bytes'
+        check_holds "pin survived restart: $build_name" "$(daemon dehydrate "$F/$build_name/cloud.txt")" refused
+        user "printf 'new child in cloud folder' > '$build_name/new.txt' && printf 'edited cloud bytes' > '$build_name/cloud.txt'"
+        check_onedrive_holds "$build_name/new.txt" 'new child in cloud folder'
+        check_onedrive_holds "$build_name/cloud.txt" 'edited cloud bytes'
+    done
+    check_sent
+    check "no cloud build folder was deleted" "$(onedrive bin)" ""
+}
+
 # The group: every scenario of writing at the level of files.
 file_writes() {
     echo "==== writing at the level of files ===="
     ip link set lo up
     for name in \
+        default_build_folders_stay_local_with_all_bytes_after_restart \
+        cloud_build_folders_remain_visible_pinned_and_writable_after_restart \
         write_scope_allows_only_the_trial_subtree \
         new_file_arrives_in_onedrive \
         new_directory_with_files_arrives_in_onedrive \

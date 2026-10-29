@@ -153,10 +153,22 @@ the planned content's.
 **The ignore list** is the account's: `ignore` in `config.toml`, `Folder.SetIgnorePatterns`,
 `konedrivectl sync ignore`, OneDrive Settings. Shell globs match the name, not the path,
 case-sensitively; by default editors' swap, lock and backup files, `~$*`, `*.part`,
-`*.crdownload`, `*.tmp`, `.goutputstream-*`, `.fuse_hidden*`, `.nfs*`. The list applies only to
+`*.crdownload`, `*.tmp`, `.goutputstream-*`, `.fuse_hidden*`, `.nfs*`, and build/dependency
+folders `node_modules`, `.venv`, `venv`, `__pycache__`, `.gradle`. The list applies only to
 items with no binding: what came from OneDrive syncs whatever its name. Each row keeps whether
 its own name is ignored (`is_name_ignored`), gone over once when the list changes
-(`item_store/ignored_names.rs`).
+(`item_store/ignored_names.rs`). Mount startup refreshes these flags too, so defaults
+changed by an upgrade apply to existing accounts with `ignore: None`. This writes flags
+only: cloud bindings, paths, pins and resident bytes are preserved. A bound cloud folder
+keeps syncing, including new children without their own ignored name. An unbound matching
+folder and its descendants remain visible locally and are excluded from upload; no local
+bytes are discarded. When OneDrive gets a new item at the very name of an unbound matching item,
+the local item keeps its name and stays unsent, and OneDrive's item waits, not shown here, until
+the local one is renamed or removed: renamed to a conflict copy's name, a `node_modules` would
+match no default and be uploaded whole. A bound item inside an unbound matching folder waits too:
+nothing is sent into a folder OneDrive does not have. In a bound `node_modules`, a nested
+`node_modules` made here is unbound, so it stays here (npm's layout puts one in each package that
+needs its own versions). An explicit list, including an empty one, replaces the defaults.
 
 **Names OneDrive cannot hold**: one of `" * : < > ? \ |`; a leading or trailing space; `.lock`,
 `CON`, `PRN`, `AUX`, `NUL`, `COM0`–`COM9`, `LPT0`–`LPT9`, `desktop.ini`, `_vti_` anywhere, a `~$`
@@ -405,7 +417,7 @@ binding that moves from one item to another is [sync.md](sync.md) §4. For a fil
 | moved, not changed | removed | sent again at its new place when its content is on disk; otherwise it goes |
 | removed | content changed | the file comes back with OneDrive's content |
 | removed | moved or renamed | the removal is sent |
-| new | new, at the same name | two directories are one item, and so are two files of one content; otherwise the file here steps aside to a conflict copy's name |
+| new | new, at the same name | two directories are one item, and so are two files of one content; otherwise the file here steps aside to a conflict copy's name. An item left here (an ignored name) keeps its name, and OneDrive's waits |
 
 A file made here at a name OneDrive gives another item meanwhile steps aside the same way
 (`sync_plan/name_contest.rs`). A directory OneDrive removed that holds what only this computer has

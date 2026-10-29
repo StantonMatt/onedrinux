@@ -8,6 +8,19 @@
        Kinds: removal, rewrite, move, upload. Empty kinds selects all four.
        A result is (done, pending-offline, failed, kept-both-versions, failures).
        Failures are (local item id, relative path, plain-text reason), one per failed change.
+       Reasons are short lower-case sentence fragments, without a final full stop:
+       "a file of the same name is in its place";
+       "it is open in another program";
+       "it was changed on this computer after it was held";
+       "it was changed in OneDrive after it was held";
+       "it changed after it was held" (stale review or an older ledger without separate remote identity);
+       "the folder it belongs in is missing or has moved";
+       "its local copy is no longer available";
+       "there is no free name for a copy of the local file";
+       "this account's folder is not mounted";
+       "this computer couldn't save the restored file";
+       "this account's folder stopped before it could be restored".
+       Restore needs no network; unreachable OneDrive queues Allow, not a restore failure.
        Counts are individual changes, including folded descendants, not displayed rows.
        Allow's done means released for sending, not confirmed in Graph; pending-offline
        means the same durable admission while the last cycle reports OneDrive unreachable.

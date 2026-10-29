@@ -50,7 +50,7 @@ FormCard.FormCardPage {
         FormCard.FormTextDelegate {
             objectName: "signInWait"
             visible: Accounts.adding
-            text: i18n("Waiting for you to sign in in your browser…")
+            text: Accounts.addingMode === "read-only" ? i18n("Waiting for you to sign in read-only in your browser…") : i18n("Waiting for you to sign in in your browser…")
             description: i18n("If no browser opened, copy the link and open it in one.")
             textItem.wrapMode: Text.Wrap
             icon.name: "view-refresh"

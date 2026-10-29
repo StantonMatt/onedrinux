@@ -32,6 +32,7 @@
 #include <QCommandLineParser>
 #include <QFile>
 #include <QIcon>
+#include <QPointer>
 #include <QQmlApplicationEngine>
 #include <QQuickStyle>
 #include <QQuickWindow>
@@ -167,6 +168,11 @@ int run(int argc, char *argv[], Restart *restart)
         auto *held = new ChangeNotifier(item->account(), item->held(), &sink, item);
         held->setAccountName(name);
         held->setGuard(&changeGuard);
+        held->setOpenRecycleBin([sync = QPointer<SyncController>(item->sync())] {
+            if (sync) {
+                sync->openRecycleBin();
+            }
+        });
         auto *progress = new DownloadProgressController(item->sync(), &downloadJobTracker, &downloadProgressSettings, {}, item);
         progress->setAccountName(name);
         // Uploads through the same tracker and switch: "Uploading to OneDrive".

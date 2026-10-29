@@ -25,6 +25,8 @@ class HeldRowsModel : public QAbstractListModel
 {
     Q_OBJECT
     Q_PROPERTY(int count READ rowCount NOTIFY countChanged)
+    /// A row is a folder standing for what was in it, which the search does not look into.
+    Q_PROPERTY(bool folders READ folders NOTIFY foldersChanged)
 
 public:
     enum Roles {
@@ -46,6 +48,9 @@ public:
         CountRole,
         /// The item in the folder, to show in Dolphin; empty for a deletion.
         LocalPathRole,
+        /// Why the last decision left it on hold, as the daemon said it ("It is open in another
+        /// program"); empty when none did.
+        FailureRole,
     };
     Q_ENUM(Roles)
 
@@ -55,15 +60,23 @@ public:
     QVariant data(const QModelIndex &index, int role = Qt::DisplayRole) const override;
     QHash<int, QByteArray> roleNames() const override;
 
-    /// `rows`, which are all of one kind, sorted; `root` is the folder's path.
-    void setRows(KonedriveHeldChangeList rows, const QString &root);
+    bool folders() const { return m_folders; }
+
+    /// `rows`, which are all of one kind, sorted; `root` is the folder's path; `failures` the
+    /// daemon's reasons by path, for the rows the last decision left on hold.
+    void setRows(KonedriveHeldChangeList rows, const QString &root, const QHash<QString, QString> &failures = {});
 
 Q_SIGNALS:
     void countChanged();
+    void foldersChanged();
 
 private:
+    QString failure(const KonedriveHeldChange &row) const;
+
     KonedriveHeldChangeList m_rows;
     QString m_root;
+    QHash<QString, QString> m_failures;
+    bool m_folders = false;
 };
 
 /// What konedrived's change guard holds for one account (dbus/org.konedrive.ChangeGuard.xml):
@@ -99,6 +112,13 @@ class HeldChanges : public QObject
     Q_PROPERTY(QString headDetail READ headDetail NOTIFY changed)
     /// "312 deletions on hold", "370 changes on hold": the tray's and Status' words.
     Q_PROPERTY(QString summary READ summary NOTIFY changed)
+    /// Allow All's question while deletions are among several held kinds: "Send All 370
+    /// Changes to OneDrive?", and what it sends: "312 items will be deleted in OneDrive and 58
+    /// changed files will be uploaded."
+    Q_PROPERTY(QString sendAllTitle READ sendAllTitle NOTIFY changed)
+    Q_PROPERTY(QString sendAllText READ sendAllText NOTIFY changed)
+    /// The token of what is listed.
+    Q_PROPERTY(QString token READ token NOTIFY changed)
     /// A decision is under way: Allow All and Restore All wait for it.
     Q_PROPERTY(bool working READ working NOTIFY changed)
     /// What the page's decisions did, newest first, each a map: id, type (positive,
@@ -136,6 +156,8 @@ public:
     QString headline() const;
     QString headDetail() const;
     QString summary() const;
+    QString sendAllTitle() const;
+    QString sendAllText() const;
     bool working() const { return !m_calls.isEmpty(); }
     QVariantList results() const { return m_results; }
     HeldRowsModel *rows() const { return m_rows; }
@@ -146,6 +168,8 @@ public:
     QString token() const { return m_token; }
     /// The held kinds as listed, in the page's order.
     QList<Kind> held() const;
+    /// What of the held kinds was sent in the window before the hold, in the same order.
+    QList<Kind> sent() const;
     /// The held rows as listed.
     KonedriveHeldChangeList heldRows() const { return m_held; }
     /// Whether the listing is the daemon's first answer since the app started.
@@ -167,6 +191,12 @@ public:
     /// lands in results.
     Q_INVOKABLE void allow(const QString &kind = QString());
     Q_INVOKABLE void restore(const QString &kind = QString());
+    /// Allow All's question as it stands, for the prompt to keep while it is open: token,
+    /// title, text, and kinds, each a map of kind and count.
+    Q_INVOKABLE QVariantMap sendAllQuestion() const;
+    /// Allow All as `question` (sendAllQuestion()) asked it: its kinds, on its token, never
+    /// what was held after it was asked.
+    Q_INVOKABLE void allowAsked(const QVariantMap &question);
     Q_INVOKABLE void closeResult(int id);
     /// UploadLocal for a file Don't Upload kept on this computer, from Issues; `path` is its
     /// full path in the folder. A refusal lands in actionError.
@@ -189,10 +219,23 @@ public:
     /// The time of the first held change: "14:02", "yesterday at 23:10", or a date.
     QString sinceText(qint64 unixSeconds) const;
     /// What a decision did, in one sentence or two, for `kinds` with `shown` changes listed of
-    /// them; the type in `type` (positive, information, warning).
-    static QString resultText(bool restore, const QStringList &kinds, qulonglong shown, const KonedriveGuardResult &result, QString *type);
+    /// them, and what of them was `sent` before the hold; the type in `type` (positive,
+    /// information, warning).
+    static QString resultText(bool restore,
+                              const QStringList &kinds,
+                              qulonglong shown,
+                              const KonedriveGuardResult &result,
+                              QString *type,
+                              const QList<Kind> &sent = {});
     /// The daemon's reasons why changes stay on hold, each said once.
     static QString failureText(const KonedriveGuardResult &result);
+    /// What failed stays on hold, and why: "1 is still on hold because it is open in another
+    /// program." The daemon says why for each; reasons that differ are on the rows, which the
+    /// page shows (`onPage`) and the notification points to.
+    static QString stillHeldText(const KonedriveGuardResult &result, bool onPage);
+    /// What of `sent` went out before the hold: "20 deleted before the hold are already in
+    /// OneDrive's recycle bin."; empty for nothing.
+    static QString sentText(const QList<Kind> &sent);
 
 Q_SIGNALS:
     void changed();
@@ -218,7 +261,15 @@ private:
     void setServiceAvailable(bool available);
     void addResult(const QString &type, const QString &text);
     void decideHere(bool restore, const QString &kind);
+    /// The page's decision on `selected`, as listed under `token`.
+    void decideOn(bool restore, const QList<Kind> &selected, const QString &token);
+    /// What a restore of `kind` (empty: several) brought back, all `shown` of it or not.
+    static QString restoredText(const QString &kind, qulonglong n, qulonglong shown);
     QList<Kind> summed(bool sent) const;
+    /// What was sent of `kinds` before the hold.
+    QList<Kind> sentOf(const QStringList &kinds) const;
+    /// The daemon's reasons for the changes of `kinds` that `result` left on hold.
+    void takeFailures(const QStringList &kinds, const KonedriveGuardResult &result);
     QVariantMap kindMap(const Kind &kind) const;
     void refreshRows();
 
@@ -241,6 +292,8 @@ private:
     HeldRowsModel *m_rows;
     QString m_rowsKind;
     bool m_rowsSent = false;
+    /// Why the last decision of each kind left changes on hold: by kind, then path.
+    QHash<QString, QHash<QString, QString>> m_failures;
     /// The decisions under way, by number.
     QHash<quint64, Call> m_calls;
     quint64 m_lastCall = 0;

@@ -73,7 +73,7 @@ fn held_removals_restore_offline_and_refuse_a_replacement() {
         .fixture
         .runtime()
         .block_on(mount.restore_guard_change(batch[0].clone()));
-    assert!(!matches!(result, Ok(true)));
+    assert_eq!(result.unwrap_err(), "a file of the same name is in its place");
     guard.restored(&batch[0], false).unwrap();
     assert_eq!(
         operations.fixture.read_disk_file("doc").unwrap(),
@@ -153,9 +153,8 @@ fn restore_of_a_newer_rewrite_generation_leaves_its_bytes_and_the_hold() {
     let result = operations
         .fixture
         .runtime()
-        .block_on(mount.restore_guard_change(batch[0].clone()))
-        .unwrap();
-    assert!(!result);
+        .block_on(mount.restore_guard_change(batch[0].clone()));
+    assert_eq!(result.unwrap_err(), "it was changed on this computer after it was held");
     guard.restored(&batch[0], false).unwrap();
     assert_eq!(
         operations.fixture.read_disk_file("doc").unwrap(),
@@ -266,7 +265,7 @@ fn a_restore_with_an_unsynced_record_keeps_the_retained_copy_and_hold() {
     std::fs::set_permissions(&wal, std::fs::Permissions::from_mode(0o000)).unwrap();
     let result = operations.fixture.runtime().block_on(mount.restore_guard_change(batch[0].clone()));
     std::fs::set_permissions(&wal, std::fs::Permissions::from_mode(0o600)).unwrap();
-    assert!(result.is_err(), "a failed record barrier refuses the restore: {result:?}");
+    assert_eq!(result.unwrap_err(), "this computer couldn't save the restored file");
     guard.restored(&batch[0], false).unwrap();
     assert!(guard.blocks(file));
     assert_eq!(operations.fixture.read_disk_file("doc"), None);
@@ -321,7 +320,7 @@ fn rewrite_restore_waits_for_resident_readers() {
         let handles = mount.folder_step_parts().item_handles;
         let reader = handles.add_file(OpenItemFile::ReadingBackingFile { item: file, backing_file: open });
         let batch = guard.decide(&[kind.into()], true).unwrap();
-        assert!(!operations.fixture.runtime().block_on(mount.restore_guard_change(batch[0].clone())).unwrap());
+        assert_eq!(operations.fixture.runtime().block_on(mount.restore_guard_change(batch[0].clone())).unwrap_err(), "it is open in another program");
         handles.close_reader(reader);
         assert!(operations.fixture.runtime().block_on(mount.restore_guard_change(batch[0].clone())).unwrap());
         guard.restored(&batch[0], true).unwrap();

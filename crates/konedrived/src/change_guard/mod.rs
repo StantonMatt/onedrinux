@@ -518,6 +518,7 @@ impl ChangeGuard {
                 first_held_revision: 0,
                 at: now,
                 generation: generation(v),
+                remote_generation: Some(remote_generation(v)),
                 write_count: write_count(v),
                 provisional: false,
                 disposition: Disposition::Pending,
@@ -676,6 +677,7 @@ impl ChangeGuard {
                 && write_count(planned).is_none_or(|n| c.write_count == Some(n))
         }) {
             c.generation = generation(&ItemVersions::of(&row));
+            c.remote_generation = Some(remote_generation(&ItemVersions::of(&row)));
             inner.ledger.revision += 1;
             self.save(&mut inner).map_err(|e| TreeError::Io(std::io::Error::other(e)))?;
         }
@@ -739,6 +741,7 @@ impl ChangeGuard {
             first_held_revision: 0,
             at: now,
             generation: format!("cleanup:{identity}:{version}"),
+            remote_generation: None,
             write_count: None,
             provisional: false,
             disposition: Disposition::Pending,
@@ -853,6 +856,10 @@ impl ChangeGuard {
     }
 }
 
+pub(crate) fn remote_generation(v: &ItemVersions) -> String {
+    format!("{:?}|{:?}|{:?}", v.onedrive_item, v.onedrive_etag, v.onedrive)
+}
+
 pub(crate) fn generation(v: &ItemVersions) -> String {
     // Content hashes can be filled by a row step without changing the bytes. Bind to the
     // local size/time, place, unsent stamp, cloud binding and original cloud version.
@@ -902,6 +909,7 @@ fn change(row: &Item, kind: Kind, path: String, at: i64) -> Change {
         first_held_revision: 0,
         at,
         generation: generation(&ItemVersions::of(row)),
+        remote_generation: Some(remote_generation(&ItemVersions::of(row))),
         write_count: write_count(&ItemVersions::of(row)),
         provisional: false,
         disposition: Disposition::Pending,

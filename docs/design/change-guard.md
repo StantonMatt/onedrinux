@@ -142,6 +142,8 @@ operations are separate history and are never offered as restorable.
 Restore writes an exact completion receipt into the guard ledger before its SQL
 transaction commits. After place-change recovery, startup settles a receipt only if
 all resulting rows still match; an uncommitted receipt or newer work stays held.
+Startup also retires held uploads of rows its ignored-name refresh left here (they are
+never sent), keeping Don't Upload entries.
 Restore refuses a bound content switch while readers remain, under the same reader
 gate as normal replacement. Conflict names use the bounded ordinary naming helper and
 try free alternatives. Cleanup DELETEs use the account-wide removal quiet deadline;
@@ -173,6 +175,29 @@ failure reasons. Empty kinds selects all four kinds within the token. Counts are
 individual changes, including folder descendants, rather than display rows. Failure of
 one restore leaves it held and does not prevent unrelated restores. A combined rewrite
 and move is restored together and counts both changes, with one kept local copy.
+
+Per-entry reasons are lower-case sentence fragments without a trailing full stop, ready
+for the row's second line. The XML documents the same set:
+
+| Reason | Cause |
+|---|---|
+| a file of the same name is in its place | The destination is occupied on disk or in the tree transaction |
+| it is open in another program | A writer is still open, or a reader prevents a content switch |
+| it was changed on this computer after it was held | The local generation, write count or verified retained file changed |
+| it was changed in OneDrive after it was held | The remote version or binding changed |
+| it changed after it was held | The review token is stale, or an older ledger cannot distinguish which side changed |
+| the folder it belongs in is missing or has moved | The destination's parent cannot be used |
+| its local copy is no longer available | A required row, retained copy or source file is missing |
+| there is no free name for a copy of the local file | All 100 conflict-copy names are occupied |
+| this account's folder is not mounted | A restore needs a mount and the account has none |
+| this computer couldn't save the restored file | A disk, database, durable ledger or rollback write failed |
+| this account's folder stopped before it could be restored | The mutation thread stopped before the restore ran |
+
+New ledger entries persist a separate remote identity solely to explain a refusal;
+old entries remain readable and keep the same generation safety checks. Conditional
+store commits distinguish local changes, remote changes and occupied or missing parents
+inside the transaction. Raw database errors and filesystem debug paths are logged rather
+than returned as row text. Allow uses the open-file and stale-review reasons too.
 
 Allow reports admission to the existing sender: done means released for sending, and
 pending-offline means durably released while the most recent listing reports OneDrive
@@ -209,18 +234,23 @@ first and never releases what is held; off, one warning line says what that mean
 While an account holds something, the sidebar has **On Hold** with the count of held
 changes, Status has a card of the held kinds with Review…, and the account's state is
 `held` (`state-error` in the tray, "Changes on hold" at the head of Status) unless
-something worse goes on. On Hold lists one card per kind with its two buttons (Delete in
-OneDrive / Restore, Upload Changes / Restore, Move in OneDrive / Move Back, Upload / Don't
-Upload), Allow All and Restore All for several kinds, the open group's rows (built by the
-list, only for the open group), and what was sent before the hold. Every decision uses the
+something worse goes on. On Hold lists one card per kind with its two buttons, the undo
+first and both naming the count, so a search can't hide what they act on (Restore 1,999 /
+Delete 1,999 in OneDrive, Restore 58 / Upload 58 Changes, Move 240 Back / Move 240 in
+OneDrive, Don't Upload 500 / Upload 500), Restore All and Allow All for several kinds, the
+open group's rows (built by the list, only for the open group), and what was sent before
+the hold. While deletions are among them, Allow All first asks "Send All N Changes to
+OneDrive?", naming what each kind will do. A restore that left items on hold shows each
+one's reason (the daemon's per-change failure) as its second line. Every decision uses the
 token of the listing the page shows; what it did shows at the top of the page. The page is
 `app/qml/OnHoldPage.qml` over `HeldChanges` (`app/heldchanges.*`).
 
-One notification per account (`changesHeld`) says what came on hold, with **Review…** and
+One notification per account (`changesHeld`) says what came on hold, naming the folder when
+one folder holds it all, and what was already sent before the hold, with **Review…** and
 Restore only (Move Back, Don't Upload, Restore All): allowing is on the page. Its button acts
-on the token of what it says, and what it did takes its place. What is held when the app
-starts is no news. Issues lists a file Don't Upload kept here with **Upload**
-(`UploadLocal`).
+on the token of what it says, and what it did takes its place; a restore result offers
+**Open Recycle Bin** when items were sent before the hold. What is held when the app starts
+is no news. Issues lists a file Don't Upload kept here with **Upload** (`UploadLocal`).
 
 ## Checks and follow-up
 

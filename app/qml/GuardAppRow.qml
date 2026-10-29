@@ -16,6 +16,9 @@ FormCard.AbstractFormDelegate {
 
     /// identity, name, iconName, state and stateText.
     required property var app
+    /// Whether Always Allow is offered here; a terminal or an IDE is always allowed only from
+    /// Settings, so one click on Status can't let every program run in it download freely.
+    property bool offersAlways: true
 
     readonly property bool blocked: app.state === "blocked"
     readonly property bool hasRule: app.state === "allowed-session" || app.state === "allowed-always" || app.state === "blocked-always"
@@ -78,7 +81,7 @@ FormCard.AbstractFormDelegate {
             }
             QQC2.Button {
                 objectName: "allowAlwaysButton"
-                visible: row.blocked
+                visible: row.blocked && row.offersAlways
                 text: i18nc("@action:button", "Always Allow")
                 onClicked: DownloadGuard.allowApp(row.app.identity, true)
             }

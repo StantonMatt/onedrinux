@@ -4,11 +4,11 @@
 // test: held_rewrites_keep_local_bytes_without_uploading_the_copy
 // test: a_restore_with_an_unsynced_record_keeps_the_retained_copy_and_hold
 use super::{FolderStepParts, ItemMount};
-use crate::change_guard::{generation, Change, Kind};
+use crate::change_guard::{generation, remote_generation, Change, Kind};
 use crate::mount::item_announcements::{describe_move, ItemAnnouncement};
 use crate::mount::mount_take_down::TakeDownCause;
 use konedrive_tree::{
-    ConflictRow, ContentVersion, Item, ItemKind, ItemPlace, ItemVersions, LocalItemId,
+    GuardRestoreFailure as Failure, ConflictRow, ContentVersion, Item, ItemKind, ItemPlace, ItemVersions, LocalItemId,
     PlaceChangeRecord, StepCommitOutcome,
 };
 use std::os::unix::fs::MetadataExt;
@@ -41,12 +41,12 @@ impl ItemMount {
         let id = LocalItemId::new(change.item);
         let retained = if change.kind == Kind::Removal {
             tokio::task::spawn_blocking(move || prepare(&verification_backing, verification_guard.as_deref(), id))
-                .await.map_err(|e| e.to_string())??
+                .await.map_err(|_| Failure::Stopped.to_string())??
         } else { None };
         thread
             .run_and_wait(move || restore(&parts, &backing, &change, take_move, retained))
             .await
-            .map_err(|e| e.to_string())?
+            .map_err(|_| Failure::Stopped.to_string())?
     }
 }
 fn restore(
@@ -56,16 +56,16 @@ fn restore(
     take_move: bool,
     verified: Option<VerifiedRetained>,
 ) -> Result<bool, String> {
-    let fail = |e: &dyn std::fmt::Display| e.to_string();
+    let fail = tree_failure;
     let id = LocalItemId::new(change.item);
     let Some(guard) = &parts.place_changes.change_guard else {
-        return Err("change guard is not attached".into());
+        return Err(Failure::Unmounted.to_string());
     };
     if change.kind == Kind::Upload || change.item < 0 {
         return Ok(true);
     }
     if parts.item_handles.is_open_for_writing(id) {
-        return Ok(false);
+        return Err(Failure::Open.to_string());
     }
     let read = parts
         .store
@@ -90,7 +90,7 @@ fn restore(
         return restore_retained_local(parts, backing, guard, change);
     };
     let _readers = matches!(change.kind, Kind::Rewrite | Kind::Removal).then(|| crate::panic::lock(&parts.item_handles.reader_gate));
-    if _readers.is_some() && parts.item_handles.is_open_for_reading(id) { return Ok(false); }
+    if _readers.is_some() && parts.item_handles.is_open_for_reading(id) { return Err(Failure::Open.to_string()); }
     let planned = ItemVersions::of(&row);
     if generation(&planned) != change.generation
         || match planned.local.as_ref().and_then(|l| l.content.as_ref()) {
@@ -100,17 +100,22 @@ fn restore(
             _ => false,
         }
     {
-        return Ok(false);
+        let reason = match &change.remote_generation {
+            Some(remote) if *remote != remote_generation(&planned) => Failure::RemoteChanged,
+            Some(_) => Failure::LocalChanged,
+            None => Failure::Changed,
+        };
+        return Err(reason.to_string());
     }
     match change.kind {
         Kind::Removal => {
             let (Some(destination), Some(place)) = (destination, remote_place) else {
-                return Ok(false);
+                return Err(Failure::ParentMissing.to_string());
             };
             // Never use the displayed path to choose a replacement or create missing
             // parents: a removed parent is restored explicitly before its children.
             if let Some(v) = &verified {
-                if !backing.read_metadata(&v.path).is_some_and(|m| identity(&m) == v.identity) { return Ok(false); }
+                if !backing.read_metadata(&v.path).is_some_and(|m| identity(&m) == v.identity) { return Err(Failure::LocalChanged.to_string()); }
             }
             let retained = verified.as_ref().map(|v| v.path.clone());
             let content = verified.as_ref().map(|v| v.content.clone());
@@ -179,14 +184,14 @@ fn restore(
                 }
                 disk.end();
                 forget_record(parts, record)?;
-                return committed.map(|_| false);
+                return committed.and_then(|_| Err(Failure::Changed.to_string()));
             }
             disk.end();
             sync_restored_row(parts, &disk_destination)?;
-            guard.forget_retained(id)?;
+            guard.forget_retained(id).map_err(|e| storage_failure(&e))?;
             let mut announcements = vec![ItemAnnouncement::Appeared { item: id, place }];
             if let Some((copy_path, copy_place)) = copy {
-                if let Some(row) = parts.store.call_blocking(move |s| s.item_store().reader().find_item_by_path(&copy_path)).map_err(|e| e.to_string())? {
+                if let Some(row) = parts.store.call_blocking(move |s| s.item_store().reader().find_item_by_path(&copy_path)).map_err(|e| tree_failure(&e))? {
                     announcements.push(ItemAnnouncement::Appeared { item: row.local_item_id, place: copy_place });
                 }
             }
@@ -200,7 +205,7 @@ fn restore(
                 remote_place,
                 row.local.as_ref().and_then(|v| v.place.clone()),
             ) else {
-                return Ok(false);
+                return Err(Failure::ParentMissing.to_string());
             };
             let on_disk = backing.read_metadata(&from).is_some()
                 && (row.kind == ItemKind::Directory
@@ -220,7 +225,7 @@ fn restore(
                             s.sync_write_ahead_log()?;
                             Ok(record)
                         })
-                        .map_err(|e| e.to_string())?,
+                        .map_err(|e| tree_failure(&e))?,
                 )
             } else {
                 None
@@ -256,7 +261,7 @@ fn restore(
                 }
                 disk.end();
                 forget_record(parts, record)?;
-                return outcome.map(|_| false);
+                return outcome.and_then(|_| Err(Failure::Changed.to_string()));
             }
             disk.end();
             sync_restored_row(parts, &to)?;
@@ -281,9 +286,9 @@ fn restore_rewrite(
     path: Option<PathBuf>,
     take_move: bool,
 ) -> Result<bool, String> {
-    let Some(path) = path else { return Ok(false) };
+    let Some(path) = path else { return Err(Failure::LocalMissing.to_string()) };
     let Some(place) = row.local.as_ref().and_then(|v| v.place.as_ref()) else {
-        return Ok(false);
+        return Err(Failure::LocalMissing.to_string());
     };
     let id = row.local_item_id;
     // A private conflict name is never overwritten. The tree transaction independently
@@ -303,7 +308,7 @@ fn restore_rewrite(
             s.sync_write_ahead_log()?;
             Ok(record)
         })
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| tree_failure(&e))?;
     let disk = parts.place_changes.begin();
     let undo = move_on_record(parts, &disk, &path, &copy_path, Some(record))?;
     if let Err(error) = sync_parents(backing, &path, &copy_path) {
@@ -321,7 +326,7 @@ fn restore_rewrite(
         .place_changes
         .change_guard
         .clone()
-        .ok_or("change guard is not attached")?;
+        .ok_or_else(|| Failure::Unmounted.to_string())?;
     let held_path = copy_path.display().to_string();
     let notice_changes = copy_guard.restore_changes(change, take_move);
     let made = parts
@@ -339,14 +344,14 @@ fn restore_rewrite(
                 },
             )
         })
-        .map_err(|e| e.to_string());
+        .map_err(|e| tree_failure(&e));
     let made = match made {
         Ok(Some(made)) => made,
         result => {
             undo_restore(parts, &disk, undo)?;
             disk.end();
             forget_record(parts, Some(record))?;
-            return result.map(|_| false);
+            return result.and_then(|_| Err(Failure::Changed.to_string()));
         }
     };
     disk.end();
@@ -374,7 +379,7 @@ fn undo_restore(parts: &FolderStepParts, disk: &crate::mount::PlaceChange<'_>, u
     };
     disk.undo(undo).map_err(|error| {
         parts.mount_take_down.ask(TakeDownCause::UndoFailed { path });
-        error.to_string()
+        storage_failure(&error)
     })
 }
 
@@ -383,7 +388,7 @@ fn undo_restore(parts: &FolderStepParts, disk: &crate::mount::PlaceChange<'_>, u
 fn sync_restored_row(parts: &FolderStepParts, path: &Path) -> Result<(), String> {
     parts.store.sync_write_ahead_log().map_err(|error| {
         parts.mount_take_down.ask(TakeDownCause::BackingFileBehindRow { path: path.to_owned() });
-        error.to_string()
+        storage_failure(&error)
     })
 }
 
@@ -396,7 +401,7 @@ fn sync_parents(
         let parent = path.parent().unwrap_or(Path::new(""));
         std::fs::File::open(backing.resolve_path(parent))
             .and_then(|f| f.sync_all())
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| storage_failure(&e))?;
     }
     Ok(())
 }
@@ -409,7 +414,7 @@ fn forget_record(
         parts
             .store
             .call_blocking(move |s| s.item_store().forget_place_change_record(record))
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| tree_failure(&e))?;
     }
     Ok(())
 }
@@ -427,7 +432,10 @@ fn move_on_record(
                 crate::mount::PlaceRefusal::NotPutBack { path, .. } => parts.mount_take_down.ask(TakeDownCause::UndoFailed { path: path.clone() }),
                 _ => forget_record(parts, record)?,
             }
-            Err(format!("restore place is held: {error:?}"))
+            Err(match &error {
+                crate::mount::PlaceRefusal::Disk { errno: libc::ENOENT, path } if path == from => Failure::LocalMissing.to_string(),
+                _ => place_failure(&error),
+            })
         }
     }
 }
@@ -443,10 +451,10 @@ fn restore_retained_local(
 ) -> Result<bool, String> {
     let old_id = LocalItemId::new(change.item);
     let Some(retained) = guard.retained(old_id) else {
-        return Ok(false);
+        return Err(Failure::LocalMissing.to_string());
     };
     let Some(metadata) = backing.read_metadata(&retained).filter(|m| m.is_file()) else {
-        return Ok(false);
+        return Err(Failure::LocalMissing.to_string());
     };
     let destination = PathBuf::from(&change.path);
     if destination.as_os_str().is_empty()
@@ -454,7 +462,7 @@ fn restore_retained_local(
             .components()
             .any(|c| !matches!(c, std::path::Component::Normal(_)))
     {
-        return Ok(false);
+        return Err(Failure::LocalMissing.to_string());
     }
     let mut directory = LocalItemId::ROOT;
     let mut parent_path = PathBuf::new();
@@ -464,10 +472,10 @@ fn restore_retained_local(
         let existing = parts
             .store
             .call_blocking(move |s| s.item_store().reader().find_item_by_path(&look))
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| tree_failure(&e))?;
         if let Some(existing) = existing {
             if existing.kind != ItemKind::Directory {
-                return Ok(false);
+                return Err(Failure::Occupied.to_string());
             }
             directory = existing.local_item_id;
             continue;
@@ -482,7 +490,7 @@ fn restore_retained_local(
         parent_local_item_id: directory,
         name: destination
             .file_name()
-            .ok_or("retained copy has no filename")?
+            .ok_or_else(|| Failure::LocalMissing.to_string())?
             .to_owned(),
     };
     let content = ContentVersion::ChangedHere {
@@ -501,7 +509,7 @@ fn restore_retained_local(
         Some(&retained),
         Some(change.clone()),
     )?;
-    guard.forget_retained(old_id)?;
+    guard.forget_retained(old_id).map_err(|e| storage_failure(&e))?;
     Ok(true)
 }
 fn rescue_entry(
@@ -515,7 +523,7 @@ fn rescue_entry(
     restored: Option<Change>,
 ) -> Result<LocalItemId, String> {
     if backing.read_metadata(path).is_some() {
-        return Err("a newer local entry holds the restore path".into());
+        return Err(Failure::Occupied.to_string());
     }
     let kind = if content.is_some() {
         ItemKind::File
@@ -535,7 +543,7 @@ fn rescue_entry(
             s.sync_write_ahead_log()?;
             Ok(record)
         })
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| tree_failure(&e))?;
     let disk = parts.place_changes.begin();
     let undo = match retained {
         Some(from) => move_on_record(parts, &disk, from, path, Some(record))?,
@@ -543,7 +551,7 @@ fn rescue_entry(
             Ok((_, undo)) => undo,
             Err(error) => {
                 forget_record(parts, Some(record))?;
-                return Err(format!("cannot restore parent: {error:?}"));
+                return Err(place_failure(&error));
             }
         },
     };
@@ -558,7 +566,7 @@ fn rescue_entry(
         .place_changes
         .change_guard
         .clone()
-        .ok_or("change guard is not attached")?;
+        .ok_or_else(|| Failure::Unmounted.to_string())?;
     let held_path = path.display().to_string();
     let committed = parts.store.call_blocking(move |s| {
         s.item_store().commit_guard_rescue_noticed(
@@ -578,7 +586,7 @@ fn rescue_entry(
         Err(error) => {
             undo_restore(parts, &disk, undo)?;
             forget_record(parts, Some(record))?;
-            return Err(error.to_string());
+            return Err(tree_failure(&error));
         }
     };
     disk.end();
@@ -605,8 +613,8 @@ fn verified_retained_content(
     else {
         return Ok(false);
     };
-    let mut file = backing.open_to_read(path).map_err(|e| e.to_string())?;
-    let before = file.metadata().map_err(|e| e.to_string())?;
+    let mut file = backing.open_to_read(path).map_err(|e| storage_failure(&e))?;
+    let before = file.metadata().map_err(|e| storage_failure(&e))?;
     if before.len() != *size
         || before.mtime() != *mtime
         || (*mtime_nsec != 0 && before.mtime_nsec() as u32 != *mtime_nsec)
@@ -616,19 +624,53 @@ fn verified_retained_content(
     let mut hash = konedrive_graph::quickxor::QuickXor::new();
     let mut buffer = vec![0; 1 << 20];
     loop {
-        let read = file.read(&mut buffer).map_err(|e| e.to_string())?;
+        let read = file.read(&mut buffer).map_err(|e| storage_failure(&e))?;
         if read == 0 {
             break;
         }
         hash.update(&buffer[..read]);
     }
-    let after = file.metadata().map_err(|e| e.to_string())?;
+    let after = file.metadata().map_err(|e| storage_failure(&e))?;
     Ok(hash.finish_base64() == *expected
         && before.len() == after.len()
         && before.mtime() == after.mtime()
         && before.mtime_nsec() == after.mtime_nsec()
         && before.ctime() == after.ctime()
         && before.ctime_nsec() == after.ctime_nsec())
+}
+
+fn storage_failure(error: &dyn std::fmt::Display) -> String {
+    tracing::warn!("held change could not be restored: {error}");
+    Failure::Storage.to_string()
+}
+
+fn tree_failure(error: &konedrive_tree::TreeError) -> String {
+    use konedrive_tree::{RowRefusalReason, TreeError};
+    match error {
+        TreeError::GuardRestore(reason) => reason.to_string(),
+        TreeError::Refused(refusal) => match refusal.reason {
+            RowRefusalReason::PlaceTaken => Failure::Occupied.to_string(),
+            RowRefusalReason::NoDirectory => Failure::ParentMissing.to_string(),
+            RowRefusalReason::ItemGone => Failure::LocalMissing.to_string(),
+            _ => storage_failure(error),
+        },
+        _ => storage_failure(error),
+    }
+}
+
+fn place_failure(error: &crate::mount::PlaceRefusal) -> String {
+    use crate::mount::PlaceRefusal;
+    match error {
+        PlaceRefusal::PlaceHeld { .. } => Failure::Occupied.to_string(),
+        PlaceRefusal::Disk { errno, .. } => match *errno {
+            libc::EEXIST | libc::ENOTEMPTY => Failure::Occupied.to_string(),
+            // EINVAL: the folder it goes back into is now inside it.
+            libc::ENOENT | libc::ENOTDIR | libc::EINVAL => Failure::ParentMissing.to_string(),
+            libc::EBUSY | libc::ETXTBSY => Failure::Open.to_string(),
+            _ => Failure::Storage.to_string(),
+        },
+        PlaceRefusal::NotPutBack { .. } => Failure::Storage.to_string(),
+    }
 }
 
 fn guard_error(error: String) -> konedrive_tree::TreeError { konedrive_tree::TreeError::Io(std::io::Error::other(error)) }
@@ -638,11 +680,11 @@ fn free_copy_place(parts: &FolderStepParts, backing: &crate::mount::backing_dire
         let name = konedrive_tree::make_conflict_copy_name(&place.name, "restored-local", attempt);
         let candidate = path.with_file_name(&name);
         if backing.read_metadata(&candidate).is_some() { continue; }
-        if parts.store.call_blocking(move |s| s.item_store().reader().find_item_by_path(&candidate)).map_err(|e| e.to_string())?.is_none() {
+        if parts.store.call_blocking(move |s| s.item_store().reader().find_item_by_path(&candidate)).map_err(|e| tree_failure(&e))?.is_none() {
             return Ok(ItemPlace { parent_local_item_id: place.parent_local_item_id, name });
         }
     }
-    Err("no free conflict copy name for Restore".into())
+    Err(Failure::NoCopyName.to_string())
 }
 
 type FileIdentity = (u64, u64, u64, i64, i64, i64, i64);
@@ -656,7 +698,7 @@ fn prepare_retained(backing: &crate::mount::backing_directory::BackingDirectory,
     if let Some(snapshot) = guard.retained_content(id) {
         if verified_retained_content(backing, &path, &snapshot)? { content = snapshot; }
     }
-    if !backing.read_metadata(&path).is_some_and(|m| identity(&m) == identity(&metadata)) { return Err("retained copy changed during verification".into()); }
+    if !backing.read_metadata(&path).is_some_and(|m| identity(&m) == identity(&metadata)) { return Err(Failure::LocalChanged.to_string()); }
     Ok(Some(VerifiedRetained { path, content, identity: identity(&metadata) }))
 }
 

@@ -217,7 +217,7 @@ private Q_SLOTS:
         QTRY_VERIFY(!account.writeScopeChanging());
         QCOMPARE(account.writePaths(), QStringList{QStringLiteral("Projects/agent-sandbox")});
         account.clearWriteScope();
-        QTRY_COMPARE(account.actionError(), QStringLiteral("Changes were not allowed everywhere: config.toml cannot be written"));
+        QTRY_COMPARE(account.actionError(), QStringLiteral("Could not allow changes everywhere: config.toml cannot be written"));
         fake.account->refuseWriteScope.clear();
 
         // Everywhere: the list is forgotten.
@@ -417,7 +417,8 @@ private Q_SLOTS:
         QVERIFY(sink.sent.last().text.contains(QStringLiteral("&lt;b&gt;x&lt;/b&gt;")));
     }
 
-    /// The sign-in page: Sign In is two-way, and only its wait offers a read-only sign-in.
+    /// The sign-in page: Sign In is two-way, and only its wait offers a read-only sign-in,
+    /// whose wait then says it is read-only.
     void theSignInPage()
     {
         FakeDaemon fake({});
@@ -439,11 +440,16 @@ private Q_SLOTS:
         QCOMPARE(fake.manager->calls, QStringList{QStringLiteral("SignIn")});
         QTRY_VERIFY(instead->isVisible() && instead->isEnabled());
         QVERIFY(cancel->isVisible());
+        QQuickItem *wait = app.find(QStringLiteral("signInWait"));
+        QVERIFY(wait);
+        QCOMPARE(wait->property("text").toString(), QStringLiteral("Waiting for you to sign in in your browser…"));
 
+        // Read-only instead: the wait says which sign-in it waits for.
         click(instead);
         QTRY_COMPARE(m_opened.size(), 2);
         QVERIFY(fake.manager->calls.contains(QStringLiteral("Add:read-only")));
         QTRY_VERIFY(!instead->isVisible());
+        QCOMPARE(wait->property("text").toString(), QStringLiteral("Waiting for you to sign in read-only in your browser…"));
         QVERIFY(cancel->isVisible());
         QVERIFY(app.find(QStringLiteral("copySignInLink"))->isEnabled());
 

@@ -63,7 +63,7 @@ pub const REASONS: &[ReasonText] = &[
     bare("not-read-on-disk", "KOneDrive could not read this on disk when it started: nothing of it is uploaded until it can be read at a start."),
     bare("being-checked", "Being checked: KOneDrive is asking OneDrive for the whole folder again, and goes on by itself."),
     bare("local-only", "Kept on this computer. Choose Upload to send it to OneDrive."),
-    bare("held-for-approval", "Changes are held for approval: allow them or restore the cloud version."),
+    bare("held-for-approval", "On hold for your review: see On Hold in KOneDrive."),
     bare("quiet-time", "Changed a moment ago: it goes up once it has been left alone for a moment."),
     bare("network", "OneDrive could not be reached: tried again later."),
     bare("local-error", "The local file could not be read: tried again later."),

@@ -8,8 +8,13 @@
 use std::ffi::OsStr;
 use std::sync::{Arc, RwLock};
 
-/// Editors' and browsers' temporary files, lock files and the like.
+/// Temporary files and local build or dependency folders. Bound cloud items keep syncing.
 pub(crate) const DEFAULT_PATTERNS: &[&str] = &[
+    "node_modules",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".gradle",
     "*.swp",
     "*.swo",
     "*.swx",

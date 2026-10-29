@@ -54,8 +54,12 @@ impl ItemStore<'_> {
     ///
     /// Called by the change of the account's ignore list (`account_folder/settings.rs`), under the
     /// tree lock, so that no write operation gives a name its flag by the old list after
-    /// it; the plan's task is woken after it. `is_name_ignored` is the upload rules' pure
-    /// question of a name (`mount::UploadRules::is_name_ignored`).
+    /// it; the plan's task is woken after it. Also called at every build of a mount
+    /// (`mount/item_mount/build_order.rs`), after the check at start and before anything
+    /// else writes the rows or a plan is made, so with no tree lock and no wake: defaults an
+    /// upgrade changed apply to an account with no list of its own. `is_name_ignored` is
+    /// the list's pure question of a name (`IgnoreList::matches`, as
+    /// `mount::UploadRules::is_name_ignored` asks it).
     pub fn rewrite_ignored_names(&mut self, is_name_ignored: &dyn Fn(&OsStr) -> bool) -> Result<u64, TreeError> {
         self.write(|tx| {
             let mut changed = 0;

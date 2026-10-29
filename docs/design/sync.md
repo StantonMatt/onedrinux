@@ -132,7 +132,7 @@ Everything in a row is written through `ItemStore`, each change one transaction.
 | OneDrive version, eTag, synced place or content, `confirmed_at_count` | a step towards OneDrive's commit, when OneDrive confirmed (§7.2) |
 | synced place or content | the commits of steps towards the folder and of the rows |
 | `content_presence` | a download's landing, a free-up, the write operation that makes a file, the start-up check ([mount.md](mount.md) §5, §6) |
-| `is_name_ignored` | every write of a local place, and `give_up_binding`; all rows once when the ignored names change |
+| `is_name_ignored` | every write of a local place, and `give_up_binding`; all rows once when the ignored names change, and at every mount's start (defaults an upgrade changed) |
 | `is_executable` | `set_executable_bit` alone |
 | `unsent_since` | the schema's triggers alone |
 | the binding | given to an item OneDrive confirmed as new (`bind_item`), to a row made for an item a listing brought (`make_onedrive_item`, also at a parent's first mention) and to the root; moved by the operations of §4 alone |
@@ -343,7 +343,9 @@ with Unicode's forms of one letter. The plan does not depend on knowing:
   one. A wrong rule costs one refused request, never a loop or a loss.
 - **A new item of one name on each side**: two directories, or two files of one content, are one
   (`MergeItems`); where only a hash says, the local content is hashed first; otherwise the user's item
-  steps aside.
+  steps aside. An item left here never does, nor is it one with OneDrive's: it keeps its name, unsent,
+  and OneDrive's item at that very name waits for the user (renamed, `node_modules-<computer>` would
+  match no exact ignored name and be sent).
 - **Stepping aside** is `RenameToConflictCopy`: renamed here to `<stem>-<computer>.<ext>` (from the
   second try with a number, `make_conflict_copy_name`), free on both sides as OneDrive compares
   names, and sent under it by the next plan. Of two local items that want one name, the later unsent

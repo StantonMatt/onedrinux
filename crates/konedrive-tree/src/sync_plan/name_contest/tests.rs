@@ -56,10 +56,10 @@ fn an_item_steps_aside_for_a_holder_that_stays_and_is_not_one_item_with_it() {
     let new_in_onedrive = listed(3, ItemKind::File, ROOT, "a.txt");
     let moved_here = moved_here(synced_file(2, ROOT, "b.txt"), ROOT, "a.txt");
     assert_eq!(decide_name_contest(&claim(&moved_here, Some(NameHolder::Stays(&new_in_onedrive)))), NameContestOutcome::StepsAside);
-    // An item that is left here is never one with an item of OneDrive.
+    // An item that is left here is never one with an item of OneDrive, nor steps aside.
     let onedrive_directory = listed(3, ItemKind::Directory, ROOT, "d");
     let left_here = made_directory(2, ROOT, "d");
-    assert_eq!(decide_name_contest(&NameClaim { is_left_here: true, ..claim(&left_here, Some(NameHolder::Stays(&onedrive_directory))) }), NameContestOutcome::StepsAside);
+    assert_eq!(decide_name_contest(&NameClaim { is_left_here: true, ..claim(&left_here, Some(NameHolder::Stays(&onedrive_directory))) }), NameContestOutcome::KeepsItsName);
 }
 
 /// While a listing is being written, two rows may say one name on the

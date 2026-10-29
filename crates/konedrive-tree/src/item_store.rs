@@ -110,6 +110,7 @@ pub(crate) use bindings::bind_root_once_known;
 pub(crate) use item_row::find_item;
 pub(crate) use item_row::find_bound_item as find_item_bound_to;
 pub(crate) use onedrive_versions::confirm_onedrive_version_of_item;
+pub use guard_restore::GuardRestoreFailure;
 pub use step_commit::{ConfirmedItem, StepCommitOutcome};
 pub use full_listing_request::FullListingCause;
 pub use item_pins::PinChange;

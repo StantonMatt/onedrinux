@@ -14,6 +14,69 @@ use crate::{
 };
 use rusqlite::Transaction;
 
+/// Short reasons for a failed held-change decision, suitable for a row's second line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum GuardRestoreFailure {
+    #[error("it is open in another program")]
+    Open,
+    #[error("it was changed on this computer after it was held")]
+    LocalChanged,
+    #[error("it was changed in OneDrive after it was held")]
+    RemoteChanged,
+    #[error("it changed after it was held")]
+    Changed,
+    #[error("a file of the same name is in its place")]
+    Occupied,
+    #[error("the folder it belongs in is missing or has moved")]
+    ParentMissing,
+    #[error("its local copy is no longer available")]
+    LocalMissing,
+    #[error("there is no free name for a copy of the local file")]
+    NoCopyName,
+    #[error("this account's folder is not mounted")]
+    Unmounted,
+    #[error("this computer couldn't save the restored file")]
+    Storage,
+    #[error("this account's folder stopped before it could be restored")]
+    Stopped,
+}
+
+/// A listing can run while the backing operation runs. Diagnose its refusal in the
+/// same transaction that would have restored the row, before writing anything.
+fn restore_row(tx: &Transaction<'_>, planned: &ItemVersions) -> Result<crate::Item, TreeError> {
+    let row = find_item(tx, planned.local_item_id)?.ok_or(GuardRestoreFailure::LocalMissing)?;
+    if !planned.are_those_of(&row) {
+        return Err(if planned.local != row.local || planned.unsent_since != row.unsent_since {
+            GuardRestoreFailure::LocalChanged
+        } else if !planned.are_onedrive_and_synced_those_of(&row)
+            || planned.onedrive_folder_ctag != row.onedrive_folder_ctag {
+            GuardRestoreFailure::RemoteChanged
+        } else { GuardRestoreFailure::LocalChanged }.into());
+    }
+    Ok(row)
+}
+
+fn restore_place(tx: &Transaction<'_>, item: LocalItemId, place: &ItemPlace) -> Result<(), TreeError> {
+    let parent = find_item(tx, place.parent_local_item_id)?;
+    if !parent.is_some_and(|p| p.kind == ItemKind::Directory && p.local.as_ref().is_some_and(|l| l.place.is_some() || p.local_item_id == LocalItemId::ROOT)) {
+        return Err(GuardRestoreFailure::ParentMissing.into());
+    }
+    if super::find_item_at(tx, place.parent_local_item_id, &place.name)?.is_some_and(|r| r.local_item_id != item) {
+        return Err(GuardRestoreFailure::Occupied.into());
+    }
+    // The old parent may have moved inside the item since: no longer a place for it.
+    match super::check_can_hold(tx, place.parent_local_item_id, item) {
+        Err(TreeError::Refused(_)) => Err(GuardRestoreFailure::ParentMissing.into()),
+        result => result,
+    }
+}
+
+fn removal_row(tx: &Transaction<'_>, planned: &ItemVersions) -> Result<(), TreeError> {
+    let row = restore_row(tx, planned)?;
+    let place = row.onedrive.as_ref().and_then(|v| v.place.as_ref()).ok_or(GuardRestoreFailure::RemoteChanged)?;
+    restore_place(tx, row.local_item_id, place)
+}
+
 impl ItemStore<'_> {
     /// Restore a removed cloud row, optionally with retained local content. A changed
     /// local copy is deliberately unverified and will be hashed by the ordinary plan.
@@ -24,12 +87,13 @@ impl ItemStore<'_> {
         record: Option<PlaceChangeRecordId>,
     ) -> Result<StepCommitOutcome, TreeError> {
         self.write(|tx| {
+            removal_row(tx, planned)?;
             let outcome = commit_show_item(tx, planned, false)?;
             if outcome == StepCommitOutcome::Written {
                 if let Some(content) = retained {
                     let mut row = find_item(tx, planned.local_item_id)?
                         .ok_or_else(|| super::refuse("restored item went".into()))?;
-                    if row.synced_content.as_ref() != Some(&content) { return Err(super::refuse("retained content differs from the remote baseline".into())); }
+                    if row.synced_content.as_ref() != Some(&content) { return Err(GuardRestoreFailure::RemoteChanged.into()); }
                     if let Some(local) = &mut row.local {
                         local.content = Some(content);
                     }
@@ -51,13 +115,14 @@ impl ItemStore<'_> {
         notice: impl FnOnce(&[crate::Item]) -> Result<(), TreeError>,
     ) -> Result<StepCommitOutcome, TreeError> {
         self.write(|tx| {
+            removal_row(tx, planned)?;
             let outcome = commit_show_item(tx, planned, false)?;
             if outcome == StepCommitOutcome::Written {
                 let mut row = find_item(tx, planned.local_item_id)?.ok_or_else(|| super::refuse("restored item went".into()))?;
                 if let Some(content) = retained {
                     // Only content identical to the current remote baseline may occupy
                     // the bound row. Older/unknown bytes belong in `copy` instead.
-                    if row.synced_content.as_ref() != Some(&content) { return Err(super::refuse("retained content differs from the remote baseline".into())); }
+                    if row.synced_content.as_ref() != Some(&content) { return Err(GuardRestoreFailure::RemoteChanged.into()); }
                     row.local.as_mut().unwrap().content = Some(content);
                     row.content_presence = ContentPresence::OnDisk;
                     write_item(tx, &row)?;
@@ -79,6 +144,9 @@ impl ItemStore<'_> {
         notice: impl FnOnce(&crate::Item) -> Result<(), TreeError>,
     ) -> Result<StepCommitOutcome, TreeError> {
         self.write(|tx| {
+            let row = restore_row(tx, planned)?;
+            let place = row.onedrive.as_ref().and_then(|v| v.place.as_ref()).ok_or(GuardRestoreFailure::RemoteChanged)?;
+            restore_place(tx, row.local_item_id, place)?;
             let outcome = super::step_commit::commit_move_to_onedrive_place(tx, planned, false)?;
             if outcome == StepCommitOutcome::Written { notice(&find_item(tx, planned.local_item_id)?.unwrap())?; }
             forget_place_change_record_when_written(tx, record, outcome)
@@ -157,10 +225,8 @@ fn restore_rewrite(
     record: Option<PlaceChangeRecordId>,
     take_move: bool,
 ) -> Result<Option<LocalItemId>, TreeError> {
-    let Some(mut row) = find_item(tx, planned.local_item_id)?.filter(|r| planned.are_those_of(r))
-    else {
-        return Ok(None);
-    };
+    let mut row = restore_row(tx, planned)?;
+    restore_place(tx, row.local_item_id, copy)?;
     let Some(local_content) = row.local.as_ref().map(|v| v.content.clone()) else {
         return Ok(None);
     };
@@ -171,10 +237,7 @@ fn restore_rewrite(
         let Some(remote_place) = row.onedrive.as_ref().and_then(|v| v.place.clone()) else {
             return Ok(None);
         };
-        super::check_directory(tx, remote_place.parent_local_item_id)?;
-        if row.local.as_ref().and_then(|v| v.place.as_ref()) != Some(&remote_place) {
-            super::check_place_is_free(tx, &remote_place)?;
-        }
+        restore_place(tx, row.local_item_id, &remote_place)?;
         if let Some(local) = &mut row.local {
             local.place = Some(remote_place.clone());
         }

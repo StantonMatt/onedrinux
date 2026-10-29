@@ -85,6 +85,11 @@ public:
     /// A name the daemon passed on, fit to show: no control or direction characters, one line,
     /// at most 80 characters.
     static QString cleanName(const QString &name);
+    /// A terminal or an IDE: what runs in it shares its app unit, and so its identity
+    /// (download-guard.md), and allowing it always allows every program run in it.
+    static bool runsPrograms(const QString &identity);
+    /// runsPrograms() for QML: such an app is always allowed only from Settings.
+    Q_INVOKABLE bool hostsPrograms(const QString &identity) const { return runsPrograms(identity); }
 
     bool serviceAvailable() const { return m_serviceAvailable; }
     bool enabled() const { return m_enabled; }

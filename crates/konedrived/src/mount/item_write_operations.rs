@@ -106,7 +106,7 @@ pub(super) fn decide_store_errno(error: &TreeError) -> Errno {
             RowRefusalReason::NoDirectory => Errno::ENOENT,
             RowRefusalReason::AnotherRule => Errno::EIO,
         },
-        TreeError::Sql(_) | TreeError::Io(_) | TreeError::Schema(_) | TreeError::NewerSchema(_) => Errno::EIO,
+        TreeError::GuardRestore(_) | TreeError::Sql(_) | TreeError::Io(_) | TreeError::Schema(_) | TreeError::NewerSchema(_) => Errno::EIO,
     }
 }
 

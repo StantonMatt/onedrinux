@@ -91,6 +91,44 @@ impl ChangeGuard {
         }
         Ok(())
     }
+    /// Run after the start's refresh of ignored names: an upload of a row now left here
+    /// is never sent, and no listing of unsent rows retires it; nor is an upload whose row
+    /// is gone. Don't Upload stays. A ledger that cannot be written stays failed closed:
+    /// the mount is built all the same.
+    pub(crate) fn retire_left_here_uploads(&self, items: &ItemReader<'_>) -> Result<(), TreeError> {
+        let mut inner = crate::panic::lock(&self.inner);
+        if inner.failed.is_some() {
+            return Ok(());
+        }
+        let mut retired = Vec::new();
+        for (key, c) in &inner.ledger.current {
+            if c.kind != Kind::Upload || c.disposition == Disposition::LocalOnly || c.item < 0 {
+                continue;
+            }
+            let item = LocalItemId::new(c.item);
+            // A missing row has no pending upload: the start check may have removed it.
+            if items.find_item(item)?.is_none() || items.is_ignored(item)? {
+                retired.push(key.clone());
+            }
+        }
+        if retired.is_empty() {
+            return Ok(());
+        }
+        for key in &retired {
+            inner.ledger.current.remove(key);
+            inner.admitted.remove(key);
+        }
+        inner.ledger.revision += 1;
+        if !inner.ledger.current.values().any(|c| c.kind == Kind::Upload && matches!(c.disposition, Disposition::Held | Disposition::Restoring)) {
+            inner.ledger.latched.remove(&Kind::Upload);
+            inner.ledger.hold_started.remove(&Kind::Upload);
+        }
+        if let Err(error) = self.save(&mut inner) {
+            tracing::warn!("held uploads of items left here could not be retired: {error}");
+        }
+        self.notify(&inner);
+        Ok(())
+    }
     pub(crate) fn cleanup_reference(
         &self,
         change: &Change,

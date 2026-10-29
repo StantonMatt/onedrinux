@@ -103,6 +103,52 @@ QString DownloadGuardController::cleanName(const QString &name)
     return clean;
 }
 
+bool DownloadGuardController::runsPrograms(const QString &identity)
+{
+    // Terminals, IDEs and agent hosts, by the desktop id of their app unit (without a launcher's
+    // prefix: Flatpak's, GNOME's); JetBrains' IDEs by theirs.
+    static const QStringList hosts = {QStringLiteral("org.kde.konsole"),
+                                      QStringLiteral("org.kde.yakuake"),
+                                      QStringLiteral("org.kde.kate"),
+                                      QStringLiteral("kitty"),
+                                      QStringLiteral("alacritty"),
+                                      QStringLiteral("org.alacritty.alacritty"),
+                                      QStringLiteral("org.gnome.terminal"),
+                                      QStringLiteral("org.gnome.ptyxis"),
+                                      QStringLiteral("com.mitchellh.ghostty"),
+                                      QStringLiteral("org.wezfurlong.wezterm"),
+                                      QStringLiteral("foot"),
+                                      QStringLiteral("footclient"),
+                                      QStringLiteral("com.gexperts.tilix"),
+                                      QStringLiteral("terminator"),
+                                      QStringLiteral("xterm"),
+                                      QStringLiteral("debian-xterm"),
+                                      QStringLiteral("debian-uxterm"),
+                                      QStringLiteral("code"),
+                                      QStringLiteral("code-oss"),
+                                      QStringLiteral("code-insiders"),
+                                      QStringLiteral("codium"),
+                                      QStringLiteral("com.visualstudio.code"),
+                                      QStringLiteral("com.vscodium.codium"),
+                                      QStringLiteral("org.kde.kdevelop"),
+                                      QStringLiteral("com.t3tools.t3code"),
+                                      QStringLiteral("t3code"),
+                                      QStringLiteral("t3code-url-handler"),
+                                      QStringLiteral("t3-code-nightly"),
+                                      QStringLiteral("codex-shared-client")};
+    if (!identity.startsWith(QLatin1String("app:"))) {
+        return false;
+    }
+    QString id = identity.mid(4).toLower();
+    for (const QLatin1String launcher : {QLatin1String("flatpak-"), QLatin1String("gnome-")}) {
+        if (id.startsWith(launcher)) {
+            id = id.mid(launcher.size());
+            break;
+        }
+    }
+    return hosts.contains(id) || id.startsWith(QLatin1String("jetbrains-")) || id.startsWith(QLatin1String("com.jetbrains."));
+}
+
 GuardApp DownloadGuardController::resolve(const QString &identity, const QString &displayName)
 {
     GuardApp app;

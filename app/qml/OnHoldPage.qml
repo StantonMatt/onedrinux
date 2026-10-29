@@ -9,9 +9,11 @@ import org.konedrive.app
 /// The changes the change guard holds for the OneDrive chosen in the sidebar, for review: what
 /// the page's decisions did, the head with Allow All and Restore All when several kinds are
 /// held, then one card per held kind (deletions, changed files, moves and renames, new files)
-/// with the kind's two buttons, and what of a held kind was sent before the hold. A kind's
-/// card opens to its items, one group at a time, with a search when there are many. Each
-/// button names what it does; Allow and Restore act on what the page shows.
+/// with the kind's two buttons, Restore first, and what of a held kind was sent before the
+/// hold. A kind's card opens to its items, one group at a time, with a search when there are
+/// many. Each button names what it does and how many it acts on, whatever the search shows;
+/// Allow All asks first while deletions are among the kinds. Allow and Restore act on what the
+/// page shows. A change a decision left on hold says why on its row.
 ///
 /// One list: what is above the open group's items is its header, the items are its rows,
 /// built only while the group is open and only those in sight, and what comes after is its
@@ -22,6 +24,8 @@ ListPage {
     readonly property var held: Current.item ? Current.item.held : null
     readonly property var sync: Current.sync
     readonly property bool available: Daemon.serviceAvailable && held !== null && held.serviceAvailable && held.listingError.length === 0
+    /// Deletions are among several held kinds: Allow All asks first, since it deletes in OneDrive.
+    readonly property bool allowAllAsks: held !== null && held.kinds.length > 1 && held.kinds.some(kind => kind.kind === "removal")
 
     function escaped(text: string): string {
         return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -85,6 +89,7 @@ ListPage {
     onHeldChanged: {
         openKind = "";
         searchText = "";
+        sendAllDialog.close();
     }
     // The open group resolved: nothing to open, once the bindings have settled.
     onOpenIndexChanged: {
@@ -136,7 +141,8 @@ ListPage {
                 Layout.rightMargin: Kirigami.Units.largeSpacing
                 visible: page.held !== null && page.held.listingError.length > 0
                 type: Kirigami.MessageType.Error
-                text: page.held ? page.escaped(page.held.listingError) : ""
+                // The daemon's words, in a sentence of the page's.
+                text: page.held ? page.escaped(i18n("Could not read the changes on hold: %1. What is shown may be out of date.", page.held.listingError.replace(/\.$/, ""))) : ""
                 actions: Kirigami.Action {
                     objectName: "retryHeldListing"
                     text: i18nc("@action:button", "Retry")
@@ -217,18 +223,25 @@ ListPage {
                                 visible: page.held !== null && page.held.kinds.length > 1
 
                                 QQC2.Button {
-                                    objectName: "allowAllButton"
-                                    text: i18nc("@action:button", "Allow All")
-                                    icon.name: "dialog-ok-apply"
-                                    enabled: page.available && !page.held.working
-                                    onClicked: page.held.allow("")
-                                }
-                                QQC2.Button {
                                     objectName: "restoreAllButton"
                                     text: i18nc("@action:button", "Restore All")
                                     icon.name: "edit-undo"
                                     enabled: page.available && !page.held.working
                                     onClicked: page.held.restore("")
+                                }
+                                QQC2.Button {
+                                    objectName: "allowAllButton"
+                                    text: i18nc("@action:button", "Allow All")
+                                    icon.name: "dialog-ok-apply"
+                                    enabled: page.available && !page.held.working
+                                    onClicked: {
+                                        if (page.allowAllAsks) {
+                                            sendAllDialog.question = page.held.sendAllQuestion();
+                                            sendAllDialog.open();
+                                        } else {
+                                            page.held.allow("");
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -269,6 +282,7 @@ ListPage {
             required property bool emptied
             required property string countText
             required property string localPath
+            required property string failure
 
             objectName: "heldRow"
             implicitHeight: entry.implicitHeight
@@ -292,7 +306,7 @@ ListPage {
                 topPadding: Kirigami.Units.smallSpacing + Kirigami.Units.mediumSpacing
                 bottomPadding: Kirigami.Units.smallSpacing + Kirigami.Units.mediumSpacing
                 Accessible.name: row.name
-                Accessible.description: row.detail
+                Accessible.description: row.failure.length > 0 ? row.failure : row.detail
                 onClicked: {
                     if (row.localPath.length > 0) {
                         page.sync.showInFolder(row.localPath);
@@ -318,20 +332,22 @@ ListPage {
                             textFormat: Text.PlainText
                             elide: Text.ElideRight
                         }
+                        // Its folder; left on hold by a decision, why, with the path on hover.
                         QQC2.Label {
                             id: detailLabel
+                            objectName: "heldRowDetail"
                             Layout.fillWidth: true
-                            text: row.detail
+                            text: row.failure.length > 0 ? row.failure : row.detail
                             textFormat: Text.PlainText
-                            elide: Text.ElideMiddle
-                            color: Kirigami.Theme.disabledTextColor
+                            elide: row.failure.length > 0 ? Text.ElideRight : Text.ElideMiddle
+                            color: row.failure.length > 0 ? Kirigami.Theme.neutralTextColor : Kirigami.Theme.disabledTextColor
                             font: Kirigami.Theme.smallFont
 
                             HoverHandler {
                                 id: detailHover
                             }
                             QQC2.ToolTip.text: page.escaped(row.detailToolTip)
-                            QQC2.ToolTip.visible: detailHover.hovered && detailLabel.truncated
+                            QQC2.ToolTip.visible: detailHover.hovered && (detailLabel.truncated || row.failure.length > 0)
                             QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
                         }
                     }
@@ -367,7 +383,8 @@ ListPage {
             width: ListView.view.width
             spacing: 0
 
-            // The open group's search found nothing.
+            // The open group's search found nothing; it does not look into a folder its row
+            // stands for.
             CardBand {
                 Layout.fillWidth: true
                 implicitHeight: nothingFound.implicitHeight
@@ -375,9 +392,22 @@ ListPage {
 
                 FormCard.FormPlaceholderMessageDelegate {
                     id: nothingFound
+                    objectName: "nothingMatches"
                     anchors.left: parent.left
                     anchors.right: parent.right
                     text: i18n("Nothing matches “%1”", page.searchText)
+                    explanation: {
+                        if (!page.held || !page.held.rows.folders) {
+                            return "";
+                        }
+                        if (page.openKind === "removal") {
+                            return i18n("What is in the deleted folders isn't searched.");
+                        }
+                        if (page.openKind === "move") {
+                            return i18n("What is in the moved folders isn't searched.");
+                        }
+                        return i18n("What is in the new folders isn't searched.");
+                    }
                     icon.name: "edit-find"
                 }
             }
@@ -392,6 +422,53 @@ ListPage {
             }
             Item {
                 implicitHeight: Kirigami.Units.largeSpacing * 2
+            }
+        }
+    }
+
+    // Allow All while deletions are held: what it sends, deletions first, before it goes. It
+    // says and sends what was held when it opened, whatever is held after.
+    Kirigami.PromptDialog {
+        id: sendAllDialog
+        objectName: "sendAllDialog"
+
+        /// HeldChanges.sendAllQuestion(), as it opened.
+        property var question: null
+
+        title: question ? question.title : ""
+        subtitle: question ? question.text : ""
+        maximumWidth: Kirigami.Units.gridUnit * 25
+        standardButtons: Kirigami.Dialog.NoButton
+        customFooterActions: [
+            Kirigami.Action {
+                objectName: "sendAll"
+                text: i18nc("@action:button", "Send All")
+                icon.name: "cloud-upload"
+                enabled: page.available && !page.held.working
+                onTriggered: {
+                    page.held.allowAsked(sendAllDialog.question);
+                    sendAllDialog.close();
+                }
+            },
+            Kirigami.Action {
+                text: i18nc("@action:button", "Cancel")
+                icon.name: "dialog-cancel"
+                onTriggered: sendAllDialog.close()
+            }
+        ]
+
+        // Left, or no longer the question: the deletions or the other kinds resolved meanwhile.
+        Connections {
+            target: page
+            function onAllowAllAsksChanged() {
+                if (!page.allowAllAsks) {
+                    sendAllDialog.close();
+                }
+            }
+            function onVisibleChanged() {
+                if (!page.visible) {
+                    sendAllDialog.close();
+                }
             }
         }
     }
@@ -644,19 +721,20 @@ ListPage {
                     spacing: Kirigami.Units.smallSpacing
                     visible: !card.group.working
 
-                    QQC2.Button {
-                        objectName: "allowButton"
-                        text: card.group.allowText
-                        icon.name: card.group.allowIcon
-                        enabled: page.available
-                        onClicked: page.held.allow(card.group.kind)
-                    }
+                    // The undo first, as in the notification.
                     QQC2.Button {
                         objectName: "restoreButton"
                         text: card.group.restoreText
                         icon.name: card.group.restoreIcon
                         enabled: page.available
                         onClicked: page.held.restore(card.group.kind)
+                    }
+                    QQC2.Button {
+                        objectName: "allowButton"
+                        text: card.group.allowText
+                        icon.name: card.group.allowIcon
+                        enabled: page.available
+                        onClicked: page.held.allow(card.group.kind)
                     }
                 }
                 // A decision under way: the buttons give way to how far it is.

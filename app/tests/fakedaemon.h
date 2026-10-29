@@ -22,10 +22,12 @@
 #include <QDBusMessage>
 #include <QDBusObjectPath>
 #include <QHash>
+#include <QSet>
 #include <QStringList>
 #include <QTimer>
 #include <QVariantMap>
 
+#include <algorithm>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -1261,8 +1263,8 @@ inline KonedriveHeldChange heldRow(const QString &kind, const QString &path, qul
 
 /// ChangeGuard on the manager object (dbus/org.konedrive.ChangeGuard.xml): its settings, each
 /// account's rows with a token of their revision, and its methods, logged in `calls`. Allow and
-/// Restore take the selected held kinds' rows away (unless `answer` says otherwise) and send
-/// HeldChanged, as the daemon does. A test sets rows with hold() and sends the signals itself.
+/// Restore take the selected held kinds' rows away, but for those `answer` names as failed,
+/// and send HeldChanged, as the daemon does. A test sets rows with hold() and sends the signals itself.
 class FakeChangeGuard : public QDBusAbstractAdaptor
 {
     Q_OBJECT
@@ -1347,7 +1349,8 @@ public:
     QString listErrorName = QStringLiteral("org.konedrive.Error.Failed");
     /// Every method but ListHeld is refused Failed with these words, when not empty.
     QString refuse;
-    /// What Allow and Restore answer, when set; the rows go all the same.
+    /// What Allow and Restore answer, when set; the rows go all the same, but for the paths it
+    /// names as failed, which stay on hold with the folders above them.
     std::optional<KonedriveGuardResult> answer;
     /// Allow and Restore wait for finishWaiting(), as a long restore does.
     bool wait = false;
@@ -1454,8 +1457,21 @@ private:
     {
         KonedriveGuardResult result;
         KonedriveHeldChangeList &rows = held[account];
+        // What failed stays, and so does each folder above it.
+        QSet<QString> failedPaths;
+        if (answer) {
+            for (const KonedriveGuardFailure &failure : answer->failures) {
+                failedPaths.insert(failure.path);
+                for (qsizetype slash = failure.path.indexOf(QLatin1Char('/')); slash > 0; slash = failure.path.indexOf(QLatin1Char('/'), slash + 1)) {
+                    failedPaths.insert(failure.path.left(slash));
+                }
+            }
+        }
+        const auto failed = [&failedPaths](const QString &path) {
+            return failedPaths.contains(path);
+        };
         for (auto it = rows.begin(); it != rows.end();) {
-            if (!it->sent && (kinds.isEmpty() || kinds.contains(it->kind))) {
+            if (!it->sent && (kinds.isEmpty() || kinds.contains(it->kind)) && !failed(it->path)) {
                 result.done += 1 + (it->kind == QLatin1String("removal") || it->kind == QLatin1String("upload") ? it->descendants : 0);
                 it = rows.erase(it);
             } else {

@@ -90,6 +90,9 @@ pub(crate) struct Change {
     pub(crate) first_held_revision: u64,
     pub(crate) at: i64,
     pub(crate) generation: String,
+    /// Separate remote identity for explaining a refusal; older ledgers lack it.
+    #[serde(default)]
+    pub(crate) remote_generation: Option<String>,
     #[serde(default)]
     pub(crate) write_count: Option<u64>,
     #[serde(default)]
@@ -201,6 +204,7 @@ impl Ledger {
                 // prepare_removal precedes SQLite's unsent stamp. Finishing that same
                 // unlink is not a second removal and does not restart its quiet time.
                 previous.generation = change.generation;
+                previous.remote_generation = change.remote_generation;
                 previous.revision = change.revision;
                 previous.directory = change.directory;
                 previous.old_path = change.old_path;

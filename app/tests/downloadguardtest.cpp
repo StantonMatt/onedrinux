@@ -354,6 +354,67 @@ private Q_SLOTS:
                      .arg(QLocale().formattedDataSize(qint64(2 * GiB), 0)));
     }
 
+    /// Terminals and IDEs by their desktop ids, as a Flatpak's too; an executable never is one,
+    /// since what runs without an app unit is named for itself.
+    void whichAppsRunPrograms()
+    {
+        for (const char *identity : {"app:org.kde.konsole", "app:org.kde.yakuake", "app:kitty", "app:Alacritty", "app:org.gnome.Ptyxis", "app:debian-xterm", "app:code",
+                                     "app:flatpak-com.visualstudio.code", "app:com.t3tools.T3Code", "app:t3code", "app:jetbrains-pycharm-ce", "app:org.kde.kate"}) {
+            QVERIFY2(DownloadGuardController::runsPrograms(QString::fromLatin1(identity)), identity);
+        }
+        for (const char *identity : {"app:org.kde.gwenview", "app:org.example.Copier", "app:org.kde.konsolekalendar", "exe:/usr/bin/konsole", "unidentified"}) {
+            QVERIFY2(!DownloadGuardController::runsPrograms(QString::fromLatin1(identity)), identity);
+        }
+    }
+
+    /// Agent hosts and more terminals and IDEs run programs too, as does a terminal GNOME
+    /// launched, whose app unit carries GNOME's prefix.
+    void agentHostsAndLaunchedTerminalsRunPrograms()
+    {
+        for (const char *identity : {"app:codex-shared-client", "app:t3code-url-handler", "app:org.kde.kdevelop", "app:com.mitchellh.ghostty", "app:org.wezfurlong.wezterm",
+                                     "app:foot", "app:com.gexperts.Tilix", "app:terminator", "app:code-insiders", "app:gnome-org.gnome.Ptyxis",
+                                     "app:gnome-com.mitchellh.ghostty"}) {
+            QVERIFY2(DownloadGuardController::runsPrograms(QString::fromLatin1(identity)), identity);
+        }
+        for (const char *identity : {"app:gnome-org.gnome.Nautilus", "app:gnome-org.kde.gwenview"}) {
+            QVERIFY2(!DownloadGuardController::runsPrograms(QString::fromLatin1(identity)), identity);
+        }
+    }
+
+    /// A terminal downloads for whatever runs in it, an agent's grep as much as the user's: the
+    /// words say so, and only Allow for This Session is offered, so that one click never
+    /// exempts every program in every tab. Always Allow stays in the window.
+    void aTerminalBlockNotifies()
+    {
+        start();
+        const QString konsole = QStringLiteral("app:org.kde.konsole");
+        m_daemon->guard->block(konsole, QStringLiteral("Konsole"), 31, 412ULL << 20);
+        QTRY_COMPARE(m_sink.sent.size(), 1);
+        Notice notice = m_sink.sent.constLast();
+        QCOMPARE(notice.title, QStringLiteral("Too many downloads in Konsole"));
+        QCOMPARE(notice.text,
+                 QStringLiteral("A program in Konsole downloaded 31 files from OneDrive in 10 minutes. To save space, downloads in Konsole are blocked until you allow them."));
+        QCOMPARE(buttons(notice), QStringList(QStringLiteral("Allow for This Session")));
+        notice.actions.constFirst().run();
+        QTRY_VERIFY(m_daemon->guard->calls.contains(QStringLiteral("AllowApp:%1:session").arg(konsole)));
+
+        const QString code = QStringLiteral("app:code");
+        m_daemon->guard->block(code, QStringLiteral("<i>Code</i>"), 7, 2 * GiB - 1);
+        QTRY_COMPARE(m_sink.sent.size(), 2);
+        notice = m_sink.sent.constLast();
+        QCOMPARE(notice.text,
+                 QStringLiteral("A program in &lt;i&gt;Code&lt;/i&gt; downloaded %1 from OneDrive in 10 minutes. To save space, downloads in &lt;i&gt;Code&lt;/i&gt; are "
+                                "blocked until you allow them.")
+                     .arg(QLocale().formattedDataSize(qint64(2 * GiB - 1))));
+        QCOMPARE(buttons(notice), QStringList(QStringLiteral("Allow for This Session")));
+
+        m_daemon->guard->block(QStringLiteral("app:kitty"), QStringLiteral("kitty"), 0, 0);
+        QTRY_COMPARE(m_sink.sent.size(), 3);
+        QCOMPARE(m_sink.sent.constLast().text,
+                 QStringLiteral("A program in kitty tried to download a file larger than %1 from OneDrive. To save space, downloads in kitty are blocked until you allow them.")
+                     .arg(QLocale().formattedDataSize(qint64(2 * GiB), 0)));
+    }
+
     void disablingTheGuardWithdrawsBlockedNotices()
     {
         start();

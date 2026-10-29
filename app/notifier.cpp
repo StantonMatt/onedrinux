@@ -70,6 +70,44 @@ Trip heldTrip(KonedriveHeldChangeList rows, const QString &kind, qulonglong coun
     return trip == Trip::None && kind != QLatin1String("removal") ? Trip::Count : trip;
 }
 
+/// Where `kind`'s rows in `rows` were made: the deepest folder that holds them all, relative to
+/// the drive root; empty at its top.
+QString commonFolder(const KonedriveHeldChangeList &rows, const QString &kind)
+{
+    std::optional<QStringList> common;
+    for (const KonedriveHeldChange &row : rows) {
+        if (row.kind != kind) {
+            continue;
+        }
+        QStringList parts = row.path.split(QLatin1Char('/'));
+        parts.removeLast();
+        if (!common) {
+            common = parts;
+            continue;
+        }
+        qsizetype same = 0;
+        while (same < common->size() && same < parts.size() && common->at(same) == parts.at(same)) {
+            ++same;
+        }
+        *common = common->mid(0, same);
+    }
+    return common ? common->join(QLatin1Char('/')) : QString();
+}
+
+/// What of `sent` is of one of `kinds`.
+QList<HeldChanges::Kind> sentOf(const QList<HeldChanges::Kind> &sent, const QList<HeldChanges::Kind> &kinds)
+{
+    QList<HeldChanges::Kind> of;
+    for (const HeldChanges::Kind &kind : sent) {
+        if (std::any_of(kinds.cbegin(), kinds.cend(), [&kind](const HeldChanges::Kind &held) {
+                return held.kind == kind.kind;
+            })) {
+            of << kind;
+        }
+    }
+    return of;
+}
+
 /// The title of a conflict that kept a copy beside the file.
 QString copyTitle()
 {
@@ -495,25 +533,42 @@ void GuardNotifier::onBlocked(const GuardApp &app)
     // Plasma reads a notification's text as markup: the name is the program's own say.
     const QString name = app.name.toHtmlEscaped();
     const QString window = m_guard->windowText();
+    // A terminal or an IDE downloads for what runs in it, an agent's grep as much as the user's:
+    // the words say so, and the notification offers no Always Allow, which would exempt all of it.
+    const bool host = DownloadGuardController::runsPrograms(app.identity);
     QString text;
     if (app.files >= m_guard->maxFiles()) {
-        text = i18nc("@info notification: the app, how many files, how long",
-                     "%1 downloaded %2 from OneDrive in %3. To save space, its downloads are blocked until you allow them.",
-                     name,
-                     m_guard->filesText(app.files),
-                     window);
+        text = host ? i18nc("@info notification: the terminal or IDE, how many files, how long",
+                            "A program in %1 downloaded %2 from OneDrive in %3. To save space, downloads in %1 are blocked until you allow them.",
+                            name,
+                            m_guard->filesText(app.files),
+                            window)
+                    : i18nc("@info notification: the app, how many files, how long",
+                            "%1 downloaded %2 from OneDrive in %3. To save space, its downloads are blocked until you allow them.",
+                            name,
+                            m_guard->filesText(app.files),
+                            window);
     } else if (app.bytes > 0) {
-        text = i18nc("@info notification: the app, how much, how long",
-                     "%1 downloaded %2 from OneDrive in %3. To save space, its downloads are blocked until you allow them.",
-                     name,
-                     QLocale().formattedDataSize(qint64(app.bytes)),
-                     window);
+        text = host ? i18nc("@info notification: the terminal or IDE, how much, how long",
+                            "A program in %1 downloaded %2 from OneDrive in %3. To save space, downloads in %1 are blocked until you allow them.",
+                            name,
+                            QLocale().formattedDataSize(qint64(app.bytes)),
+                            window)
+                    : i18nc("@info notification: the app, how much, how long",
+                            "%1 downloaded %2 from OneDrive in %3. To save space, its downloads are blocked until you allow them.",
+                            name,
+                            QLocale().formattedDataSize(qint64(app.bytes)),
+                            window);
     } else {
         // One file over the byte limit on its own.
-        text = i18nc("@info notification: the app, the byte limit",
-                     "%1 tried to download a file larger than %2 from OneDrive. To save space, its downloads are blocked until you allow them.",
-                     name,
-                     DownloadGuardController::bytesText(m_guard->maxBytes()));
+        text = host ? i18nc("@info notification: the terminal or IDE, the byte limit",
+                            "A program in %1 tried to download a file larger than %2 from OneDrive. To save space, downloads in %1 are blocked until you allow them.",
+                            name,
+                            DownloadGuardController::bytesText(m_guard->maxBytes()))
+                    : i18nc("@info notification: the app, the byte limit",
+                            "%1 tried to download a file larger than %2 from OneDrive. To save space, its downloads are blocked until you allow them.",
+                            name,
+                            DownloadGuardController::bytesText(m_guard->maxBytes()));
     }
     const QPointer<GuardNotifier> self(this);
     const QString identity = app.identity;
@@ -524,7 +579,11 @@ void GuardNotifier::onBlocked(const GuardApp &app)
             self->refused(identity, shownName, error);
         }
     };
-    Notice notice{QStringLiteral("downloadsBlocked"), WindowSection::GuardApps, i18nc("@title notification", "Too many downloads by %1", app.name), text, {}};
+    Notice notice{QStringLiteral("downloadsBlocked"),
+                  WindowSection::GuardApps,
+                  host ? i18nc("@title notification: the terminal or IDE", "Too many downloads in %1", app.name) : i18nc("@title notification", "Too many downloads by %1", app.name),
+                  text,
+                  {}};
     notice.iconName = iconName;
     notice.actions = {
         {i18nc("@action:button", "Allow for This Session"),
@@ -533,13 +592,14 @@ void GuardNotifier::onBlocked(const GuardApp &app)
                  self->m_guard->allowApp(identity, false, refusedThen);
              }
          }},
-        {i18nc("@action:button", "Always Allow"),
-         [self, identity, refusedThen] {
-             if (self && self->m_guard) {
-                 self->m_guard->allowApp(identity, true, refusedThen);
-             }
-         }},
     };
+    if (!host) {
+        notice.actions.append({i18nc("@action:button", "Always Allow"), [self, identity, refusedThen] {
+                                   if (self && self->m_guard) {
+                                       self->m_guard->allowApp(identity, true, refusedThen);
+                                   }
+                               }});
+    }
     post(identity, notice);
 }
 
@@ -596,6 +656,11 @@ void ChangeNotifier::setAccountName(std::function<QString()> name)
 void ChangeNotifier::setGuard(ChangeGuardController *guard)
 {
     m_guard = guard;
+}
+
+void ChangeNotifier::setOpenRecycleBin(std::function<void()> open)
+{
+    m_openRecycleBin = std::move(open);
 }
 
 QString ChangeNotifier::key() const
@@ -673,16 +738,57 @@ Notice ChangeNotifier::heldNotice() const
             if (trip == Trip::None) {
                 window = m_guard ? m_guard->dailyWindowText() : i18nc("@info a time window: within…", "a day");
             }
-            notice.text = bySize ? i18np("1 item, %3 in all, was deleted in the OneDrive folder within %2. It stays in OneDrive until you allow it.",
-                                         "%1 items, %3 in all, were deleted in the OneDrive folder within %2. They stay in OneDrive until you allow it.",
-                                         n,
-                                         window,
-                                         size)
-                                 : i18np("1 item was deleted in the OneDrive folder within %2. It stays in OneDrive until you allow it.",
-                                         "%1 items were deleted in the OneDrive folder within %2. They stay in OneDrive until you allow it.",
-                                         n,
-                                         window);
-    } else if (kind.kind == QLatin1String("rewrite")) {
+            // What was deleted, as the rows say it: one folder with what was in it, by its name,
+            // or the folder they were all in. Plasma reads the text as markup: it is cleaned of
+            // control and direction characters, and escaped.
+            KonedriveHeldChangeList rows = m_held->heldRows();
+            rows.removeIf([](const KonedriveHeldChange &row) {
+                return row.kind != QLatin1String("removal");
+            });
+            const bool oneFolder = rows.size() == 1 && rows.constFirst().directory && rows.constFirst().descendants > 0;
+            const QString where =
+                DownloadGuardController::cleanName(oneFolder ? rows.constFirst().path.section(QLatin1Char('/'), -1) : commonFolder(rows, kind.kind)).toHtmlEscaped();
+            if (oneFolder) {
+                const qulonglong inside = rows.constFirst().descendants;
+                notice.text = bySize ? i18ncp("@info notification: a deleted folder, how many items were in it, the time window, their size",
+                                              "“%2” and the item in it, %4 in all, were deleted in the OneDrive folder within %3. They stay in OneDrive until you review them.",
+                                              "“%2” and the %1 items in it, %4 in all, were deleted in the OneDrive folder within %3. They stay in OneDrive until you review them.",
+                                              inside,
+                                              where,
+                                              window,
+                                              size)
+                                     : i18ncp("@info notification: a deleted folder, how many items were in it, the time window",
+                                              "“%2” and the item in it were deleted in the OneDrive folder within %3. They stay in OneDrive until you review them.",
+                                              "“%2” and the %1 items in it were deleted in the OneDrive folder within %3. They stay in OneDrive until you review them.",
+                                              inside,
+                                              where,
+                                              window);
+            } else if (!where.isEmpty()) {
+                notice.text = bySize ? i18ncp("@info notification: how many items, the folder they were in, the time window, their size",
+                                              "1 item, %4 in all, was deleted in “%2” within %3. It stays in OneDrive until you review it.",
+                                              "%1 items, %4 in all, were deleted in “%2” within %3. They stay in OneDrive until you review them.",
+                                              n,
+                                              where,
+                                              window,
+                                              size)
+                                     : i18ncp("@info notification: how many items, the folder they were in, the time window",
+                                              "1 item was deleted in “%2” within %3. It stays in OneDrive until you review it.",
+                                              "%1 items were deleted in “%2” within %3. They stay in OneDrive until you review them.",
+                                              n,
+                                              where,
+                                              window);
+            } else {
+                notice.text = bySize ? i18np("1 item, %3 in all, was deleted in the OneDrive folder within %2. It stays in OneDrive until you allow it.",
+                                             "%1 items, %3 in all, were deleted in the OneDrive folder within %2. They stay in OneDrive until you allow it.",
+                                             n,
+                                             window,
+                                             size)
+                                     : i18np("1 item was deleted in the OneDrive folder within %2. It stays in OneDrive until you allow it.",
+                                             "%1 items were deleted in the OneDrive folder within %2. They stay in OneDrive until you allow it.",
+                                             n,
+                                             window);
+            }
+        } else if (kind.kind == QLatin1String("rewrite")) {
             bySize = passed(QStringLiteral("rewrites"), 50, QStringLiteral("rewrite-bytes"), 1ULL << 30) == Trip::Size;
             notice.text = bySize ? i18np("1 file, %3 in all, was changed in the OneDrive folder within %2. The change is not uploaded until you allow it.",
                                          "%1 files, %3 in all, were changed in the OneDrive folder within %2. The changes are not uploaded until you allow them.",
@@ -713,6 +819,10 @@ Notice ChangeNotifier::heldNotice() const
     } else {
         notice.text = i18nc("@info notification: the held kinds, joined", "%1 in the OneDrive folder are not sent to OneDrive until you allow them.", HeldChanges::kindsText(kinds));
     }
+    // What went out of the held kinds just before the hold: a restore does not bring it back.
+    if (const QString before = HeldChanges::sentText(sentOf(m_held->sent(), kinds)); !before.isEmpty()) {
+        notice.text = i18nc("@info notification: what is held, what was sent before the hold", "%1 %2", notice.text, before);
+    }
     QString restoreText;
     if (kinds.size() > 1) {
         restoreText = i18nc("@action:button", "Restore All");
@@ -727,7 +837,7 @@ Notice ChangeNotifier::heldNotice() const
     return notice;
 }
 
-void ChangeNotifier::restore(quint64 generation, const QString &token, const QList<HeldChanges::Kind> &counts)
+void ChangeNotifier::restore(quint64 generation, const QString &token, const QList<HeldChanges::Kind> &counts, const QList<HeldChanges::Kind> &sent)
 {
     if (!m_held || m_shown != Shown::Held || generation != m_generation) {
         return;
@@ -743,9 +853,9 @@ void ChangeNotifier::restore(quint64 generation, const QString &token, const QLi
         true,
         kinds,
         token,
-        [self, counts, generation](const KonedriveGuardResult &result) {
+        [self, counts, sent, generation](const KonedriveGuardResult &result) {
             if (self && self->m_generation == generation) {
-                self->result(counts, result);
+                self->result(counts, sent, result);
             }
         },
         [self, generation](const QString &error) {
@@ -755,15 +865,13 @@ void ChangeNotifier::restore(quint64 generation, const QString &token, const QLi
         });
 }
 
-void ChangeNotifier::result(const QList<HeldChanges::Kind> &kinds, const KonedriveGuardResult &result)
+void ChangeNotifier::result(const QList<HeldChanges::Kind> &kinds, const QList<HeldChanges::Kind> &sent, const KonedriveGuardResult &result)
 {
     Notice notice{QStringLiteral("changesHeld"), WindowSection::OnHold, QString(), QString(), {}};
     const qulonglong n = result.done;
     if (result.failed > 0) {
         notice.title = i18nc("@title notification", "Restored %1 of %2 items", n, n + result.failed);
-        const QString why = HeldChanges::failureText(result);
-        const QString stays = i18ncp("@info changes that stay on hold", "1 is still on hold.", "%1 are still on hold.", result.failed);
-        notice.text = (why.isEmpty() ? stays : i18nc("@info what stays, why", "%1 %2", stays, why)).toHtmlEscaped();
+        notice.text = HeldChanges::stillHeldText(result, false).toHtmlEscaped();
         notice.openText = i18nc("@action:button", "Review…");
     } else if (kinds.size() == 1) {
         const QString kind = kinds.constFirst().kind;
@@ -806,6 +914,17 @@ void ChangeNotifier::result(const QList<HeldChanges::Kind> &kinds, const Konedri
         }
         notice.text = parts.join(QLatin1Char(' '));
     }
+    // What went out before the hold is not back: where it is, and the way to the recycle bin.
+    const QList<HeldChanges::Kind> before = sentOf(sent, kinds);
+    if (!before.isEmpty()) {
+        notice.text = i18nc("@info notification: what was restored, what was sent before the hold", "%1 %2", notice.text, HeldChanges::sentText(before));
+        const bool removals = std::any_of(before.cbegin(), before.cend(), [](const HeldChanges::Kind &kind) {
+            return kind.kind == QLatin1String("removal");
+        });
+        if (removals && m_openRecycleBin) {
+            notice.actions = {{i18nc("@action:button", "Open Recycle Bin"), m_openRecycleBin}};
+        }
+    }
     post(notice, false);
     m_shown = Shown::Result;
 }
@@ -827,13 +946,15 @@ bool ChangeNotifier::post(Notice notice, bool update)
         notice.title = i18nc("@title notification: what happened — the account's name", "%1 — %2", notice.title, name);
     }
     const quint64 generation = ++m_generation;
-    if (!notice.actions.isEmpty() && m_held) {
+    // The held notice's Restore, on what it says.
+    if (!notice.actions.isEmpty() && !notice.actions.constFirst().run && m_held) {
         const QString token = m_held->token();
         const QList<HeldChanges::Kind> counts = m_held->held();
+        const QList<HeldChanges::Kind> sent = m_held->sent();
         const QPointer<ChangeNotifier> self(this);
-        notice.actions[0].run = [self, generation, token, counts] {
+        notice.actions[0].run = [self, generation, token, counts, sent] {
             if (self) {
-                self->restore(generation, token, counts);
+                self->restore(generation, token, counts, sent);
             }
         };
     }

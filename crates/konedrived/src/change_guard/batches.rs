@@ -3,7 +3,7 @@
 // test: snapshot_tokens_survive_restart_and_reject_other_ledgers
 use super::{rows, Change, ChangeGuard, Disposition, Kind};
 use konedrive_dbus::rows::{GuardResult, HeldChange};
-use konedrive_tree::LocalItemId;
+use konedrive_tree::{GuardRestoreFailure as Failure, LocalItemId};
 use std::collections::BTreeSet;
 
 impl ChangeGuard {
@@ -92,8 +92,7 @@ impl ChangeGuard {
                 result.failures.push((
                     c.item,
                     c.path.clone(),
-                    "This change has changed since it was shown. Review it again before deciding."
-                        .into(),
+                    Failure::Changed.to_string(),
                 ));
                 continue;
             }
@@ -102,7 +101,7 @@ impl ChangeGuard {
                 result.failures.push((
                     c.item,
                     c.path.clone(),
-                    "The file is open for writing. Close it, then try again.".into(),
+                    Failure::Open.to_string(),
                 ));
                 continue;
             }

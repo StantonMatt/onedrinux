@@ -9,6 +9,7 @@
 #include <KLocalizedString>
 
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QLocale>
 #include <QTest>
 
@@ -49,8 +50,11 @@ KonedriveHeldChange sent(const QString &kind, const QString &path, qint64 since)
 /// Three deletions (one a folder of one item), 1.5 MiB in all, since 14:02.
 KonedriveHeldChangeList deletions()
 {
-    return {heldRow(QStringLiteral("removal"), QStringLiteral("Documents/a.txt"), MiB / 2, today(14, 2)),
-            folder(QStringLiteral("removal"), QStringLiteral("Documents/Old"), MiB, 1, today(14, 3))};
+    KonedriveHeldChange file = heldRow(QStringLiteral("removal"), QStringLiteral("Documents/a.txt"), MiB / 2, today(14, 2));
+    file.item = 1;
+    KonedriveHeldChange old = folder(QStringLiteral("removal"), QStringLiteral("Documents/Old"), MiB, 1, today(14, 3));
+    old.item = 3;
+    return {file, old};
 }
 
 KonedriveHeldChangeList rewrites()
@@ -212,14 +216,19 @@ private Q_SLOTS:
         QCOMPARE(text(kinds, 0, "title"), QStringLiteral("Deletions"));
         QCOMPARE(text(kinds, 0, "detail"), QStringLiteral("3 items · 1.5 MiB · since %1").arg(timeOfDay(14, 2)));
         QCOMPARE(text(kinds, 0, "countText"), QStringLiteral("3 deletions"));
-        QCOMPARE(text(kinds, 0, "allowText"), QStringLiteral("Delete in OneDrive"));
-        QCOMPARE(text(kinds, 0, "restoreText"), QStringLiteral("Restore"));
+        // Each button says how many it acts on, whatever the page's search shows.
+        QCOMPARE(text(kinds, 0, "allowText"), QStringLiteral("Delete 3 in OneDrive"));
+        QCOMPARE(text(kinds, 0, "restoreText"), QStringLiteral("Restore 3"));
         QVERIFY(text(kinds, 0, "note").isEmpty());
         QCOMPARE(text(kinds, 1, "title"), QStringLiteral("Changed files"));
-        QCOMPARE(text(kinds, 1, "allowText"), QStringLiteral("Upload Changes"));
+        QCOMPARE(text(kinds, 1, "allowText"), QStringLiteral("Upload 1 Change"));
+        QCOMPARE(text(kinds, 1, "restoreText"), QStringLiteral("Restore 1"));
         QCOMPARE(text(kinds, 1, "note"), QStringLiteral("Restore puts back OneDrive's version and keeps yours beside it as a copy."));
         QCOMPARE(held.headline(), QStringLiteral("3 deletions and 1 changed file are on hold"));
         QCOMPARE(held.summary(), QStringLiteral("4 changes on hold"));
+        // Allow All's question names everything it sends.
+        QCOMPARE(held.sendAllTitle(), QStringLiteral("Send All 4 Changes to OneDrive?"));
+        QCOMPARE(held.sendAllText(), QStringLiteral("3 items will be deleted in OneDrive and 1 changed file will be uploaded."));
         QVERIFY(held.headDetail().startsWith(QStringLiteral("They were made in the folder since %1").arg(timeOfDay(14, 2))));
         QCOMPARE(held.sentKinds().size(), 1);
         QCOMPARE(text(held.sentKinds(), 0, "title"), QStringLiteral("1 deletion"));
@@ -232,9 +241,12 @@ private Q_SLOTS:
         move.oldPath = QStringLiteral("Work/report.odt");
         hold(&held, {move, folder(QStringLiteral("upload"), QStringLiteral("site/node_modules"), 180 * MiB, 11204, today(16, 10))});
         QCOMPARE(text(held.kinds(), 0, "detail"), QStringLiteral("1 item · since %1").arg(timeOfDay(15, 31)));
-        QCOMPARE(text(held.kinds(), 0, "restoreText"), QStringLiteral("Move Back"));
+        QCOMPARE(text(held.kinds(), 0, "restoreText"), QStringLiteral("Move 1 Back"));
+        QCOMPARE(text(held.kinds(), 0, "allowText"), QStringLiteral("Move 1 in OneDrive"));
         QCOMPARE(text(held.kinds(), 1, "detail"), QStringLiteral("11,205 files · 180 MiB · since %1").arg(timeOfDay(16, 10)));
-        QCOMPARE(text(held.kinds(), 1, "restoreText"), QStringLiteral("Don't Upload"));
+        QCOMPARE(text(held.kinds(), 1, "restoreText"), QStringLiteral("Don't Upload 11,205"));
+        QCOMPARE(text(held.kinds(), 1, "allowText"), QStringLiteral("Upload 11,205"));
+        QCOMPARE(held.sendAllText(), QStringLiteral("1 item will be moved in OneDrive and 11,205 new files will be uploaded."));
         QCOMPARE(text(held.kinds(), 1, "note"), QStringLiteral("Don't Upload keeps them on this computer only; Issues lists them."));
 
         m_daemon->stop();
@@ -260,6 +272,7 @@ private Q_SLOTS:
 
         HeldRowsModel *rows = held.rows();
         QCOMPARE(rows->rowCount(), 0);
+        QVERIFY(!rows->folders());
         const auto at = [rows](int row, int role) {
             return rows->data(rows->index(row), role);
         };
@@ -272,8 +285,11 @@ private Q_SLOTS:
         QCOMPARE(at(2, HeldRowsModel::DetailRole).toString(), QStringLiteral("Renamed from report.odt · Work"));
         QCOMPARE(at(2, HeldRowsModel::LocalPathRole).toString(), QStringLiteral("/home/ann/OneDrive/Work/report-final.odt"));
 
+        QVERIFY(!rows->folders());
         held.showRows(QStringLiteral("removal"));
         QCOMPARE(rows->rowCount(), 2);
+        // A folder stands for what was in it, which the search does not look into.
+        QVERIFY(rows->folders());
         QCOMPARE(at(1, HeldRowsModel::NameRole).toString(), QStringLiteral("Old"));
         QCOMPARE(at(1, HeldRowsModel::IconNameRole).toString(), QStringLiteral("folder"));
         QCOMPARE(at(1, HeldRowsModel::CountRole).toString(), QStringLiteral("1 item"));
@@ -334,18 +350,128 @@ private Q_SLOTS:
         QCOMPARE(text(held.results(), 0, "type"), QStringLiteral("warning"));
         QCOMPARE(text(held.results(), 0, "text"), QStringLiteral("Restored 2 of 3 items. 1 is still on hold. Close the writer, then try again."));
 
+        // The daemon's reason for each: one shared is said in the summary, and each row says
+        // its own, until the next decision of its kind or until it is no longer held.
+        KonedriveHeldChange report = heldRow(QStringLiteral("removal"), QStringLiteral("Documents/report.odt"), 10, today(14, 2));
+        report.item = 2;
+        hold(&held, deletions() + KonedriveHeldChangeList{report});
+        const QString open = QStringLiteral("it is open in another program");
+        const QString taken = QStringLiteral("a file of the same name is in its place");
+        m_daemon->changeGuard->answer = KonedriveGuardResult{2, 0, 2, 0, {{1, QStringLiteral("Documents/a.txt"), open}, {2, QStringLiteral("Documents/report.odt"), open}}};
+        held.restore(QStringLiteral("removal"));
+        QTRY_COMPARE(held.results().size(), 6);
+        QCOMPARE(text(held.results(), 0, "text"), QStringLiteral("Restored 2 of 4 items. 2 are still on hold, each because it is open in another program."));
+        QTRY_COMPARE(held.count(), 2);
+        held.showRows(QStringLiteral("removal"));
+        HeldRowsModel *rows = held.rows();
+        QCOMPARE(rows->rowCount(), 2);
+        QCOMPARE(rows->data(rows->index(0), HeldRowsModel::NameRole).toString(), QStringLiteral("a.txt"));
+        QCOMPARE(rows->data(rows->index(0), HeldRowsModel::FailureRole).toString(), QStringLiteral("It is open in another program"));
+        // Its path stays, for the tooltip.
+        QCOMPARE(rows->data(rows->index(0), HeldRowsModel::DetailToolTipRole).toString(), QStringLiteral("Documents/a.txt"));
+
+        m_daemon->changeGuard->answer = KonedriveGuardResult{0, 0, 2, 0, {{1, QStringLiteral("Documents/a.txt"), open}, {2, QStringLiteral("Documents/report.odt"), taken}}};
+        held.restore(QStringLiteral("removal"));
+        QTRY_COMPARE(held.results().size(), 7);
+        QCOMPARE(text(held.results(), 0, "text"), QStringLiteral("Restored 0 of 2 items. 2 are still on hold, each with its reason in the list."));
+        QTRY_COMPARE(rows->data(rows->index(1), HeldRowsModel::FailureRole).toString(), QStringLiteral("A file of the same name is in its place"));
+        QCOMPARE(rows->data(rows->index(0), HeldRowsModel::FailureRole).toString(), QStringLiteral("It is open in another program"));
+        // No longer held: its reason goes with it.
+        m_daemon->changeGuard->answer.reset();
+        hold(&held, KonedriveHeldChangeList{report});
+        QCOMPARE(rows->rowCount(), 1);
+        QCOMPARE(rows->data(rows->index(0), HeldRowsModel::FailureRole).toString(), QStringLiteral("A file of the same name is in its place"));
+        hold(&held, KonedriveHeldChangeList{report, heldRow(QStringLiteral("removal"), QStringLiteral("Documents/a.txt"), 10, today(14, 9))});
+        QCOMPARE(rows->rowCount(), 2);
+        QVERIFY(rows->data(rows->index(0), HeldRowsModel::FailureRole).toString().isEmpty());
+        held.showRows(QString());
+
         // Refused: nothing was done.
         m_daemon->changeGuard->answer.reset();
         hold(&held, deletions());
         m_daemon->changeGuard->refuse = QStringLiteral("unknown change batch token; review the held changes again");
         held.restore(QString());
-        QTRY_COMPARE(held.results().size(), 6);
+        QTRY_COMPARE(held.results().size(), 8);
         QCOMPARE(text(held.results(), 0, "type"), QStringLiteral("error"));
         QCOMPARE(text(held.results(), 0, "text"), QStringLiteral("Nothing was restored: unknown change batch token; review the held changes again"));
 
         const int id = held.results().constFirst().toMap().value(QStringLiteral("id")).toInt();
         held.closeResult(id);
-        QCOMPARE(held.results().size(), 5);
+        QCOMPARE(held.results().size(), 7);
+    }
+
+    /// Thousands of reasons for thousands of held folders: a listing keeps each with its row
+    /// at once, never comparing every reason with every row.
+    void manyReasonsListQuickly()
+    {
+        start();
+        HeldChanges held(QDBusConnection::sessionBus(), fake::FirstAccount);
+        QTRY_VERIFY(held.serviceAvailable());
+        const int n = 20000;
+        const QString open = QStringLiteral("it is open in another program");
+        KonedriveHeldChangeList rows;
+        KonedriveGuardResult answer;
+        answer.failed = n;
+        for (int i = 0; i < n; ++i) {
+            KonedriveHeldChange row = heldRow(QStringLiteral("removal"), QStringLiteral("Folder-%1").arg(i), 0, today(14, 2));
+            row.item = i;
+            row.directory = true;
+            rows << row;
+            answer.failures << KonedriveGuardFailure{i, row.path, open};
+        }
+        hold(&held, rows);
+        m_daemon->changeGuard->answer = answer;
+        held.restore(QStringLiteral("removal"));
+        QTRY_COMPARE_WITH_TIMEOUT(held.results().size(), 1, 120000);
+        // The listing after the decision has them all.
+        QTRY_VERIFY_WITH_TIMEOUT(!held.working(), 120000);
+
+        QElapsedTimer timer;
+        timer.start();
+        m_daemon->changeGuard->hold(m_id, rows);
+        QTRY_COMPARE_WITH_TIMEOUT(held.token(), m_daemon->changeGuard->token(), 120000);
+        QVERIFY2(timer.elapsed() < 2000, qPrintable(QStringLiteral("listing took %1 ms").arg(timer.elapsed())));
+        held.showRows(QStringLiteral("removal"));
+        QCOMPARE(held.rows()->rowCount(), n);
+        QCOMPARE(held.rows()->data(held.rows()->index(n - 1), HeldRowsModel::FailureRole).toString(), QStringLiteral("It is open in another program"));
+    }
+
+    /// A reason goes with its own change: a deletion and a new file at one path keep their own,
+    /// and a folder that stands for what failed in it says the reason nearest its top.
+    void reasonsGoWithTheirOwnChange()
+    {
+        start();
+        HeldChanges held(QDBusConnection::sessionBus(), fake::FirstAccount);
+        QTRY_VERIFY(held.serviceAvailable());
+        KonedriveHeldChange removed = heldRow(QStringLiteral("removal"), QStringLiteral("Documents/notes.txt"), 10, today(14, 2));
+        removed.item = 5;
+        KonedriveHeldChange added = heldRow(QStringLiteral("upload"), QStringLiteral("Documents/notes.txt"), 10, today(14, 3));
+        added.item = 6;
+        KonedriveHeldChange site = folder(QStringLiteral("upload"), QStringLiteral("site"), MiB, 3, today(14, 4));
+        site.item = 7;
+        hold(&held, {removed, added, site});
+        m_daemon->changeGuard->answer = KonedriveGuardResult{0,
+                                                             0,
+                                                             5,
+                                                             0,
+                                                             {{5, QStringLiteral("Documents/notes.txt"), QStringLiteral("it is open in another program")},
+                                                              {6, QStringLiteral("Documents/notes.txt"), QStringLiteral("a file of the same name is in its place")},
+                                                              {8, QStringLiteral("site/src/deep.txt"), QStringLiteral("the folder it belongs in is missing")},
+                                                              {9, QStringLiteral("site/b.txt"), QStringLiteral("it changed since")},
+                                                              {10, QStringLiteral("site/a.txt"), QStringLiteral("it is busy")}}};
+        held.allow();
+        QTRY_VERIFY(!held.working());
+        QTRY_COMPARE(held.token(), m_daemon->changeGuard->token());
+        held.showRows(QStringLiteral("removal"));
+        HeldRowsModel *rows = held.rows();
+        QCOMPARE(rows->rowCount(), 1);
+        QCOMPARE(rows->data(rows->index(0), HeldRowsModel::FailureRole).toString(), QStringLiteral("It is open in another program"));
+        held.showRows(QStringLiteral("upload"));
+        QCOMPARE(rows->rowCount(), 2);
+        QCOMPARE(rows->data(rows->index(0), HeldRowsModel::FailureRole).toString(), QStringLiteral("A file of the same name is in its place"));
+        // Of what failed in the folder: the shortest path, and of those the first by path.
+        QCOMPARE(rows->data(rows->index(1), HeldRowsModel::NameRole).toString(), QStringLiteral("site"));
+        QCOMPARE(rows->data(rows->index(1), HeldRowsModel::FailureRole).toString(), QStringLiteral("It is busy"));
     }
 
     /// A restore under way: the kind is busy, with how far it is, until the answer comes.
@@ -403,7 +529,8 @@ private Q_SLOTS:
         QCOMPARE(notice.section, WindowSection::OnHold);
         QCOMPARE(notice.account, fake::FirstAccount);
         QCOMPARE(notice.title, QStringLiteral("25 deletions on hold"));
-        QCOMPARE(notice.text, QStringLiteral("25 items were deleted in the OneDrive folder within 10 minutes. They stay in OneDrive until you allow it."));
+        // Where they were deleted: the folder they were all in.
+        QCOMPARE(notice.text, QStringLiteral("25 items were deleted in “Old” within 10 minutes. They stay in OneDrive until you review them."));
         // Allowing is on the On Hold page only.
         QCOMPARE(buttons(notice), QStringList({QStringLiteral("Review…"), QStringLiteral("Restore")}));
 
@@ -473,14 +600,35 @@ private Q_SLOTS:
         QCOMPARE(result.text, QStringLiteral("1 is still on hold. Close the writer, then try again."));
         QCOMPARE(buttons(result), QStringList({QStringLiteral("Review…")}));
 
+        // The daemon's reasons, as it words them: one for all, or each its own on the page.
+        hold(&held, {});
+        hold(&held, deletions());
+        QTRY_COMPARE(sink.sent.size(), 5);
+        m_daemon->changeGuard->answer = KonedriveGuardResult{1, 0, 2, 0, {{1, QStringLiteral("Documents/a.txt"), QStringLiteral("it is <open> in another program")}}};
+        sink.sent.constLast().actions.constFirst().run();
+        QTRY_COMPARE(sink.sent.size(), 6);
+        QCOMPARE(sink.sent.constLast().text, QStringLiteral("2 are still on hold, each because it is &lt;open&gt; in another program."));
+        hold(&held, {});
+        hold(&held, deletions());
+        QTRY_COMPARE(sink.sent.size(), 7);
+        m_daemon->changeGuard->answer = KonedriveGuardResult{1,
+                                                             0,
+                                                             2,
+                                                             0,
+                                                             {{1, QStringLiteral("Documents/a.txt"), QStringLiteral("it is open in another program")},
+                                                              {2, QStringLiteral("Documents/Old"), QStringLiteral("the folder it belongs in is missing or has moved")}}};
+        sink.sent.constLast().actions.constFirst().run();
+        QTRY_COMPARE(sink.sent.size(), 8);
+        QCOMPARE(sink.sent.constLast().text, QStringLiteral("2 are still on hold for different reasons: On Hold shows why for each."));
+
         // Refused.
         m_daemon->changeGuard->answer.reset();
         hold(&held, {});
         hold(&held, rewrites());
-        QTRY_COMPARE(sink.sent.size(), 5);
+        QTRY_COMPARE(sink.sent.size(), 9);
         m_daemon->changeGuard->refuse = QStringLiteral("<b>no</b>");
         sink.sent.constLast().actions.constFirst().run();
-        QTRY_COMPARE(sink.sent.size(), 6);
+        QTRY_COMPARE(sink.sent.size(), 10);
         result = sink.sent.constLast();
         QCOMPARE(result.title, QStringLiteral("Could not restore the changes on hold — Work"));
         // Plasma reads the text as markup.
@@ -583,6 +731,188 @@ private Q_SLOTS:
         hold(&held, daily);
         QTRY_COMPARE(sink.sent.size(), 2);
         QCOMPARE(sink.sent.constLast().text, QStringLiteral("30 items were deleted in the OneDrive folder within a day. They stay in OneDrive until you allow it."));
+    }
+
+    /// What the deletions notification names: the folder deleted with what was in it, by its
+    /// name, or the folder they were all deleted in; at the top of the drive, no folder. Plasma reads the
+    /// text as markup: a path is escaped.
+    void whatTheDeletionsNotificationNames()
+    {
+        start();
+        HeldChanges held(QDBusConnection::sessionBus(), fake::FirstAccount);
+        QTRY_VERIFY(held.serviceAvailable());
+        AccountController account(fake::FirstAccount);
+        ChangeGuardController guard;
+        QTRY_VERIFY(guard.serviceAvailable());
+        RecordingSink sink;
+        ChangeNotifier notifier(&account, &held, &sink);
+        notifier.setGuard(&guard);
+        hold(&held, {});
+
+        hold(&held, {folder(QStringLiteral("removal"), QStringLiteral("Projects/site-redesign/Deliverables"), 400 * MiB, 1979, today(14, 2))});
+        QTRY_COMPARE(sink.sent.size(), 1);
+        QCOMPARE(sink.sent.constLast().title, QStringLiteral("1,980 deletions on hold"));
+        QCOMPARE(sink.sent.constLast().text,
+                 QStringLiteral("“Deliverables” and the 1,979 items in it were deleted in the OneDrive folder within 10 minutes. They stay in OneDrive until you review "
+                                "them."));
+
+        hold(&held, {});
+        hold(&held, {folder(QStringLiteral("removal"), QStringLiteral("Videos/<b>2026 & more"), 3 * GiB, 5, today(14, 2))});
+        QTRY_COMPARE(sink.sent.size(), 2);
+        QCOMPARE(sink.sent.constLast().text,
+                 QStringLiteral("“&lt;b&gt;2026 &amp; more” and the 5 items in it, 3 GiB in all, were deleted in the OneDrive folder within 10 minutes. They stay in "
+                                "OneDrive until you review them."));
+
+        KonedriveHeldChangeList spread;
+        for (int i = 0; i < 12; ++i) {
+            spread << heldRow(QStringLiteral("removal"), QStringLiteral("Projects/site-redesign/src/f%1.ts").arg(i), 10, today(14, 2));
+            spread << heldRow(QStringLiteral("removal"), QStringLiteral("Projects/site-redesign/f%1.md").arg(i), 10, today(14, 2));
+        }
+        spread << folder(QStringLiteral("removal"), QStringLiteral("Projects/site-redesign/node_modules"), 10, 1000, today(14, 2));
+        hold(&held, {});
+        hold(&held, spread);
+        QTRY_COMPARE(sink.sent.size(), 3);
+        QCOMPARE(sink.sent.constLast().text, QStringLiteral("1,025 items were deleted in “Projects/site-redesign” within 10 minutes. They stay in OneDrive until you review them."));
+
+        // Some at the top: the whole OneDrive folder is where.
+        spread << heldRow(QStringLiteral("removal"), QStringLiteral("notes.txt"), 10, today(14, 2));
+        hold(&held, {});
+        hold(&held, spread);
+        QTRY_COMPARE(sink.sent.size(), 4);
+        QCOMPARE(sink.sent.constLast().text, QStringLiteral("1,026 items were deleted in the OneDrive folder within 10 minutes. They stay in OneDrive until you allow it."));
+    }
+
+    /// A folder's name with direction or control characters in it is named without them, so
+    /// that it cannot turn the notification's words around.
+    void theDeletionsNotificationCleansTheName()
+    {
+        start();
+        HeldChanges held(QDBusConnection::sessionBus(), fake::FirstAccount);
+        QTRY_VERIFY(held.serviceAvailable());
+        AccountController account(fake::FirstAccount);
+        RecordingSink sink;
+        ChangeNotifier notifier(&account, &held, &sink);
+        hold(&held, {});
+
+        hold(&held, {folder(QStringLiteral("removal"), QStringLiteral("Videos/Holiday\u202Egpj.exe\n<b>"), 10, 30, today(14, 2))});
+        QTRY_COMPARE(sink.sent.size(), 1);
+        QCOMPARE(sink.sent.constLast().text,
+                 QStringLiteral("“Holiday gpj.exe &lt;b&gt;” and the 30 items in it were deleted in the OneDrive folder within 10 minutes. They stay in OneDrive until you "
+                                "review them."));
+
+        KonedriveHeldChangeList spread;
+        for (int i = 0; i < 25; ++i) {
+            spread << heldRow(QStringLiteral("removal"), QStringLiteral("Work/a\u202Eb/f%1.txt").arg(i), 10, today(14, 2));
+        }
+        hold(&held, {});
+        hold(&held, spread);
+        QTRY_COMPARE(sink.sent.size(), 2);
+        QCOMPARE(sink.sent.constLast().text, QStringLiteral("25 items were deleted in “Work/a b” within 10 minutes. They stay in OneDrive until you review them."));
+    }
+
+    /// What of the held kinds went out before the hold is not brought back by a restore: the
+    /// notification says where it is, before and after Restore, with Open Recycle Bin for
+    /// deletions, and so does the page's result.
+    void whatWentOutBeforeTheHold()
+    {
+        start();
+        HeldChanges held(QDBusConnection::sessionBus(), fake::FirstAccount);
+        QTRY_VERIFY(held.serviceAvailable());
+        AccountController account(fake::FirstAccount);
+        RecordingSink sink;
+        ChangeNotifier notifier(&account, &held, &sink);
+        int recycleBinOpened = 0;
+        notifier.setOpenRecycleBin([&recycleBinOpened] {
+            ++recycleBinOpened;
+        });
+        hold(&held, {});
+
+        KonedriveHeldChangeList rows;
+        for (int i = 0; i < 25; ++i) {
+            rows << heldRow(QStringLiteral("removal"), QStringLiteral("Old/f%1.txt").arg(i), 1024, today(14, 2));
+        }
+        const KonedriveHeldChangeList before{sent(QStringLiteral("removal"), QStringLiteral("Old/a.txt"), today(13, 58)),
+                                             sent(QStringLiteral("removal"), QStringLiteral("Old/b.txt"), today(13, 59))};
+        hold(&held, rows + before);
+        QTRY_COMPARE(sink.sent.size(), 1);
+        QCOMPARE(sink.sent.constLast().text,
+                 QStringLiteral("25 items were deleted in “Old” within 10 minutes. They stay in OneDrive until you review them. 2 deleted before the hold are already in "
+                                "OneDrive's recycle bin."));
+
+        sink.sent.constLast().actions.constFirst().run();
+        QTRY_COMPARE(sink.sent.size(), 2);
+        const Notice result = sink.sent.constLast();
+        QCOMPARE(result.title, QStringLiteral("Restored 25 items"));
+        QCOMPARE(result.text, QStringLiteral("They are back in the OneDrive folder. 2 deleted before the hold are already in OneDrive's recycle bin."));
+        QCOMPARE(buttons(result), QStringList(QStringLiteral("Open Recycle Bin")));
+        result.actions.constFirst().run();
+        QCOMPARE(recycleBinOpened, 1);
+        QTRY_COMPARE(held.count(), 0);
+
+        // The page's Restore says it too.
+        hold(&held, rows + before);
+        held.restore(QStringLiteral("removal"));
+        QTRY_COMPARE(held.results().size(), 1);
+        QCOMPARE(text(held.results(), 0, "text"), QStringLiteral("Restored 25 items: they are back in the folder. 2 deleted before the hold are already in OneDrive's recycle bin."));
+
+        // Several kinds sent before the hold: said together.
+        hold(&held, {});
+        hold(&held, rows + rewrites() + before + KonedriveHeldChangeList{sent(QStringLiteral("rewrite"), QStringLiteral("Book/notes.md"), today(14, 1))});
+        QTRY_COMPARE(sink.sent.size(), 4);
+        QCOMPARE(sink.sent.constLast().text,
+                 QStringLiteral("25 deletions and 1 changed file in the OneDrive folder are not sent to OneDrive until you allow them. 2 deletions and 1 changed file made "
+                                "before the hold were already sent to OneDrive."));
+        held.restore(QString());
+        QTRY_COMPARE(held.results().size(), 3);
+        QCOMPARE(text(held.results(), 0, "text"), QStringLiteral("Restored 25 items: they are back in the folder. 2 deleted before the hold are already in OneDrive's recycle bin."));
+        QCOMPARE(text(held.results(), 1, "text"),
+                 QStringLiteral("Restored 1 file to OneDrive's version. Yours is kept beside it, with this computer's name added. 1 changed before the hold is already "
+                                "uploaded."));
+    }
+
+    /// A restore that partly failed still says what was sent before the hold, and the
+    /// notification still offers the recycle bin.
+    void aPartlyFailedRestoreSaysWhatWentBefore()
+    {
+        start();
+        HeldChanges held(QDBusConnection::sessionBus(), fake::FirstAccount);
+        QTRY_VERIFY(held.serviceAvailable());
+        AccountController account(fake::FirstAccount);
+        RecordingSink sink;
+        ChangeNotifier notifier(&account, &held, &sink);
+        int recycleBinOpened = 0;
+        notifier.setOpenRecycleBin([&recycleBinOpened] {
+            ++recycleBinOpened;
+        });
+        hold(&held, {});
+
+        KonedriveHeldChangeList rows;
+        for (int i = 0; i < 25; ++i) {
+            rows << heldRow(QStringLiteral("removal"), QStringLiteral("Old/f%1.txt").arg(i), 1024, today(14, 2));
+        }
+        const KonedriveHeldChangeList before{sent(QStringLiteral("removal"), QStringLiteral("Old/a.txt"), today(13, 58)),
+                                             sent(QStringLiteral("removal"), QStringLiteral("Old/b.txt"), today(13, 59))};
+        hold(&held, rows + before);
+        QTRY_COMPARE(sink.sent.size(), 1);
+        m_daemon->changeGuard->answer = KonedriveGuardResult{24, 0, 1, 0, {{1, QStringLiteral("Old/f0.txt"), QStringLiteral("it is open in another program")}}};
+
+        sink.sent.constLast().actions.constFirst().run();
+        QTRY_COMPARE(sink.sent.size(), 2);
+        const Notice result = sink.sent.constLast();
+        QCOMPARE(result.title, QStringLiteral("Restored 24 of 25 items"));
+        QCOMPARE(result.text,
+                 QStringLiteral("1 is still on hold because it is open in another program. 2 deleted before the hold are already in OneDrive's recycle bin."));
+        QCOMPARE(buttons(result), QStringList({QStringLiteral("Review…"), QStringLiteral("Open Recycle Bin")}));
+        result.actions.constLast().run();
+        QCOMPARE(recycleBinOpened, 1);
+
+        // The page's Restore says it too.
+        hold(&held, rows + before);
+        held.restore(QStringLiteral("removal"));
+        QTRY_COMPARE(held.results().size(), 1);
+        QCOMPARE(text(held.results(), 0, "text"),
+                 QStringLiteral("Restored 24 of 25 items. 1 is still on hold because it is open in another program. 2 deleted before the hold are already in OneDrive's "
+                                "recycle bin."));
     }
 
     /// Issues' Upload for a file Don't Upload kept here: its path relative to the drive, and a

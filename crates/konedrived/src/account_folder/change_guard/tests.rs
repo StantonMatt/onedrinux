@@ -61,7 +61,7 @@ async fn restore_reports_partial_failures_and_final_progress_without_a_mount() {
         (1, 0, 1, 0)
     );
     assert_eq!(result.failures[0].1, "old");
-    assert!(result.failures[0].2.contains("Mount"));
+    assert_eq!(result.failures[0].2, "this account's folder is not mounted");
     assert!(guard.local_only().contains(&new.local_item_id));
     let (_, rows) = guard.snapshot().unwrap();
     assert_eq!(rows.len(), 1);

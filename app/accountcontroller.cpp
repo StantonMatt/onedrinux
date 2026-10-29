@@ -335,7 +335,7 @@ void AccountController::changeWriteScope(const WriteScope &scope)
         w->deleteLater();
         if (w->isError()) {
             const QString why = w->error().message().isEmpty() ? w->error().name() : w->error().message();
-            setActionError(scope.enabled ? i18n("The folders that can be changed were not saved: %1", why) : i18n("Changes were not allowed everywhere: %1", why));
+            setActionError(scope.enabled ? i18n("The folders that can be changed were not saved: %1", why) : i18n("Could not allow changes everywhere: %1", why));
             ended();
             return;
         }

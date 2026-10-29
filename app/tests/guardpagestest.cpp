@@ -455,6 +455,37 @@ private Q_SLOTS:
         QTRY_VERIFY(!card->isVisible());
     }
 
+    /// A terminal blocked: Status offers Allow for This Session and More, never Always Allow,
+    /// which would let every program run in it download freely; Settings still offers it.
+    void aTerminalIsAlwaysAllowedOnlyFromSettings()
+    {
+        const QString konsole = QStringLiteral("app:org.kde.konsole");
+        FakeDaemon fake;
+        prepare(fake, {blocked(konsole, QStringLiteral("Konsole"))});
+        QVERIFY(fake.start());
+        App app;
+        QVERIFY(app.load());
+        QTRY_VERIFY(app.guard.listed().size() == 1);
+        app.showPage(QStringLiteral("status"));
+        QTRY_COMPARE(app.pageShown(), QStringLiteral("statusPage"));
+        auto *card = app.find("blockedAppsCard");
+        QVERIFY(card);
+        QTRY_VERIFY(card->isVisible());
+        QTRY_COMPARE(rows(card).size(), 1);
+        QCOMPARE(identityOf(rows(card).constFirst()), konsole);
+        QCOMPARE(shownButtons(rows(card).constFirst()), QStringList({QStringLiteral("allowSessionButton"), QStringLiteral("moreButton")}));
+
+        app.showPage(QStringLiteral("settings"));
+        QTRY_COMPARE(app.pageShown(), QStringLiteral("settingsPage"));
+        auto *list = app.find("guardAppsCard");
+        QVERIFY(list);
+        QTRY_COMPARE(rows(list).size(), 1);
+        QCOMPARE(shownButtons(rows(list).constFirst()),
+                 QStringList({QStringLiteral("allowSessionButton"), QStringLiteral("allowAlwaysButton"), QStringLiteral("moreButton")}));
+        QMetaObject::invokeMethod(named(rows(list).constFirst(), QStringLiteral("allowAlwaysButton")), "clicked");
+        QTRY_VERIFY(fake.guard->calls.contains(QStringLiteral("AllowApp:%1:always").arg(konsole)));
+    }
+
     /// The previews' warning on OneDrive Settings: only while the guard is off, since with it
     /// on Dolphin's thumbnailer is refused rather than downloading.
     void previewsWarnOnlyWithoutTheGuard()
@@ -480,8 +511,10 @@ private Q_SLOTS:
         QTRY_VERIFY(!offLine->isVisible());
     }
 
-    /// A click on the notification opens Settings at the list; a name is shown as plain text.
-    void theNotificationLeadsToTheList()
+    /// A click on the notification opens Status at its blocked apps, which have the same
+    /// buttons; with none blocked any more, Settings, brought to its list once the page has
+    /// settled. A name is shown as plain text.
+    void theNotificationLeadsToTheBlockedApps()
     {
         FakeDaemon fake;
         prepare(fake, {blocked(QStringLiteral("exe:/tmp/x"), QStringLiteral("<b>Evil</b>"))});
@@ -490,13 +523,37 @@ private Q_SLOTS:
         QVERIFY(app.load());
         QTRY_VERIFY(app.guard.listed().size() == 1);
         QTRY_COMPARE(app.pageShown(), QStringLiteral("statusPage"));
-        QMetaObject::invokeMethod(app.window, "showSection", Q_ARG(QVariant, sectionName(WindowSection::GuardApps)));
+        app.showPage(QStringLiteral("settings"));
         QTRY_COMPARE(app.pageShown(), QStringLiteral("settingsPage"));
-        auto *card = app.find("guardAppsCard");
+        QMetaObject::invokeMethod(app.window, "showSection", Q_ARG(QVariant, sectionName(WindowSection::GuardApps)));
+        QTRY_COMPARE(app.pageShown(), QStringLiteral("statusPage"));
+        auto *card = app.find("blockedAppsCard");
+        QTRY_VERIFY(card && card->isVisible());
         QTRY_COMPARE(rows(card).size(), 1);
         QQuickItem *name = named(rows(card).constFirst(), QStringLiteral("guardAppName"));
         QCOMPARE(name->property("text").toString(), QStringLiteral("<b>Evil</b>"));
         QCOMPARE(name->property("textFormat").toInt(), 0); // Text.PlainText
+        QCOMPARE(shownButtons(rows(card).constFirst()),
+                 QStringList({QStringLiteral("allowSessionButton"), QStringLiteral("allowAlwaysButton"), QStringLiteral("moreButton")}));
+
+        // Allowed meanwhile: nothing waits on Status, and Settings has the app's rule.
+        fake.guard->apps = {{QStringLiteral("exe:/tmp/x"), QStringLiteral("<b>Evil</b>"), QStringLiteral("allowed-session")}};
+        fake.guard->sendAppsChanged();
+        QTRY_VERIFY(!card->isVisible());
+        app.window->resize(828, 648);
+        QMetaObject::invokeMethod(app.window, "showSection", Q_ARG(QVariant, sectionName(WindowSection::GuardApps)));
+        QTRY_COMPARE(app.pageShown(), QStringLiteral("settingsPage"));
+        auto *list = app.find("guardAppsCard");
+        QTRY_COMPARE(rows(list).size(), 1);
+        auto *flickable = app.find<QObject>("settingsPage")->property("flickable").value<QQuickItem *>();
+        auto *header = app.find("guardAppsHeader");
+        QVERIFY(flickable && header);
+        const auto wanted = [&] {
+            const qreal y = header->mapToItem(flickable->property("contentItem").value<QQuickItem *>(), QPointF()).y();
+            return qRound(std::min(y, flickable->property("contentHeight").toReal() - flickable->height()));
+        };
+        QTRY_VERIFY(wanted() > 0);
+        QTRY_COMPARE(qRound(flickable->property("contentY").toReal()), wanted());
     }
 };
 

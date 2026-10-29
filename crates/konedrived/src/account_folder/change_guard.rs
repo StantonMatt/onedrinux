@@ -5,6 +5,7 @@
 use crate::account_folder::SyncService;
 use crate::change_guard::Kind;
 use konedrive_dbus::rows::GuardResult;
+use konedrive_tree::GuardRestoreFailure as Failure;
 use std::sync::Arc;
 
 impl SyncService {
@@ -82,8 +83,8 @@ impl SyncService {
                 if let Some(reference) = guard.cleanup_reference(&change) {
                     let store = mount.as_ref().map(|m| m.folder_step_parts().store);
                     match store {
-                        Some(store) => store.call(move |s| s.step_memory().forget_mismatched_item(&reference)).await.map(|_| true).map_err(|e| e.to_string()),
-                        None => Err("Mount this account's folder, then restore again.".into()),
+                        Some(store) => store.call(move |s| s.step_memory().forget_mismatched_item(&reference)).await.map(|_| true).map_err(|e| { tracing::warn!("held cleanup restore failed: {e}"); Failure::Storage.to_string() }),
+                        None => Err(Failure::Unmounted.to_string()),
                     }
                 } else { Ok(true) }
             } else if change.kind == Kind::Upload {
@@ -93,11 +94,11 @@ impl SyncService {
                     .restore_guard_change_taking_move(change.clone(), take_move)
                     .await
             } else {
-                Err("Mount this account's folder, then restore again.".into())
+                Err(Failure::Unmounted.to_string())
             };
             let success = matches!(outcome, Ok(true));
             let reason = match outcome {
-                Ok(false) => "Newer work, an open file or a file in the destination prevents restore. Close open files or move the conflicting file, then review and restore again.".to_owned(),
+                Ok(false) => Failure::Changed.to_string(),
                 Err(error) => error,
                 Ok(true) => String::new(),
             };

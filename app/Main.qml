@@ -90,7 +90,8 @@ Kirigami.ApplicationWindow {
 
     /// Shows where a notification leads, by its name (sectionName() of a WindowSection):
     /// Status, Status with its History opened, On Hold, a section of Issues brought to the top,
-    /// Settings' apps the download guard blocked, or OneDrive Settings' Sync card (writeScope).
+    /// the apps the download guard blocked (Status' card, else Settings' list), or OneDrive
+    /// Settings' Sync card (writeScope).
     function showSection(name) {
         if (name === "history") {
             showPage("status");
@@ -100,6 +101,15 @@ Kirigami.ApplicationWindow {
             return;
         }
         if (name === "guardApps") {
+            // The blocked apps and their buttons are near the top of Status; Settings has the
+            // whole list, two screens down.
+            if (DownloadGuard.serviceAvailable && DownloadGuard.enabled && DownloadGuard.blockedApps.length > 0 && hasService && hasAccount) {
+                showPage("status");
+                if (currentPage === "status") {
+                    statusPage.showBlockedApps();
+                    return;
+                }
+            }
             showPage("settings");
             settingsPage.showGuardApps();
             return;

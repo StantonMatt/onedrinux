@@ -18,18 +18,48 @@ FormCard.FormCardPage {
     readonly property bool guardOn: DownloadGuard.serviceAvailable && DownloadGuard.enabled
     /// The change guard is there and on: its limits show.
     readonly property bool holdOn: ChangeGuard.serviceAvailable && ChangeGuard.enabled
+    /// showGuardApps() asked, and the page is still settling.
+    property bool guardAppsWanted: false
 
-    /// The apps the download guard blocked brought into sight: where its notification leads.
+    /// The apps the download guard blocked or has a rule for brought into sight: where its
+    /// notification leads when Status has none blocked. A page just shown is still being laid
+    /// out: it stays in sight as the page settles, until the user scrolls.
     function showGuardApps() {
-        Qt.callLater(() => {
-            const target = guardAppsHeader.visible ? guardAppsHeader : guardSwitch;
-            const y = target.mapToItem(flickable.contentItem, 0, 0).y;
-            flickable.contentY = Math.max(0, Math.min(y, flickable.contentHeight - flickable.height));
-        });
+        guardAppsWanted = true;
+        guardAppsSettled.restart();
+        Qt.callLater(scrollToGuardApps);
+    }
+    function scrollToGuardApps() {
+        if (!guardAppsWanted) {
+            return;
+        }
+        const target = guardAppsHeader.visible ? guardAppsHeader : guardSwitch;
+        const y = target.mapToItem(flickable.contentItem, 0, 0).y;
+        flickable.contentY = Math.max(0, Math.min(y, flickable.contentHeight - flickable.height));
     }
 
     objectName: "settingsPage"
     title: i18nc("@title", "Settings")
+
+    // showGuardApps() follows the page as it settles.
+    Timer {
+        id: guardAppsSettled
+        interval: 1000
+        onTriggered: page.guardAppsWanted = false
+    }
+    Connections {
+        target: page.flickable
+        enabled: page.guardAppsWanted
+        function onContentHeightChanged() {
+            page.scrollToGuardApps();
+        }
+        function onHeightChanged() {
+            page.scrollToGuardApps();
+        }
+        function onMovementStarted() {
+            page.guardAppsWanted = false;
+        }
+    }
 
     Kirigami.InlineMessage {
         objectName: "settingsError"
