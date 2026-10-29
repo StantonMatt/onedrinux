@@ -62,9 +62,10 @@ impl MadeItems {
 
     /// After `RowsChanged` on `MakeDirectory` or `SendNewFile`: reads the row,
     /// [`decide_made_item_fate`], and removes what was made (`delete_item`, guarded by
-    /// the eTag of the answer). A directory whose original folder cTag was not kept is
-    /// left for a listing, because a GET cannot prove a later descendant was ours. Or asks for a
-    /// cycle. Called with NO lock held: the tree lock of the
+    /// the eTag of the answer). A directory is left for a listing: its removal takes all
+    /// below it, and nothing OneDrive gives proves that what another put in it since was
+    /// not — a folder's eTag moves at nothing below it, and it has no cTag on OneDrive
+    /// personal (measured 2026-10-29). Or asks for a cycle. Called with NO lock held: the tree lock of the
     /// commit was let go. Answers `MadeItemRemoved` for an item removed or found gone,
     /// `MadeItemLeft` for a removal OneDrive did not carry out (a 412: another changed it
     /// since; any failure), `CycleWanted` for a row that is still there — and for a row
@@ -81,7 +82,7 @@ impl MadeItems {
         if decide_made_item_fate(row.as_ref()) == MadeItemFate::LeaveForListing {
             return RowsChangedFollowUp::CycleWanted;
         }
-        // No folder cTag from the create response: a directory cannot be proven ours.
+        // A directory cannot be proven to hold only what this folder put in it: its eTag covers the folder alone.
         if made.content.is_none() { return RowsChangedFollowUp::MadeItemLeft(made.item.clone()); }
         let left = konedrive_tree::MismatchedItem::of_answer(made.item.clone(), None, Some(&made.etag));
         if let Err(error) = self.graph.store.call(move |s| {
@@ -102,8 +103,8 @@ impl MadeItems {
             }
             match made.content {
                 Some(_) => self.graph.drive.delete_item(made_id, &made.etag).await,
-                // ConfirmedItem carries no folder cTag from the create response. A fresh
-                // GET cannot prove that a new descendant was ours: leave the orphan.
+                // A folder's eTag covers the folder alone, and it has no cTag: no read proves
+                // that a new descendant was ours. An orphan beats taking another's item.
                 None => return RowsChangedFollowUp::MadeItemLeft(made.item.clone()),
             }
         };

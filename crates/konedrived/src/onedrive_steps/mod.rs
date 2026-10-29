@@ -14,7 +14,8 @@
 //!    is when the request leaves: the place sent is the step's `parent` and `name`, the
 //!    guard is `item.onedrive_etag`, else the cTag of `item.synced_content`
 //!    (`confirmed_item::decide_guard`) — for a content sent into an item, the cTag of the
-//!    content OneDrive has (`confirmed_item::decide_content_guard`) —, the content is
+//!    content OneDrive has (`confirmed_item::decide_content_guard`); for a directory's
+//!    removal, the eTag alone (`confirmed_item::decide_folder_guard`) —, the content is
 //!    `item.local.content`. A name is
 //!    given to Graph through `confirmed_item::to_graph_name`. What it reads of the store
 //!    before the request is one read (`Store::read_items`): the item's memory
@@ -85,7 +86,7 @@
 // test: each_case_sends_the_request_of_its_planned_versions_and_commits_the_answer
 // test: a_request_is_guarded_by_the_etag_planned_from_else_the_synced_ctag_and_a_content_by_its_ctag
 // test: a_temporary_name_is_remembered_before_the_request_of_a_new_item_and_of_a_move
-// test: a_directory_made_while_its_row_went_is_kept_without_its_original_folder_ctag
+// test: a_directory_made_while_its_row_went_is_kept_in_onedrive
 // test: a_commit_that_finds_the_rows_changed_otherwise_asks_for_a_cycle
 // test: a_step_replayed_after_a_death_between_its_request_and_its_commit_adopts_what_it_finds
 // test: a_request_is_on_record_before_it_leaves_and_the_record_goes_with_its_commit_or_its_certain_refusal
@@ -111,13 +112,25 @@
 // by a change of the time of last change and of the description). A content is guarded by its cTag,
 // which none of that moves.
 
-// test: a_folder_ctag_refuses_an_unlisted_descendant_creation_edit_or_removal
+// A directory's removal is guarded by the folder's eTag alone: OneDrive personal gives a folder no
+// cTag, and moves its eTag at its own rename or move and at nothing below it (measured on a
+// personal account, 2026-10-29). What is below is checked by the rows after the attempt's own
+// listing; what OneDrive gets below between that listing and the DELETE goes to the recycle bin
+// inside the folder.
+
+// test: a_change_below_the_directory_that_the_attempts_listing_brings_holds_the_removal_back
 // test: a_directory_removal_waits_for_a_later_completed_listing
+// test: a_hold_after_the_attempts_listing_ended_makes_the_removal_wait_for_another_listing
+// test: a_listing_that_ended_long_before_the_look_does_not_use_the_wait_up
+// test: a_directory_without_an_etag_waits_for_a_listing_and_never_sends_a_delete
+// test: a_folder_renamed_or_moved_in_onedrive_refuses_the_removal_and_it_waits_to_be_planned_again
+// test: an_item_added_in_onedrive_after_the_listing_and_before_the_delete_goes_to_the_recycle_bin_inside_the_folder
+// test: a_folder_removal_goes_through_on_a_store_migrated_from_schema_31
 // test: an_uploaded_temporary_saved_over_a_cloud_file_updates_the_original_id
 // test: an_upload_in_flight_follows_the_temporary_binding_after_an_atomic_save
 // test: sender_scope_precedes_guard_admission_and_a_hold_still_blocks_in_scope
 // test: a_guard_trip_while_metadata_waits_for_a_slot_prevents_the_request
-// test: removal_quiet_time_and_the_predelete_listing_both_finish_before_a_guarded_delete
+// test: a_folder_with_a_resident_file_set_aside_is_removed_on_its_etag_after_its_quiet_time_and_its_listing
 
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
@@ -150,7 +163,7 @@ pub(crate) mod name_holders;
 pub(crate) mod session_cancellations;
 mod write_scope;
 
-use confirmed_item::{decide_content_guard, decide_guard, to_confirmed_item, to_graph_name, RequestGuard};
+use confirmed_item::{decide_content_guard, decide_folder_guard, decide_guard, to_confirmed_item, to_graph_name, RequestGuard};
 use content_upload::{hash_content, ContentTarget, ContentUpload, NewFilePlace, SendContentError, SentContent};
 use graph_refusal::{decide_plain_refusal, decide_read_refusal, decide_refusal, RefusedRequest};
 use lost_answers::{FailedRead, LostAnswerFate, LostAnswers, SentRequest};
@@ -233,9 +246,21 @@ fn describe_name_taken(item: &ItemVersions, name: &OsStr, holder_name: std::ffi:
     }
 }
 
+/// Seconds after a listing's end (`TreeStore::last_checked`, written as the cycle ends)
+/// within which a directory's removal waiting for it may use it up
+/// (`run_send_directory_removal`). Later — the step was held, by the change guard's quiet
+/// time, a pause, a wait OneDrive asked for or a sign-out, between the listing's end and its
+/// look —, the attempt waits for another listing: the rows are not sent on so old.
+/// It is the end that counts, not how long the listing took, and the step looks as soon as
+/// the end wakes the plan: a listing however slow uses the wait up.
+pub(crate) const DIRECTORY_REMOVAL_LISTING_FRESH_SECONDS: i64 = 10;
+
 /// The runner of the steps towards OneDrive, for one folder.
 pub(crate) struct OneDriveSteps {
-    /// Listing generation seen when each unsent directory removal first ran.
+    /// For each directory's removal that waits for a listing cycle, by item and stamp of
+    /// the unsent change: the count of listings begun when its attempt first looked
+    /// (`run_send_directory_removal`). Taken out when the wait is used up, and when `run`
+    /// stops the step before its runner (`forget_directory_removal_wait`).
     directory_removal_listings: std::sync::Mutex<std::collections::BTreeMap<(LocalItemId, Option<u64>), u64>>,
     graph: GraphAccess,
     write_scope: crate::config::WriteScopeSource,
@@ -273,7 +298,10 @@ impl OneDriveSteps {
     /// (`RunningSteps::begin_commit`): what the step memory holds — the record of the
     /// request among it — lets the next run go on or adopt.
     pub(crate) async fn run(&self, step: OneDriveStep) -> StepOutcome {
-        if let Err(outcome) = self.check_write_scope(&step).await { return outcome; }
+        if let Err(outcome) = self.check_write_scope(&step).await {
+            self.forget_directory_removal_wait(&step);
+            return outcome;
+        }
         if let Some(guard) = self.content_files.change_guard() {
             if guard.lacks_step(&step) {
                 let planned = step.clone();
@@ -290,7 +318,10 @@ impl OneDriveSteps {
             }
             match guard.admit(&step, (self.graph.clock)()) {
                 Ok(true) => {},
-                Ok(false) => return StepOutcome::NotRun(StepObstacle::SendingStopped),
+                Ok(false) => {
+                    self.forget_directory_removal_wait(&step);
+                    return StepOutcome::NotRun(StepObstacle::SendingStopped);
+                }
                 Err(detail) => return StepOutcome::Failed(StepFailure::Store { detail }),
             }
         }
@@ -311,6 +342,14 @@ impl OneDriveSteps {
             guard.ended_without_write(&step);
         }
         outcome
+    }
+
+    /// A directory's removal that did not reach its runner waits for a listing of its own
+    /// at its next attempt.
+    fn forget_directory_removal_wait(&self, step: &OneDriveStep) {
+        if let OneDriveStep::SendDirectoryRemoval { item, .. } = step {
+            crate::panic::lock(&self.directory_removal_listings).retain(|(known, _), _| *known != item.local_item_id);
+        }
     }
 
     /// A worker can wait for a pool slot while the scope narrows or another edit
@@ -898,32 +937,69 @@ impl OneDriveSteps {
         }
     }
 
-    /// Removes the planned subtree only after a new listing cycle, the store's checks
-    /// of every known descendant and outstanding request, and a conditional Graph DELETE.
-    /// Missing folder tags wait for a listing; there is no unconditional retry.
+    /// `SendDirectoryRemoval`: the removal of a directory that was removed here, with all
+    /// that was in it, is sent, guarded.
+    ///
+    /// Guard: the folder's eTag the step was planned from (`item.onedrive_etag`), as for
+    /// a file (`decide_guard`). OneDrive personal gives a folder no cTag, and moves its
+    /// eTag at its own rename or move and at nothing below it (measured 2026-10-29): what
+    /// is below is checked by the rows, after a listing. A directory with no eTag is
+    /// `StepFailure::AnswerUnreadable`, as a file with no guard is: the step waits for a
+    /// listing that writes one, and nothing is sent.
+    /// Before the request every attempt waits for a listing cycle of its own. Its first
+    /// look notes the count of listings begun and asks for a cycle
+    /// (`RowsChanged(CycleWanted)`); a look while it waits is
+    /// `NotRun(StepObstacle::ListingAwaited)`, which the listing's end wakes. A listing
+    /// under way at the first look has that count, so it is not the one waited for. Once a
+    /// listing begun after the first look has ended, the wait is used up, whatever comes
+    /// of the attempt — a hold, rows that changed, a failure, a 412 —, and the next
+    /// attempt waits for another. It is used up only by a look within
+    /// `DIRECTORY_REMOVAL_LISTING_FRESH_SECONDS` of the listing's end; a later look, after
+    /// a hold, begins a new wait. A hold that stops the step before it comes here (`run`)
+    /// forgets the wait. Then, under the tree lock, the rows are asked again
+    /// (`can_directory_removal_be_sent`): an item the listing brought below the directory,
+    /// or changed there, is `RowsChanged(Nothing)` and the next plan decides; the record
+    /// of the request is written in the same job.
+    /// Request: `delete_folder`, which takes the whole tree to the recycle bin. What
+    /// OneDrive gets below the directory between the listing and the request goes with
+    /// it, to the recycle bin.
+    /// Answer: nothing. 404 is a confirmation: the directory is gone. 412: `ItemChanged`,
+    /// the folder was renamed or moved in OneDrive; a cycle writes its new eTag, and the
+    /// next plan decides.
+    /// Commit: `commit_send_directory_removal(item, below)`. The settlement of a written
+    /// removal asks for a listing cycle (`step_settlement`): a 404 says nothing of what was
+    /// below, and an item moved out of the directory meanwhile is listed again.
     async fn run_send_directory_removal(&self, item: &ItemVersions, below: &[ItemVersions]) -> StepOutcome {
         let id = item.local_item_id;
-        let Some(onedrive_item) = item.onedrive_item.clone() else {
-            return StepOutcome::Failed(StepFailure::AnswerUnreadable { detail: format!("item {id} has no item of OneDrive to remove") });
+        let (onedrive_item, guard) = match self.find_guarded_item(item, decide_folder_guard) {
+            Ok(guarded) => guarded,
+            Err(outcome) => return outcome,
         };
-        if let Err(outcome) = self.check_drive(item, &onedrive_item) {
-            return outcome;
-        }
-        let listing = self.graph.store.call(|store| Ok((store.listing_count()?, store.item_store().find_listing_under_way()?.is_some()))).await;
-        let (count, under_way) = match listing { Ok(listing) => listing, Err(error) => return fail_store(error) };
-        let refreshed = {
+        let listing = self.graph.store.call(|store| Ok((store.listing_count()?, store.item_store().find_listing_under_way()?.is_some(), store.last_checked()?))).await;
+        let (count, under_way, ended_at) = match listing { Ok(listing) => listing, Err(error) => return fail_store(error) };
+        // The clock `last_checked` is written with.
+        let ended_lately = ended_at.is_some_and(|ended_at| (0..=DIRECTORY_REMOVAL_LISTING_FRESH_SECONDS).contains(&(crate::clock::unix_now() - ended_at)));
+        let waited = {
             let mut listings = crate::panic::lock(&self.directory_removal_listings);
             listings.retain(|(known, stamp), _| *known != id || *stamp == item.unsent_since);
-            let first = listings.entry((id, item.unsent_since)).or_insert(count);
-            count > *first && !under_way
+            let has_ended_since = |first: u64| count > first && !under_way;
+            match listings.get(&(id, item.unsent_since)).copied() {
+                // The wait is used up by this attempt, whatever comes of it.
+                Some(first) if has_ended_since(first) && ended_lately => {
+                    listings.remove(&(id, item.unsent_since));
+                    None
+                }
+                Some(first) if !has_ended_since(first) => Some(StepOutcome::NotRun(StepObstacle::ListingAwaited)),
+                // A first look, or one long after the listing it waited for ended: a wait begins.
+                None | Some(_) => {
+                    listings.insert((id, item.unsent_since), count);
+                    Some(StepOutcome::RowsChanged(RowsChangedFollowUp::CycleWanted))
+                }
+            }
         };
-        if !refreshed {
-            return StepOutcome::RowsChanged(RowsChangedFollowUp::CycleWanted);
+        if let Some(outcome) = waited {
+            return outcome;
         }
-        let guard = match item.onedrive_folder_ctag.as_deref().filter(|tag| !tag.is_empty()) {
-            Some(tag) => tag.to_owned(),
-            None => return StepOutcome::Refused(StepRefusal::ItemChanged),
-        };
         let can_be_sent = {
             let _tree = self.tree_lock.lock().await;
             let (mut busy_items, mut destinations) = (self.running_steps.list_items(), self.running_steps.list_destinations());
@@ -962,7 +1038,7 @@ impl OneDriveSteps {
             if let Err(outcome) = self.check_sender(&OneDriveStep::SendDirectoryRemoval { item: item.clone(), below: below.to_vec() }).await {
                 return self.refuse_for_certain(item, outcome).await;
             }
-            self.graph.drive.delete_folder(onedrive_item.item_id.as_str(), &guard).await
+            self.graph.drive.delete_folder(onedrive_item.item_id.as_str(), guard.as_str()).await
         };
         if let Err(outcome) = self.follow_removal_answer(item, answered).await {
             return outcome;
@@ -976,7 +1052,6 @@ impl OneDriveSteps {
             Ok(committed) => committed,
             Err(outcome) => return outcome,
         };
-        crate::panic::lock(&self.directory_removal_listings).remove(&(id, item.unsent_since));
         match committed.outcome {
             StepCommitOutcome::Written => describe_written(ActivityKind::CloudDeleted, committed.path_before, None),
             StepCommitOutcome::RowsChanged => StepOutcome::RowsChanged(RowsChangedFollowUp::CycleWanted),

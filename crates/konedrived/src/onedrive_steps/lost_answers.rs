@@ -347,7 +347,8 @@ impl LostAnswers {
     /// OneDrive no row is bound to any more, goes with nothing read. A read OneDrive
     /// refuses for certain (`FailedRead::RefusedForCertain`) ends the record too, as
     /// [`SettledRecord::LeftToListing`]: reading will never say what became of the
-    /// request, and the caller asks for a listing cycle.
+    /// request, and the caller asks for a listing cycle. It asks for one too for a
+    /// directory's removal that went through ([`SettledRecord::SettledListingWanted`]).
     ///
     /// The record that goes is the one that was given and no later one
     /// (`StepMemory::forget_request_record_as_read`): a step of the item that ran
@@ -420,7 +421,11 @@ impl LostAnswers {
                     }
                 }
                 store.step_memory().forget_request_record_as_read(&record)?;
-                Ok(SettledRecord::Settled)
+                // As the settlement of the step's own removal (`step_settlement`): the read says nothing of what was below.
+                match is_of_kind && matches!(record.request, RecordedRequest::SendDirectoryRemoval) {
+                    true => Ok(SettledRecord::SettledListingWanted),
+                    false => Ok(SettledRecord::Settled),
+                }
             })
             .await
             .map_err(store_failure)
@@ -432,6 +437,10 @@ impl LostAnswers {
 pub(crate) enum SettledRecord {
     /// What became of its request is known, and written where it went through.
     Settled,
+    /// A directory's removal that went through, settled so: a listing cycle is to be
+    /// asked for, as for the step's own (`step_settlement`), which lists again an item
+    /// moved out of the directory in OneDrive meanwhile.
+    SettledListingWanted,
     /// OneDrive refuses the read for certain: the record went with nothing learnt, and a
     /// listing cycle is to be asked for, which brings what OneDrive has.
     LeftToListing,

@@ -6,7 +6,8 @@
 //! that exists, `conflictBehavior=fail` on anything new, so a guard that fails
 //! comes back as [`WriteError::Changed`] or [`WriteError::NameExists`] and is
 //! never retried unguarded here. A folder delete ([`DriveClient::delete_folder`])
-//! uses the descendant-sensitive folder cTag and puts the whole tree in the recycle bin.
+//! is guarded by the folder's eTag, which covers the folder alone, and puts the whole
+//! tree in the recycle bin.
 //! Throttling (`429`, `503`) comes back as [`WriteError::Throttled`] with the
 //! wait Graph asked for: every step towards OneDrive of the folder waits it out
 //! (`docs/design/writes.md` §6.2), so nothing here sleeps ([`Throttle::Return`]).
@@ -148,8 +149,11 @@ impl DriveClient {
         done(response).await
     }
 
-    /// Deletes a folder into the recycle bin, conditional on its descendant-sensitive
-    /// cTag. A stale tag is 412.
+    /// Deletes a folder, and everything below it, into the recycle bin, guarded by
+    /// `if_match`: the folder's eTag. A stale eTag is 412 (`resourceModified`). On OneDrive
+    /// personal a folder has no cTag, and its eTag changes with its own rename or move
+    /// but not with anything below it (measured 2026-10-29): the guard is of the folder
+    /// alone. An empty tag or `*` is refused here, and nothing is sent.
     pub async fn delete_folder(&self, id: &str, if_match: &str) -> Result<(), WriteError> {
         if if_match.trim().is_empty() || if_match.trim() == "*" {
             return Err(WriteError::Failed("a folder removal requires a specific version tag".into()));

@@ -95,6 +95,9 @@ impl FakeOneDriveCommands {
                 }
             }
             ["bin"] => graph.with(|cloud| cloud.bin.keys().cloned().collect::<Vec<_>>()).join(" "),
+            ["etag", path] => graph.with(|cloud| cloud.at(path).map(|item| item.etag.clone())).unwrap_or_else(|| "absent".into()),
+            // The `If-Match` of the last request to the item `id`.
+            ["guard", id] => graph.with(|cloud| cloud.last_guard(&format!("me/drive/items/{id}"))).unwrap_or_else(|| "none".into()),
             ["count", method, fragment] => graph.with(|cloud| cloud.count(method, fragment)).to_string(),
             ["changes"] => graph.with(|cloud| cloud.log.iter().filter(|(method, _)| method != "GET").count()).to_string(),
             ["delay", method, fragment, ms, times] => {

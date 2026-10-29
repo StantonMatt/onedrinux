@@ -106,12 +106,15 @@ fn retry_after_reads_seconds_and_http_dates() {
 }
 
 #[tokio::test]
-async fn a_folder_delete_carries_its_ctag_and_a_412_is_not_retried() {
+async fn a_folder_delete_carries_its_etag_and_a_412_is_not_retried() {
     let server = MockServer::start().await;
-    Mock::given(method("DELETE")).and(path("/me/drive/items/D")).and(header("if-match", "folder-c1"))
+    // OneDrive's eTag holds a comma: it is sent as it is, one value.
+    Mock::given(method("DELETE")).and(path("/me/drive/items/D"))
         .respond_with(ResponseTemplate::new(412)).expect(1).mount(&server).await;
-    assert!(matches!(client(&server).delete_folder("D", "folder-c1").await, Err(WriteError::Changed)));
-    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    assert!(matches!(client(&server).delete_folder("D", "\"{D},2\"").await, Err(WriteError::Changed)));
+    let received = server.received_requests().await.unwrap();
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0].headers.get("if-match").and_then(|value| value.to_str().ok()), Some("\"{D},2\""));
 }
 
 #[tokio::test]

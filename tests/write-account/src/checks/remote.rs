@@ -9,7 +9,7 @@ impl Run {
         for check in 0..4 {
             if self.guard.refused().is_some() { break; }
             let (name, outcome) = match check {
-                0 => ("folder cTags and stale conditional deletes", self.remote_safety().await),
+                0 => ("folder eTags and conditional folder deletes", self.remote_safety().await),
                 1 => ("createdBy.application identifies this client", self.remote_application().await),
                 2 => ("zero-byte create refuses an existing name", self.empty_file_name_taken().await),
                 _ => ("zero-byte PUT honours If-Match", self.empty_file_if_match().await),
@@ -31,14 +31,22 @@ impl Run {
         }
     }
 
+    /// The contract a folder's removal is built on (`docs/design/writes.md` §4.2), as
+    /// measured on OneDrive personal on 2026-10-29: a folder has no cTag in GET or in delta;
+    /// its eTag stays through a descendant's creation, edit and removal, and changes at its
+    /// own rename and at its move; a DELETE with a stale eTag is refused 412, and one with
+    /// the current eTag is carried out, 204.
     pub(super) async fn remote_safety(&mut self) -> Outcome {
-        let outer = step!("making the guarded parent", self.drive.create_folder(&self.folder, "ctag-parent").await);
+        let outer = step!("making the guarded parent", self.drive.create_folder(&self.folder, "etag-parent").await);
         let inner = step!("making its child folder", self.drive.create_folder(&outer.id, "child").await);
-        let mut before = step!("GET of the folder", self.drive.item(&outer.id).await);
+        let first = step!("GET of the folder", self.drive.item(&outer.id).await);
+        if first.c_tag.as_deref().is_some_and(|tag| !tag.is_empty()) {
+            return Fail("folder GET carries a cTag; the sender guards a folder's removal by its eTag alone".into());
+        }
+        let Some(etag) = first.e_tag.clone().filter(|tag| !tag.is_empty()) else {
+            return Fail("folder GET has no eTag; a folder's removal would wait for one forever".into());
+        };
         for operation in 0..3 {
-            let Some(old_tag) = before.c_tag.as_deref().filter(|tag| !tag.is_empty()) else {
-                return Fail("folder GET has no cTag; default folder deletion must stay blocked".into());
-            };
             let file = if operation == 0 {
                 step!("creating a descendant", self.drive.upload_empty(UploadTarget::New { parent_id: &inner.id, name: "descendant.txt" }, T0).await)
             } else {
@@ -50,28 +58,43 @@ impl Run {
                 step!("removing a descendant", self.drive.delete_item(&file.id, file.e_tag.as_deref().unwrap_or_default()).await);
             }
             let after = step!("GET after descendant change", self.drive.item(&outer.id).await);
-            if after.c_tag.as_deref().filter(|tag| !tag.is_empty()).is_none() || after.c_tag == before.c_tag {
-                return Fail(format!("folder cTag did not change after descendant operation {operation} (create/edit/remove)"));
+            if after.e_tag.as_deref() != Some(etag.as_str()) {
+                return Fail(format!("folder eTag changed after descendant operation {operation} (create/edit/remove); the rows' check after a listing assumes it does not"));
             }
-            match self.drive.delete_folder(&outer.id, old_tag).await {
-                Err(WriteError::Changed) => {},
-                Ok(()) => return Fail("DELETE with a stale folder cTag succeeded; conditional folder deletes are unsafe".into()),
-                Err(error) => return Fail(format!("stale folder DELETE: {error}")),
-            }
-            // Delta is eventually consistent; keep the existing bounded wait and wire budget.
-            let mut matched = false;
-            for attempt in 0..=5 {
-                let listed = step!("folder delta", follow(&self.drive, &self.delta_link).await);
-                if listed.get(&outer.id).is_some_and(|row| row.folder.is_some() && row.c_tag == after.c_tag) {
+        }
+        // Delta is eventually consistent; keep the existing bounded wait and wire budget.
+        let mut matched = false;
+        for attempt in 0..=5 {
+            let listed = step!("folder delta", follow(&self.drive, &self.delta_link).await);
+            if let Some(row) = listed.get(&outer.id).filter(|row| row.folder.is_some()) {
+                if row.c_tag.as_deref().is_some_and(|tag| !tag.is_empty()) {
+                    return Fail("delta carries a folder cTag; the sender guards a folder's removal by its eTag alone".into());
+                }
+                if row.e_tag.as_deref() == Some(etag.as_str()) {
                     matched = true;
                     break;
                 }
-                if attempt < 5 { tokio::time::sleep(self.delta_wait / 5).await; }
             }
-            if !matched { return Fail("delta did not report the folder with its current cTag".into()); }
-            before = after;
+            if attempt < 5 { tokio::time::sleep(self.delta_wait / 5).await; }
         }
-        Pass("GET and delta carry folder cTags; descendant create/edit/remove changes them; stale DELETE is 412".into())
+        if !matched { return Fail("delta did not report the folder with the eTag GET gives".into()); }
+        let renamed = step!("renaming the folder", self.rename(&first, "etag-parent-renamed").await);
+        if renamed.e_tag.as_deref().is_none_or(|tag| tag == etag) {
+            return Fail("folder eTag did not change at its own rename; a stale removal would not be refused".into());
+        }
+        let sibling = step!("making a sibling folder", self.drive.create_folder(&self.folder, "etag-sibling").await);
+        let change = ItemChange { parent_id: Some(&sibling.id), ..ItemChange::default() };
+        let moved = step!("moving the folder", self.drive.update_item(&outer.id, renamed.e_tag.as_deref().unwrap_or_default(), &change).await);
+        if moved.e_tag.is_none() || moved.e_tag == renamed.e_tag {
+            return Fail("folder eTag did not change at its move; a stale removal would not be refused".into());
+        }
+        match self.drive.delete_folder(&outer.id, &etag).await {
+            Err(WriteError::Changed) => {}
+            Ok(()) => return Fail("DELETE with a stale folder eTag succeeded; conditional folder deletes are unsafe".into()),
+            Err(error) => return Fail(format!("stale folder DELETE: {error}")),
+        }
+        step!("DELETE with the current folder eTag", self.drive.delete_folder(&outer.id, moved.e_tag.as_deref().unwrap_or_default()).await);
+        Pass("no folder cTag in GET or delta; the folder eTag stays through descendant create/edit/remove and changes at its rename and move; stale DELETE is 412, current is 204".into())
     }
 }
 

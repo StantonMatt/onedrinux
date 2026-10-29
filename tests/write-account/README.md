@@ -17,13 +17,17 @@ cargo run -p konedrive-write-test --bin konedrive-write-test -- \
   --daemon-config /path/to/test-config.toml --only remote
 ```
 
-This checks folder cTags in GET and delta after nested descendant creation, editing and removal,
-412 on DELETE with each stale folder cTag, zero-byte PUT create conflict behavior and If-Match,
-and `createdBy.application.id` matching the configured client. It writes only below the run's
-folder and puts that folder into the recycle bin at cleanup. A failed stale DELETE check stops
-that check immediately. Do not enable real writes based on fake-server results.
+This checks the folder contract measured on OneDrive personal on 2026-10-29: no folder cTag in
+GET or delta; a folder eTag that a nested descendant's creation, editing and removal leave
+unchanged, and that the folder's own rename and move change; 412 on DELETE with a stale folder
+eTag and 204 with the current one. It also checks zero-byte PUT create conflict behavior and
+If-Match, and `createdBy.application.id` matching the configured client. It writes only below
+the run's folder and puts that folder into the recycle bin at cleanup. A failed stale DELETE
+check stops that check immediately. Do not enable real writes based on fake-server results.
 
-The sender requires folder cTags. Missing folder cTags safely leave deletion blocked.
+The sender guards a folder's removal with the folder's eTag, after a listing of its own and the
+rows' check of everything below (`docs/design/writes.md` §4.2). A folder row with no eTag waits
+for a listing that writes one; nothing is sent without a guard.
 
 # Read-only metadata sample
 

@@ -113,7 +113,9 @@ The directories below are in layer order: a directory uses only the directories 
   panicked (`lock`, `read`, `write`). `[tests]`
 - `tests/fake_onedrive/mod.rs` — the module `fake_onedrive`: an in-memory drive behind a
   wiremock server, for the tests of every layer that talks to OneDrive and for the VM suite
-  (built for tests and with `fault-injection` only).
+  (built for tests and with `fault-injection` only). Its folders answer as OneDrive
+  personal's: no cTag, an eTag only their own rename or move changes, and a recursive
+  `DELETE` refused `412` without their current eTag.
 - `tests/fake_onedrive/sockets.rs` — the fake's notification socket.
 
 ### `crates/konedrived/src/config/`
@@ -436,7 +438,7 @@ The runner of the plan's steps towards OneDrive.
 - `content_upload.rs` — exact sent-byte and final local-generation checks, metadata fallback and holds for hashless completions; a file's content sent: an empty file by one request, any other through
   an upload session, in fragments, gone on with after a stop or a crash. `[tests]`
 - `confirmed_item.rs` — Graph's answer to a step as the commit takes it, and what a request is
-  guarded with. `[tests]`
+  guarded with: a directory's removal by the folder's eTag alone. `[tests]`
 - `graph_refusal.rs` — a refusal of Graph, by what a step does about it. `[tests]`
 - `lost_answers.rs` — what became of a request whose answer was lost: the step adopts what it
   finds. `[tests]`
@@ -1225,8 +1227,8 @@ The program `konedrive-write-test`, a member of the workspace.
 - `src/checks.rs` — what the run checks against OneDrive itself.
 - `src/checks/notifications.rs` — the change notifications.
 - `src/checks/placeholders.rs` — an upload session's placeholder.
-- `src/checks/remote/tests.rs` — mocked descendant create/edit/remove service check.
-- `src/checks/remote.rs` — folder cTags, conditional deletes and application ownership.
+- `src/checks/remote/tests.rs` — the mocked folder contract check: descendant create/edit/remove, rename, move, both deletes.
+- `src/checks/remote.rs` — the folder contract (no cTag, an eTag only the folder's own rename and move change, conditional deletes) and application ownership.
 - `src/token_file.rs` — the explicit owner-only token file reader.
 - `src/bin/metadata-probe.rs` — a read-only metadata presence sample.
 - `src/bin/metadata-probe/tests.rs` — bounded sampling and metadata-only wire requests.
@@ -1307,7 +1309,8 @@ What `docs/kio-behavior.md` was measured with.
 - `docs/code-map.md` — this file.
 
 Remote namespace regression tests: `crates/konedrived/src/onedrive_steps/tests/remote.rs`
-checks folder conditions and atomic saves crossing upload requests, without a mount or account.
+checks a folder removal's eTag guard and listing wait, the window it leaves, a store migrated
+from schema 31, and atomic saves crossing upload requests, without a mount or account.
 
 ### Write defaults and trial scope
 

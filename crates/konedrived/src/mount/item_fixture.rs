@@ -253,10 +253,26 @@ impl ItemFixture {
     pub fn new() -> Self { Self::with_change_guard(None) }
 
     pub(crate) fn with_change_guard(guard: Option<Arc<crate::change_guard::ChangeGuard>>) -> Self {
+        Self::made(guard, false)
+    }
+
+    /// As [`with_change_guard`](Self::with_change_guard), over a store made at schema 31,
+    /// before the unused `onedrive_folder_ctag` column, which the fixture's open migrates.
+    pub(crate) fn migrated_from_schema_31(guard: Option<Arc<crate::change_guard::ChangeGuard>>) -> Self {
+        Self::made(guard, true)
+    }
+
+    fn made(guard: Option<Arc<crate::change_guard::ChangeGuard>>, is_from_schema_31: bool) -> Self {
         let directory = tempfile::tempdir().expect("a temporary directory");
         let (folder, store_path) = (directory.path().join("folder"), directory.path().join("tree.db"));
         fs::create_dir(&folder).expect("the folder");
+        if is_from_schema_31 {
+            drop(TreeStore::open(&store_path).expect("the store"));
+            let conn = rusqlite::Connection::open(&store_path).expect("the store, as schema 31");
+            conn.execute_batch("ALTER TABLE items DROP COLUMN onedrive_folder_ctag; UPDATE meta SET value = '31' WHERE key = 'schema_version';").expect("the store at schema 31");
+        }
         let mut tree_store = TreeStore::open(&store_path).expect("the store");
+        assert_eq!(store_path.with_file_name("tree.db.pre-31").exists(), is_from_schema_31, "the store at schema 31 was migrated, and no other");
         tree_store.set_drive_id(DRIVE_ID).expect("the drive");
         let listing = tree_store.item_store().begin_full_listing().expect("a full listing");
         let root = Change::Root(Row { id: ROOT_ONEDRIVE_ID.into(), parent_id: None, name: String::new(), kind: Kind::Folder, size: 0, mtime: 0, etag: Some("e-R".into()), ctag: None, quickxor: None, mime: None, placement: Placement::Placed });

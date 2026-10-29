@@ -93,7 +93,9 @@ fn thumbnail_type_index() -> String {
 ///   by the writers of a local place, of `is_name_ignored` and of a binding
 ///   ([`crate::item_store`]'s `item_row`), so that the index of what is unsent can leave out
 ///   what is left here without a walk up from each row. `is_executable` is the owner's
-///   executable bit of a file, this computer's alone. A row is made with, and moved to, only a local, an OneDrive and a synced parent that is
+///   executable bit of a file, this computer's alone. `onedrive_folder_ctag` is unused and
+///   always null: schema 32 added it for a folder's cTag, which OneDrive personal never
+///   gives (measured 2026-10-29); the next migration drops it. A row is made with, and moved to, only a local, an OneDrive and a synced parent that is
 ///   the row of a directory (the triggers `items_parent_directory_insert` and
 ///   `items_parent_directory_update`, asked per row, at one read by the key for each side:
 ///   a directory's row is written before what is in it). A row is not deleted while another
@@ -136,6 +138,8 @@ fn schema() -> String {
         key = meta::LAST_UNSENT_SINCE
     );
     let content = |of: &str| format!("{of}_size INTEGER, {of}_mtime INTEGER, {of}_mtime_nsec INTEGER, {of}_hash TEXT, {of}_ctag TEXT, {of}_change_count INTEGER");
+    // `onedrive_folder_ctag` is unused and always null, as the doc above says: it stays
+    // until the next migration drops it, so that a fresh store is the migrated one.
     format!(
         "CREATE TABLE items (
              local_item_id INTEGER PRIMARY KEY AUTOINCREMENT,

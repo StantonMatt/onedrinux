@@ -96,7 +96,7 @@ pub(crate) enum StepRefusal {
     Transient { detail: String },
 }
 
-/// Why a step did not run, on this computer. The first two end by themselves and write
+/// Why a step did not run, on this computer. The first three end by themselves and write
 /// nothing; the other three do not change by themselves, and count a failed try, so that
 /// the same step is not planned again at once for good.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,6 +107,10 @@ pub(crate) enum StepObstacle {
     /// The sending as a whole was stopped between two fragments, or the step's job was
     /// dropped at a stop: the session is kept, and the end of the hold wakes the plan.
     SendingStopped,
+    /// A directory's removal waits for the listing cycle it asked for to end, and sent
+    /// nothing: the listing's end wakes the plan (`onedrive_steps`'
+    /// `run_send_directory_removal`).
+    ListingAwaited,
     /// The file on disk has not the size and the time of the content the step was planned
     /// from, and no writer holds it: seen before the request, or between two fragments.
     ContentChanged,

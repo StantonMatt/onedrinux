@@ -14,7 +14,6 @@ fn versions(number: i64) -> ItemVersions {
         local: None,
         onedrive: None,
         onedrive_etag: None,
-        onedrive_folder_ctag: None,
         synced_place: None,
         synced_content: None,
         content_presence: ContentPresence::OnDisk,

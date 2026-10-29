@@ -19,7 +19,6 @@ fn plan_pin() -> DownloadAsker {
         local: None,
         onedrive: None,
         onedrive_etag: None,
-        onedrive_folder_ctag: None,
         synced_place: None,
         synced_content: None,
         content_presence: konedrive_tree::ContentPresence::NotOnDisk,

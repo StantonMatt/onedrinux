@@ -48,8 +48,7 @@ fn restore_row(tx: &Transaction<'_>, planned: &ItemVersions) -> Result<crate::It
     if !planned.are_those_of(&row) {
         return Err(if planned.local != row.local || planned.unsent_since != row.unsent_since {
             GuardRestoreFailure::LocalChanged
-        } else if !planned.are_onedrive_and_synced_those_of(&row)
-            || planned.onedrive_folder_ctag != row.onedrive_folder_ctag {
+        } else if !planned.are_onedrive_and_synced_those_of(&row) {
             GuardRestoreFailure::RemoteChanged
         } else { GuardRestoreFailure::LocalChanged }.into());
     }

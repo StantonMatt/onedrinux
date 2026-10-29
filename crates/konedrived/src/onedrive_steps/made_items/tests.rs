@@ -40,7 +40,7 @@ async fn a_new_item_whose_row_is_gone_is_removed_in_onedrive() {
 
     assert_eq!(folder.made_items.follow_up_new_item(&file_versions, &made_file).await, RowsChangedFollowUp::MadeItemRemoved(made_file.item.clone()));
     assert_eq!(folder.made_items.follow_up_new_item(&directory_versions, &made_directory).await, RowsChangedFollowUp::MadeItemLeft(made_directory.item.clone()));
-    assert_eq!(folder.graph.with(|cloud| cloud.paths()), ["new"], "a directory with no original folder cTag is kept");
+    assert_eq!(folder.graph.with(|cloud| cloud.paths()), ["new"], "a directory made is kept: nothing proves what is in it is ours");
     // The file's removal is guarded by the eTag of the answer; a directory's has no guard.
     assert_eq!(folder.graph.with(|cloud| cloud.guards.clone()), [("me/drive/items/MADE".to_owned(), made_file.etag.clone())]);
 }

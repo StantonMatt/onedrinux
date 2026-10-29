@@ -36,7 +36,6 @@ fn not_unsent(number: i64) -> ItemVersions {
         local: Some(version.clone()),
         onedrive: Some(ItemVersion { place: Some(place(".konedrive-temporary")), ..version }),
         onedrive_etag: Some("e1".to_owned()),
-        onedrive_folder_ctag: None,
         synced_place: Some(place("report")),
         synced_content: Some(content("agreed")),
         content_presence: ContentPresence::OnDisk,
@@ -130,6 +129,23 @@ fn a_step_that_is_written_forgets_the_tasks_tries_of_it() {
         change_local_step_tries(&mut tries, &[(step, settled)]);
         assert_eq!(tries, LocalStepTries::default());
     }
+}
+
+/// A 404 confirms a directory's removal and says nothing of what was below it: whatever
+/// answered, a written removal of a directory asks for a cycle, and no other written step
+/// does.
+#[test]
+fn a_written_directory_removal_asks_for_a_cycle_and_waiting_for_one_counts_nothing() {
+    let written = StepOutcome::Written { events: Vec::new() };
+    let removal = SyncStep::OneDrive(OneDriveStep::SendDirectoryRemoval { item: unsent(2, 7), below: vec![unsent(3, 8)] });
+    assert_eq!(decide_step_settlement(&removal, &written, 3, NOW).cycle, CycleRequest::Changes);
+    for step in [send_move(unsent(2, 7)), send_content(unsent(2, 7))] {
+        assert_eq!(decide_step_settlement(&step, &written, 0, NOW).cycle, CycleRequest::None);
+    }
+    let awaited = StepOutcome::NotRun(StepObstacle::ListingAwaited);
+    let settled = decide_step_settlement(&removal, &awaited, 3, NOW);
+    assert_eq!((settled.memory.clone(), settled.local_step_tries.clone(), settled.cycle), (Vec::new(), LocalStepTriesChange::Nothing, CycleRequest::None));
+    assert!(!has_changed_anything(&awaited, &settled), "the listing's end wakes the plan; no plan is made for the wait");
 }
 
 #[test]

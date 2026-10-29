@@ -54,13 +54,16 @@ for that explicit retention pruning. Manually deleting a store is not a recovery
 
 Schema 30 to 31 retains the thumbnail-index and `is_written` migration. Schema 31 to 32
 adds nullable `items.onedrive_folder_ctag TEXT` and discards legacy upload-session opening
-windows, whose machine-clock times cannot prove ownership against Graph timestamps.
+windows, whose machine-clock times cannot prove ownership against Graph timestamps. The
+column is unused and always null: OneDrive personal gives folders no cTag (measured
+2026-10-29), and a folder removal is guarded by the folder's eTag ([writes.md](writes.md)
+§4.2). The next migration drops it.
 Every shipped version from 32 onward must retain its sequential migration step. Each
 step's statements and version update run in one transaction, with FULL synchronous
 commits for the migration itself.
 
 Before migration, `VACUUM INTO <store>.pre-<from-version>` includes committed WAL data.
-A temporary snapshot is fsynced, renamed into place, and its parent synced before the
+A temporary snapshot is made 0600, as the store's own files are, fsynced, renamed into place, and its parent synced before the
 original changes. Existing snapshots are retained; a migration retry makes another timestamped snapshot so
 new WAL-only work cannot be missed. A crash before a step's commit leaves
 that step's old version and schema together. A failed migration returns an error and

@@ -93,7 +93,6 @@ fn move_onedrive_side(from: &mut Item, to: &mut Item) {
     to.onedrive_item = from.onedrive_item.take();
     to.onedrive = from.onedrive.take();
     to.onedrive_etag = from.onedrive_etag.take();
-    to.onedrive_folder_ctag = from.onedrive_folder_ctag.take();
     to.onedrive_mime = from.onedrive_mime.take();
     to.placement = std::mem::replace(&mut from.placement, Placement::Placed);
     to.confirmed_at_count = std::mem::take(&mut from.confirmed_at_count);
@@ -164,7 +163,7 @@ pub(crate) fn exchange_bindings(tx: &Transaction<'_>, replacing: LocalItemId, re
     // resolve their original target by binding and therefore follow it to the other row.
     crate::step_memory::exchange_file_bindings(tx, replacing, replaced)?;
     tx.execute("UPDATE items SET synced_parent_id = NULL, synced_name = NULL, synced_size = NULL, synced_mtime = NULL, synced_mtime_nsec = NULL, synced_hash = NULL, synced_ctag = NULL, synced_change_count = NULL WHERE local_item_id IN (?1, ?2)", params![replacing.as_i64(), replaced.as_i64()])?;
-    tx.execute("UPDATE items SET onedrive_drive_id = NULL, onedrive_item_id = NULL, onedrive_parent_id = NULL, onedrive_name = NULL, onedrive_folded_name = NULL, onedrive_size = NULL, onedrive_mtime = NULL, onedrive_mtime_nsec = NULL, onedrive_hash = NULL, onedrive_ctag = NULL, onedrive_etag = NULL, onedrive_mime = NULL, onedrive_folder_ctag = NULL WHERE local_item_id IN (?1, ?2)", params![replacing.as_i64(), replaced.as_i64()])?;
+    tx.execute("UPDATE items SET onedrive_drive_id = NULL, onedrive_item_id = NULL, onedrive_parent_id = NULL, onedrive_name = NULL, onedrive_folded_name = NULL, onedrive_size = NULL, onedrive_mtime = NULL, onedrive_mtime_nsec = NULL, onedrive_hash = NULL, onedrive_ctag = NULL, onedrive_etag = NULL, onedrive_mime = NULL WHERE local_item_id IN (?1, ?2)", params![replacing.as_i64(), replaced.as_i64()])?;
     std::mem::swap(&mut taker.onedrive_item, &mut giver.onedrive_item);
     std::mem::swap(&mut taker.onedrive, &mut giver.onedrive);
     std::mem::swap(&mut taker.onedrive_etag, &mut giver.onedrive_etag);

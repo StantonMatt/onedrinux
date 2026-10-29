@@ -16,7 +16,6 @@ fn own(number: i64, parent: i64, name: &str, kind: ItemKind) -> Item {
         local: Some(ItemVersion { place: Some(ItemPlace { parent_local_item_id: id(parent), name: name.into() }), content }),
         onedrive: None,
         onedrive_etag: None,
-        onedrive_folder_ctag: None,
         onedrive_mime: None,
         synced_place: None,
         synced_content: None,

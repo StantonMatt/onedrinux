@@ -346,6 +346,36 @@ fn a_refresh_forgets_what_was_not_allowed_and_another_wake_keeps_it() {
     });
 }
 
+/// A step that an earlier run left waiting an hour — seven tries "changed in OneDrive
+/// again and again", as a folder's removal the last build refused for lack of a folder
+/// cTag — is tried again as soon as a new run begins, its count kept.
+#[test]
+fn a_run_begins_by_making_every_next_try_the_store_keeps_due() {
+    let task_fixture = TaskFixture::new();
+    let (fixture, task) = (&task_fixture.fixture, &task_fixture.task);
+    let file = fixture.make_own_file("stuck.txt", b"mine");
+    let (id, stamp) = (file.local_item_id, file.unsent_since);
+    let now = (task.parts.clock)();
+    fixture.write_rows(move |store| {
+        for count in 1..=7 {
+            assert_eq!(store.step_memory().remember_failed_try(id, stamp, &Reason::ChangedAgain, Some(now + 3_600))?, konedrive_tree::FailedTryStanding::Counted(count));
+        }
+        Ok(())
+    });
+    let stop = CancellationToken::new();
+    fixture.runtime().block_on(async {
+        let plan = task.make_plan(task.gather_daemon_facts()).await.expect("the store is read");
+        assert!(plan.plan.steps.iter().all(|step| step.local_item_id() != id), "before the run the step waits for its next try");
+        let running = tokio::spawn(Arc::clone(task).run(stop.clone()));
+        task_fixture.wait_for_state("the unsent file after the first plan", |snapshot| snapshot.upload_queue.pending_count == 1).await;
+        fixture.sending_holds.set_listing_ended();
+        task_fixture.wait_for_state("the stuck file sent", |snapshot| snapshot.upload_queue.pending_count == 0).await;
+        stop.cancel();
+        running.await.expect("the loop returns at the stop");
+    });
+    assert!(fixture.find_item(id).unwrap().onedrive_item.is_some(), "the file was sent at the run's first plan, not an hour later");
+}
+
 /// The download of a pinned file of `size` bytes, of the item `number`.
 fn download_step(number: i64, size: u64) -> SyncStep {
     use konedrive_tree::{ContentPresence, ContentVersion, DriveId, ItemPlace, ItemVersion, ItemVersions, OneDriveItemId, OneDriveItemReference};
@@ -359,7 +389,6 @@ fn download_step(number: i64, size: u64) -> SyncStep {
             local: Some(version.clone()),
             onedrive: Some(version),
             onedrive_etag: Some("e1".to_owned()),
-            onedrive_folder_ctag: None,
             synced_place: Some(place),
             synced_content: Some(content),
             content_presence: ContentPresence::NotOnDisk,

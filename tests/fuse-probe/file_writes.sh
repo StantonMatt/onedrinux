@@ -99,9 +99,13 @@ removed_directory_goes_from_onedrive() {
     for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do seed_file K$n R keep$n.txt 'kept'; done
     register_folder
     download docs/a.txt
+    # A folder has no cTag, and only its own rename or move changes its eTag: the removal is sent with that eTag.
+    local etag
+    etag=$(onedrive etag docs)
     user "rm -r docs"
     check_within 30 "OneDrive lacks the directory" onedrive_lacks docs
     check_sent
+    check "the removal was sent with the folder's eTag" "$(onedrive guard D)" "$etag"
     check_holds "OneDrive's bin holds the directory" "$(onedrive bin)" D
     daemon refresh > /dev/null
     sleep 1

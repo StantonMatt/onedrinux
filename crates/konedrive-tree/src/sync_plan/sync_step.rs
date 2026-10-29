@@ -23,8 +23,6 @@ pub struct ItemVersions {
     pub onedrive: Option<ItemVersion>,
     /// What a request to OneDrive about the item is guarded with.
     pub onedrive_etag: Option<String>,
-    /// The descendant-sensitive folder cTag the removal was planned from.
-    pub onedrive_folder_ctag: Option<String>,
     pub synced_place: Option<ItemPlace>,
     pub synced_content: Option<ContentVersion>,
     /// Whether the whole content of a file was on disk: a step planned from a copy on disk
@@ -46,7 +44,6 @@ impl ItemVersions {
             local: item.local.clone(),
             onedrive: item.onedrive.clone(),
             onedrive_etag: item.onedrive_etag.clone(),
-            onedrive_folder_ctag: item.onedrive_folder_ctag.clone(),
             synced_place: item.synced_place.clone(),
             synced_content: item.synced_content.clone(),
             content_presence: item.content_presence,

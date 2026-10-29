@@ -187,6 +187,21 @@ fn migration_31_to_32_keeps_a_wal_inclusive_snapshot_and_a_nullable_folder_ctag(
 }
 
 #[test]
+fn a_migration_snapshot_is_readable_by_its_owner_alone() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = store_path(&dir);
+    drop(TreeStore::open(&path).unwrap());
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch("ALTER TABLE items DROP COLUMN onedrive_folder_ctag; UPDATE meta SET value='31' WHERE key='schema_version';").unwrap();
+    drop(conn);
+    // A desktop session's umask lets others read what VACUUM INTO makes.
+    drop(TreeStore::open(&path).unwrap());
+    let mode = std::fs::metadata(beside(&path, ".pre-31")).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+}
+
+#[test]
 fn migration_31_to_32_discards_machine_clock_upload_openings() {
     let dir = tempfile::tempdir().unwrap();
     let path = store_path(&dir);

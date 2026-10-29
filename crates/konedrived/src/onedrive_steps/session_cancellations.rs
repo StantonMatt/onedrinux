@@ -86,8 +86,9 @@ pub(crate) struct CancellationRound {
     /// nothing does.
     pub(crate) next_try_at: Option<i64>,
     /// How many request records went with nothing learnt, because OneDrive refuses the
-    /// read for certain (counted in `done_count` too): the caller asks the listing for a
-    /// cycle, which brings what OneDrive has.
+    /// read for certain, or were a directory's removal that went through (counted in
+    /// `done_count` too): the caller asks the listing for a cycle, which brings what
+    /// OneDrive has.
     pub(crate) left_to_listing_count: usize,
 }
 
@@ -370,7 +371,7 @@ impl SessionCancellations {
             }
             let outcome = match self.lost_answers.settle_lost_answer(&record).await {
                 Ok(SettledRecord::Settled) => CleanedOutcome::Done,
-                Ok(SettledRecord::LeftToListing) => {
+                Ok(SettledRecord::LeftToListing | SettledRecord::SettledListingWanted) => {
                     round.left_to_listing_count += 1;
                     CleanedOutcome::Done
                 }

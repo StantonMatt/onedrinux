@@ -402,8 +402,6 @@ pub struct Item {
     pub onedrive: Option<ItemVersion>,
     /// The eTag OneDrive gave with that version: what a request to OneDrive is guarded with.
     pub onedrive_etag: Option<String>,
-    /// The folder cTag covers changes anywhere below it; never substituted by its eTag.
-    pub onedrive_folder_ctag: Option<String>,
     /// The MIME type OneDrive gives for the content of a file it has (`file.mimeType`), as a
     /// listing said it: what tells an image or a video, for a thumbnail. `None` for a
     /// directory, for an item OneDrive does not have, and until a listing said it.

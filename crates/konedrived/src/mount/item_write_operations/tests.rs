@@ -81,7 +81,6 @@ pub(super) fn make_row(id: i64, kind: ItemKind) -> Item {
         local: Some(ItemVersion { place: Some(ItemPlace { parent_local_item_id: LocalItemId::ROOT, name: format!("item-{id}").into() }), content }),
         onedrive: None,
         onedrive_etag: None,
-        onedrive_folder_ctag: None,
         onedrive_mime: None,
         synced_place: None,
         synced_content: None,

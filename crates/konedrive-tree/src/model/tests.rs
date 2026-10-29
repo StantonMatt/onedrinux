@@ -46,7 +46,6 @@ fn file_item(onedrive_item: bool, presence: ContentPresence, local: &str, synced
         local: Some(ItemVersion { place: Some(place.clone()), content: Some(content(local)) }),
         onedrive: None,
         onedrive_etag: None,
-        onedrive_folder_ctag: None,
         onedrive_mime: None,
         synced_place: synced.map(|_| place),
         synced_content: synced.map(content),

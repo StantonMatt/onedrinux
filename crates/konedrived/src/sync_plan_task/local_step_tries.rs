@@ -165,7 +165,7 @@ pub(crate) struct LocalStepTries {
 /// eTag is not asked, nor the stamp of what is unsent: neither tells one piece of such
 /// work from another. Pure.
 pub(crate) fn is_same_work(planned_from: &ItemVersions, now: &ItemVersions) -> bool {
-    let ItemVersions { local_item_id, onedrive_item, local, onedrive, onedrive_etag: _, onedrive_folder_ctag: _, synced_place, synced_content, content_presence, unsent_since: _ } = planned_from;
+    let ItemVersions { local_item_id, onedrive_item, local, onedrive, onedrive_etag: _, synced_place, synced_content, content_presence, unsent_since: _ } = planned_from;
     *local_item_id == now.local_item_id
         && *onedrive_item == now.onedrive_item
         && *local == now.local

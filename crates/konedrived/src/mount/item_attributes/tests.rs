@@ -20,7 +20,6 @@ pub(in crate::mount) fn shown_item(number: i64, kind: ItemKind, content: Option<
         local: Some(ItemVersion { place: Some(ItemPlace { parent_local_item_id: LocalItemId::ROOT, name: format!("item-{number}").into() }), content }),
         onedrive: None,
         onedrive_etag: None,
-        onedrive_folder_ctag: None,
         onedrive_mime: None,
         synced_place: None,
         synced_content: None,

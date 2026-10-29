@@ -1,9 +1,11 @@
 //! A fake OneDrive for the daemon's tests (`listing/`, `mount/`, `onedrive_steps/`, `account_folder/`) and the VM
 //! suite (built with `fault-injection`): an in-memory drive behind a
 //! wiremock server, answering the requests `DriveClient` makes as Graph
-//! documents them — `If-Match` on eTag or cTag, `409` on a name taken
-//! (without case), a folder's cTag changing with anything below it, deletes
-//! to a recycle bin, upload sessions with `Content-Range` — a new file's
+//! documents them and OneDrive personal answers them — `If-Match` on a file's eTag or
+//! cTag, `409` on a name taken (without case), folders with no cTag and an eTag that moves
+//! at their own rename or move and at nothing below them, a folder's delete only with
+//! `If-Match` of its eTag and with everything below it, deletes to a recycle bin, upload
+//! sessions with `Content-Range` — a new file's
 //! session holding its name with an empty file until it completes or
 //! is cancelled, as OneDrive's does. It serves the drive's notification
 //! endpoint and a local Engine.IO / Socket.IO websocket that sends a `notification` event
@@ -169,7 +171,11 @@ impl Cloud {
         format!("{prefix}-{id}-v{}", self.counter)
     }
 
-    pub fn add(&mut self, item: FakeItem) {
+    /// `item` is in the drive; a folder's has no cTag, whatever it was given.
+    pub fn add(&mut self, mut item: FakeItem) {
+        if item.folder {
+            item.ctag.clear();
+        }
         self.changes.push(item.id.clone());
         let parent = item.parent.clone();
         self.items.insert(item.id.clone(), item);
@@ -242,14 +248,15 @@ impl Cloud {
             .find(|i| i.parent.as_deref() == Some(parent) && i.name.to_lowercase() == lower && Some(i.id.as_str()) != except)
     }
 
-    /// A change inside a folder changes its cTag, and its parents'.
+    /// A change inside a folder lists it, and its parents, again in the delta feed; their
+    /// eTags stay, and none has a cTag (measured on OneDrive personal, 2026-10-29). The
+    /// count of tags goes on as for a tag given.
     fn touch_above(&mut self, parent: Option<String>) {
         let mut at = parent;
         while let Some(id) = at {
-            let ctag = self.tag("c", &id);
-            let Some(folder) = self.items.get_mut(&id) else { break };
-            folder.ctag = ctag;
-            at = folder.parent.clone();
+            self.counter += 1;
+            self.changes.push(id.clone());
+            at = self.items.get(&id).and_then(|folder| folder.parent.clone());
         }
     }
 
@@ -366,6 +373,11 @@ impl Cloud {
         self.placeholders.clear();
     }
 
+    /// The `If-Match` the last request to `path` (`me/drive/items/D`) was sent with.
+    pub fn last_guard(&self, path: &str) -> Option<String> {
+        self.guards.iter().rev().find(|(guarded, _)| guarded == path).map(|(_, tag)| tag.clone())
+    }
+
     pub fn count(&self, method: &str, fragment: &str) -> usize {
         self.log.iter().filter(|(m, p)| m == method && p.contains(fragment)).count()
     }
@@ -415,10 +427,12 @@ impl Cloud {
             "id": item.id,
             "name": item.name,
             "eTag": item.etag,
-            "cTag": item.ctag,
             "size": item.size,
             "fileSystemInfo": { "lastModifiedDateTime": format_graph_time(item.mtime) },
         });
+        if !item.folder {
+            value["cTag"] = json!(item.ctag);
+        }
         if let Some(created) = self.created.get(&item.id) {
             value["createdDateTime"] = json!(format_graph_time(*created));
             value["lastModifiedDateTime"] = json!(format_graph_time(*created));
@@ -448,10 +462,11 @@ impl Cloud {
         ResponseTemplate::new(status).set_body_json(self.json(&self.items[id]))
     }
 
-    /// Whether `if_match` lets a change of `item` through: OneDrive takes its eTag or its
-    /// cTag (measured on OneDrive personal, 2026-10-14).
+    /// Whether `if_match` lets a change of `item` through: OneDrive takes a file's eTag or
+    /// its cTag (measured on OneDrive personal, 2026-10-14), and a folder's eTag, as it has
+    /// no cTag (2026-10-29). No `If-Match` lets any change through but a folder's delete.
     fn guard(item: &FakeItem, if_match: Option<&str>) -> bool {
-        if_match.is_none_or(|tag| tag == item.etag || tag == item.ctag)
+        if_match.is_none_or(|tag| tag == item.etag || (!item.folder && tag == item.ctag))
     }
 
     fn below(&self, id: &str) -> Vec<String> {
@@ -640,8 +655,9 @@ impl Cloud {
             return ResponseTemplate::new(204);
         }
         let Some(item) = self.items.get(id).cloned() else { return error(404, "itemNotFound") };
-        if (item.folder && if_match.is_none_or(|tag| tag.trim().is_empty())) || !Self::guard(&item, if_match) {
-            return error(412, "preconditionFailed");
+        // A folder's delete takes everything below it: never without its eTag.
+        if (item.folder && if_match.is_none()) || !Self::guard(&item, if_match) {
+            return error(412, "resourceModified");
         }
         for below in self.below(id) {
             if let Some(gone) = self.items.remove(&below) {

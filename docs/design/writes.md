@@ -142,7 +142,7 @@ not sent (`sync_plan/sending_obstacle.rs`, `find_sending_obstacle`), the first t
 | A refusal the step memory keeps (for good, or for lack of space) | the step memory ([sync.md](sync.md) §7) | Not sent again until the user changes the item, or space is found |
 | OneDrive is full | `OneDriveSpace` (§4.7) | No content is sent; moves, removals and new folders go on |
 | The quiet time: the content changed less than 2 seconds ago | `plan_input::QUIET_TIME` | Sent when it ends, so that a program that saves in several writes is not sent half-way |
-| A next try that is not due | the step memory | Sent at that time |
+| A next try that is not due | the step memory | Sent at that time, or at once when the sync starts again or a refresh is asked for: the count is kept, so a step that fails again waits from it |
 
 Besides, an item a program holds open for writing waits (`Reason::OpenForWriting`) until its last
 close, and a step whose content changed between the plan and the read is not run
@@ -201,7 +201,7 @@ must outlive a crash before its request, sends with no lock held and commits und
 | `SendContent` | `POST /items/{id}/createUploadSession` with `conflictBehavior: replace` and `fileSystemInfo`, then the fragments | `If-Match` |
 | `SendMove` | `PATCH /items/{id}` with only what differs: `name`, `parentReference.id` | `If-Match` |
 | `SendFileRemoval` | `DELETE /items/{id}`, into the recycle bin | `If-Match` |
-| `SendDirectoryRemoval` | `DELETE /items/{id}`, the directory whole, into the recycle bin | the planned folder cTag in `If-Match` |
+| `SendDirectoryRemoval` | `DELETE /items/{id}`, the directory whole, into the recycle bin | the planned folder eTag in `If-Match`, after a listing of its own |
 | a session's status, its cancel | `GET`, `DELETE` of the upload URL | — |
 
 A `SendMove` for which nothing differs from where the row says OneDrive has the item (an answer
@@ -224,15 +224,44 @@ OneDrive takes either tag in `If-Match`.
   cTag: a rename or a move made in OneDrive meanwhile does not hold the upload back, and neither
   does the eTag OneDrive raises when a session is opened with the file's time.
 - **A new item**: `conflictBehavior: fail`, so a name that is taken is answered `409`.
-- **A directory's removal** first asks for a listing cycle begun after the removal was
-  observed. It uses the folder cTag from that listing, which must cover descendant changes.
-  The store still checks every known descendant, the listing state and outstanding requests
-  (`ItemStore::can_directory_removal_be_sent`); `If-Match` then covers a change after those
-  checks. A missing or empty folder cTag waits for another listing. There is no unconditional
-  DELETE retry. A `412` asks for a listing, so an unseen child is re-shown instead of removed.
-  Personal OneDrive's semantics must pass the guarded live checks before enabling real writes.
-  Cleanup of a newly created directory whose commit failed keeps the orphan because it has
-  no saved folder cTag from the creation response.
+- **A directory's removal** (`decide_folder_guard`): the folder's eTag from the version
+  planned from, and nothing else. Measured on OneDrive personal on 2026-10-29: a folder has no
+  cTag, in GET, `$select`, `/children` or delta; its eTag does not change when anything below
+  it is created, edited, renamed or removed, and changes at its own rename and at its move;
+  the eTag in delta is the one GET gives; `DELETE` honours `If-Match` with it, `412` for a stale
+  or made-up eTag and `204` for the current one, and takes everything below to the recycle
+  bin. So the eTag guards the folder alone, and what is below is checked by the rows:
+  - every attempt waits for a listing cycle of its own. Its first look notes the count of
+    listings begun and asks for a cycle; while it waits the step is
+    `NotRun(ListingAwaited)`, which the listing's end wakes. A listing under way at that look
+    is not the one: it began before. Only a look within 10 seconds of the listing's end
+    (`DIRECTORY_REMOVAL_LISTING_FRESH_SECONDS`, against `last_checked`, which the cycle writes
+    as it ends) uses the wait up. A later one, after the change guard's quiet time, a pause,
+    a throttle or a sign-out held the step, begins a new wait; a hold that stops the step
+    before it looks forgets the wait. The end counts, not how long the listing took, and the
+    end wakes the step, so a slow listing still uses the wait up. A wait is used up by the
+    attempt that ends it, whatever comes of it (a hold, rows that changed, a failure, a
+    `412`), and the next attempt waits for another;
+  - then, under the tree lock, the store checks every known descendant, the listing state
+    and outstanding requests (`ItemStore::can_directory_removal_be_sent`). An item the
+    listing brought below the directory, or changed or removed there, holds the removal back
+    (`RowsChanged`), and the plan decides again (`IsOfFolderAlone`);
+  - `If-Match` then covers a rename or move of the folder after those checks: `412` is
+    `ItemChanged`, which asks for a listing; the listing writes the new eTag and the next
+    plan decides. There is no unconditional DELETE.
+
+  The window left is from when that listing read the folder's items to the DELETE: seconds as a
+  rule, longer when it was a full listing cut off part-way (a failed cycle) and carried on later
+  under its id, whose early pages are then as old as the interruption. What another device puts
+  below the folder then goes with it, into the recycle bin inside the folder, where the
+  user's Restore finds it for 30 days on a personal account. A folder row with no eTag is
+  `AnswerUnreadable`, as a file with no guard is: it waits for a listing that writes one, and
+  nothing is sent. A written removal asks for a listing cycle: a `404` says nothing of what
+  was below, and an item moved out of the folder meanwhile is listed again rather than
+  recorded as gone. So does one whose answer was lost and that a later read finds went
+  through (`SettledRecord::SettledListingWanted`). Cleanup of a newly created directory whose
+  commit failed keeps the orphan: its removal would take all below it, and nothing OneDrive
+  gives proves that what is in it is ours.
 
 A `412` means the item changed in OneDrive: the step reads once whether its own earlier request
 went through (§4.5), and otherwise ends `ItemChanged`, which asks for a listing. OneDrive moves an
@@ -354,7 +383,8 @@ A step whose commit finds the rows changed after it made a directory or a file
 OneDrive; when it is still there, a listing brings the made item and the plan compares the two.
 A file cleanup is persisted in the leftover queue before guard admission, and is retried
 after deferral or restart. Success, disappearance or a newer remote version settles its
-synthetic guard entry too. A directory without its original folder cTag stays for listing.
+synthetic guard entry too. A directory made stays for a listing: no folder tag covers what is
+below it.
 
 ### 4.6 What the answers mean
 
@@ -365,8 +395,8 @@ follows, the one place that counts tries ([sync.md](sync.md) §7).
 |---|---|
 | `200`, `201` | the commit |
 | `409` | a new file: §4.4. A directory: an empty directory there that no row is bound to is this step's own and is adopted. Otherwise `NameTaken`: the name and its holder as OneDrive spells it are kept, a listing is asked for, and the plan decides between the two (§5) |
-| `412` | §4.2 |
-| `404` | the item is gone (`ItemGone`) or the directory sent into is (`DirectoryGone`): a listing is asked for. For a removal, the item is gone: done |
+| `412` | §4.2. Counted as a failed try (`changed in OneDrive again and again`), each waiting twice as long, to an hour, and shown with that reason in the queue |
+| `404` | the item is gone (`ItemGone`) or the directory sent into is (`DirectoryGone`): a listing is asked for. For a removal, the item is gone: done; for a directory's, a listing is asked for too |
 | `507`, `quotaLimitReached` | §4.7 |
 | `413` | the file is larger than OneDrive takes: a refusal for good (`too-large`), its session given up |
 | `400` | a refusal for good, with OneDrive's message |
@@ -579,8 +609,10 @@ cargo run -p konedrive-write-test --bin konedrive-write-test -- --graph-test-dri
 rm /tmp/kd-rw.token /tmp/kd-ro.token
 ```
 
-`--only remote` checks folder cTags in GET and delta after descendant create/edit/remove,
-412 on stale folder DELETE, zero-byte PUT guards and `createdBy.application.id`. It uses
+`--only remote` checks the folder contract of §4.2: no folder cTag in GET or delta, a folder
+eTag unchanged by a descendant's create/edit/remove and changed by the folder's own rename and
+move, 412 on a DELETE with a stale folder eTag and 204 with the current one; and zero-byte PUT
+guards and `createdBy.application.id`. It uses
 the write token only and retains every allowlist and wire guard. These checks are written
 but have not been run against any account as part of this change.
 
@@ -614,13 +646,17 @@ What the code relies on, and the check of §8.1 that asks it of OneDrive:
 | a rename in OneDrive during a session does not stop its last fragment | "a rename in OneDrive during a session" |
 | a content guarded by its cTag passes a rename and is refused after an edit | "a content guarded by its cTag" |
 | a removal goes to the recycle bin | "a delete goes to the recycle bin" |
+| a folder has no cTag; its eTag changes at its own rename and move and at nothing below it; a folder `DELETE` honours `If-Match` with it | `--only remote`, "folder eTags and conditional folder deletes" |
 | a token refreshed after the switch back to read-only cannot write | "the token exported after the switch back" |
 | the delta listing returns the daemon's own changes with the eTags they were answered with | "delta returns the run's own changes" |
 | an open session holds its name with an empty file, and its cancel frees it | `--only placeholders` |
 
 Measured and written where the code relies on it: a personal drive refuses `fileSize` in a
 session request (F39); OneDrive takes 250 GiB in one file; OneDrive moves an eTag with no change
-of content; `If-Match` takes a cTag as well as an eTag.
+of content; `If-Match` takes a cTag as well as an eTag. On 2026-10-29, on the user's own
+personal account in scratch folders only: no folder carries a cTag; a folder's eTag is not
+changed by anything below it and is changed by its own rename and move; a folder `DELETE` with
+a stale eTag is `412`, with the current one `204`, and is recursive.
 
 ## 10. Known limits
 

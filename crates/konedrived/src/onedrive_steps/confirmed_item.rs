@@ -18,6 +18,7 @@
 // test: the_guard_is_the_etag_planned_from_else_the_ctag_of_the_synced_content
 // test: an_item_with_neither_has_no_guard
 // test: the_guard_of_a_content_is_the_ctag_of_onedrives_content_else_the_synced_ones_else_the_etag
+// test: the_guard_of_a_directorys_removal_is_its_etag_alone
 // test: a_guard_matches_an_item_by_the_tag_it_names
 // test: the_guard_of_an_answer_is_its_etag_else_its_ctag
 // test: a_name_that_is_not_utf8_is_refused_for_good_and_any_other_is_given_as_it_is
@@ -72,6 +73,14 @@ pub(crate) fn to_graph_name(name: &OsStr) -> Result<&str, StepRefusal> {
 pub(crate) fn decide_guard(item: &ItemVersions) -> Option<RequestGuard> {
     let synced_ctag = || find_ctag(item.synced_content.as_ref()).map(RequestGuard::CTag);
     item.onedrive_etag.clone().map(RequestGuard::ETag).or_else(synced_ctag)
+}
+
+/// What the removal of `item`'s directory is guarded with: the eTag of the OneDrive
+/// version it was planned from, and nothing else. OneDrive personal gives a folder no
+/// cTag, and its eTag moves at the folder's own rename or move, never at a change below
+/// it (measured 2026-10-29). `None` for a directory with no eTag, or an empty one. Pure.
+pub(crate) fn decide_folder_guard(item: &ItemVersions) -> Option<RequestGuard> {
+    item.onedrive_etag.clone().filter(|tag| !tag.is_empty()).map(RequestGuard::ETag)
 }
 
 /// What a request that sends a content into `item`'s item of OneDrive is guarded with:

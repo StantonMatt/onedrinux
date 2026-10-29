@@ -372,7 +372,9 @@ security](#5-account-and-security), [the desktop](#6-the-desktop), [testing](#7-
 
 ### 3.10 Preserve stores across upgrades and downgrades
 
-- **Decision.** Schema 30 to 31 stays supported; 31 to 32 adds nullable folder cTags. Every
+- **Decision.** Schema 30 to 31 stays supported; 31 to 32 adds a nullable folder cTag column,
+  unused and always null since OneDrive personal gives folders no cTag (§4.4); the next
+  migration drops it. Every
   shipped step from 32 onward remains in a sequential transaction/version chain, after a
   durable WAL-inclusive snapshot. Unsupported older or damaged stores are renamed to quarantine,
   readable pins restored, and unsent moves/removals exported without replay. Newer layouts
@@ -444,23 +446,37 @@ answer a user already knows, it is followed.
 ### 4.3 Every write is guarded
 
 - **Decision.** `If-Match` on every change of an item OneDrive has, `conflictBehavior=fail` on
-  everything new. Nothing is sent without its guard. Folder removals use the descendant-sensitive cTag (§4.4).
+  everything new. Nothing is sent without its guard. A folder removal uses the folder's eTag after a listing of its own (§4.4).
 - **Why.** It is the only way two writers cannot overwrite each other, and with the record of every
   request (§3.5) it makes every step safe to try again. A session's guard holds to its end:
   OneDrive refuses its last fragment when the item's content changed since the session was opened,
   and keeps that change.
 - **Trade-off.** A refused guard costs a listing before the plan decides (§3.6).
 
-### 4.4 A directory removal uses the folder cTag after a listing cycle
+### 4.4 A directory removal uses the folder's eTag after a listing cycle of its own
 
-- **Decision.** Refresh the listing before the first attempt, keep the folder's cTag from that
-  listing, and send it in `If-Match`. Keep the positive checks of the known subtree and busy
-  requests before sending and at commit. A missing cTag holds deletion; 412 refreshes the listing.
-- **Why.** Local rows cannot see a descendant created or changed after their last listing.
-  A descendant-sensitive server condition must cover that gap, including nested edits.
-- **Trade-off.** Personal OneDrive's folder cTag and DELETE behavior still need the guarded
-  live checks. Unknown created
-  directories are kept as orphans when cleanup lacks their original cTag. See writes.md §4.2.
+- **Decision.** Every attempt waits for a listing cycle begun after it first looked, which it
+  asks for, then checks the known subtree and busy requests in the rows under the tree lock,
+  then sends `If-Match` with the folder's eTag. A wait is used up by its attempt, whatever
+  comes of it, and only by a look within 10 seconds of the listing's end: a hold between the
+  end and the look (the change guard's quiet time, a pause, a throttle, a sign-out) makes the
+  attempt wait for another listing. A folder row with no eTag waits for a listing; a 412
+  refreshes the listing and the plan decides again; a written removal asks for a listing too.
+- **Why.** Measured on OneDrive personal on 2026-10-29: folders have no cTag, in GET or delta;
+  a folder's eTag is not changed by anything below it, and is changed by its own rename and
+  move; a folder DELETE honours `If-Match` with it (412 when stale) and is recursive. No
+  server condition covers descendants, so the rows, freshly listed, must; the eTag covers the
+  folder itself. The earlier design required a descendant-sensitive folder cTag (Graph's
+  documentation), which personal OneDrive never gives, so every folder removal was refused.
+- **Trade-off.** A window from when the listing read the folder's items to the DELETE, seconds
+  long as a rule; longer when that listing was a full listing cut off part-way and carried on
+  later under its id, whose early pages are then as old as the interruption: an item another
+  device puts below the folder then goes with it to the recycle bin, inside the folder,
+  restorable for 30 days. Rejected: a fresh walk of the subtree before the DELETE (one request per
+  directory, a window that is still not closed), a `childCount` pre-check (false mismatches on
+  OneNote packages and ignored names), and deleting bottom-up item by item (a request per item,
+  and a recycle bin of loose items instead of one folder). Unknown created directories are
+  kept as orphans: no tag proves what is below them is ours. See writes.md §4.2.
 
 ### 4.5 A removal is sent as any change is, with no local trash and no confirmation
 

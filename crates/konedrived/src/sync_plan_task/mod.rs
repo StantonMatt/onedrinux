@@ -7,7 +7,12 @@
 //! steps the store keeps no try of — towards the folder, of the rows, towards OneDrive
 //! from a row that is not unsent, and a try the store could not be written
 //! ([`LocalStepTries`], which says why they are kept here and not in the store); nothing
-//! a restart must find again: after one, such a step is tried again at once. Everything else has an owner of its own: the steps running
+//! a restart must find again: after one, such a step is tried again at once. So is a step
+//! whose tries the store keeps: a run begins by making every next try the store keeps due
+//! ([`make_next_tries_due`](SyncPlanTask::make_next_tries_due)), its count and its
+//! reason kept, as a refresh does. The waits were decided by an earlier run, perhaps of
+//! another build whose refusals no longer stand, and a step that fails again waits from
+//! its kept count. Everything else has an owner of its own: the steps running
 //! (`RunningSteps`), what holds all sending (`SendingHolds`), whether OneDrive is full
 //! (`OneDriveSpace`), the last plan's answers (`PublishedPlan`) — and the rows and the
 //! step memory, read at each plan.
@@ -71,6 +76,7 @@
 //! holds:
 // test: a_refresh_reads_the_quota_once_and_a_quota_read_by_another_is_not_read_again
 // test: a_refresh_forgets_what_was_not_allowed_and_another_wake_keeps_it
+// test: a_run_begins_by_making_every_next_try_the_store_keeps_due
 // test: the_progress_tick_comes_a_second_on_while_a_step_sends_content_and_at_no_other_time
 // test: the_queues_status_is_published_from_the_rows_the_answers_and_the_running_uploads
 // test: the_status_is_published_after_a_plan_and_after_a_settled_round_and_the_marks_once_the_step_is_ended
@@ -372,6 +378,7 @@ impl SyncPlanTask {
             }
         };
         self.note_first_filling(FirstFillingFact::RunBegan { has_listing_ended_before }).await;
+        self.make_next_tries_due().await;
         let mut steps_left_to_start: Vec<SyncStep> = Vec::new();
         let mut next_wake = None;
         // The first round is one of a time reached: a plan is made.
@@ -500,6 +507,17 @@ impl SyncPlanTask {
         }
     }
 
+    /// Every item that waits until a time is due now, with its count and its reason kept:
+    /// what the store keeps (`StepMemory::clear_next_tries`, a failure of which is a
+    /// warning) and the task's own tries (`LocalStepTries::clear_next_tries`). At a refresh,
+    /// and when the run begins.
+    async fn make_next_tries_due(&self) {
+        if let Err(error) = self.parts.store.call(|store| store.step_memory().clear_next_tries()).await {
+            tracing::warn!("cannot make the next tries due: {error}");
+        }
+        crate::panic::lock(&self.local_step_tries).clear_next_tries();
+    }
+
     /// Applies what a wake's causes ask before the plan is made: a read of the quota that
     /// is due, or that a refresh asks for (`onedrive_space::decide_is_quota_read`;
     /// `quota_reader`, `OneDriveSpace::apply_quota`, then
@@ -541,10 +559,7 @@ impl SyncPlanTask {
             if let Err(error) = parts.store.call(|store| store.step_memory().forget_refusals_for(&Reason::Forbidden)).await {
                 tracing::warn!("cannot forget what OneDrive refused as not allowed: {error}");
             }
-            if let Err(error) = parts.store.call(|store| store.step_memory().clear_next_tries()).await {
-                tracing::warn!("cannot make the next tries due: {error}");
-            }
-            crate::panic::lock(&self.local_step_tries).clear_next_tries();
+            self.make_next_tries_due().await;
         }
         if causes.contains(&WakeCause::ListingEnded) {
             parts.sending_holds.set_listing_ended();
@@ -602,7 +617,7 @@ impl SyncPlanTask {
                         _ => cancellations.settle_request_records(1).await,
                     };
                     next_tries[kind] = round.next_try_at;
-                    // A record OneDrive refuses to be read for: the listing brings what became of its request.
+                    // A record OneDrive refuses to be read for, or a directory's removal that went through: the listing brings what OneDrive has.
                     if round.left_to_listing_count > 0 {
                         task.parts.poll.refresh();
                     }

@@ -10,7 +10,7 @@
 //!
 //! | Outcome | Step memory | Else |
 //! |---|---|---|
-//! | `Written`, towards OneDrive | — (its commit forgot the tries, the session it was told ended, the temporary name) | the events; a throttle's chosen wait reset |
+//! | `Written`, towards OneDrive | — (its commit forgot the tries, the session it was told ended, the temporary name) | the events; a throttle's chosen wait reset; for `SendDirectoryRemoval` a cycle asked for |
 //! | `Written`, towards the folder or of the rows | — | the task's tries of the step forgotten; the events |
 //! | `RowsChanged(Nothing)` | — | — (the next plan decides) |
 //! | `RowsChanged(CycleWanted \| MadeItemLeft)` | — | a cycle asked for |
@@ -26,7 +26,7 @@
 //! | `Refused(SignedOut)` | — (no try counted) | all sending held until the sign-in |
 //! | `Refused(Forbidden \| RefusedForGood \| TooLarge)` | `remember_refusal`, with `RefusedVersion::Shown` of the local version sent, or `Removal` for a removal | the event, once per reason |
 //! | `Refused(Locked \| UploadSessionGone \| Transient)` | `remember_failed_try(reason, next)` | — |
-//! | `NotRun(OpenForWriting \| SendingStopped)` | — | — (the close, or the end of the hold, wakes the plan) |
+//! | `NotRun(OpenForWriting \| SendingStopped \| ListingAwaited)` | — | — (the close, the end of the hold, or the listing's end wakes the plan) |
 //! | `NotRun(ContentChanged \| BackingFileMissing \| PlaceHeldOnDisk)` | `remember_failed_try(reason, next)` | the journal: none of them ends by itself |
 //! | `Failed(UndoFailed)` | — | the mount's take-down was asked for by the runner |
 //! | `Failed(Store)` | `remember_failed_try(Store, next)` | the journal |
@@ -60,6 +60,7 @@
 // test: the_next_try_is_a_second_after_the_first_failure_and_doubles_to_an_hour
 // test: a_failed_try_of_a_step_towards_onedrive_is_the_stores_and_any_other_the_tasks
 // test: a_step_that_is_written_forgets_the_tasks_tries_of_it
+// test: a_written_directory_removal_asks_for_a_cycle_and_waiting_for_one_counts_nothing
 // test: a_failed_try_of_a_step_towards_onedrive_from_a_row_that_is_not_unsent_is_the_tasks
 // test: what_onedrive_refuses_of_a_row_that_is_not_unsent_is_a_failed_try_of_the_tasks
 // test: a_settlement_the_store_could_not_be_written_is_a_try_the_task_keeps
@@ -228,6 +229,10 @@ pub(crate) fn decide_step_settlement(step: &SyncStep, outcome: &StepOutcome, tri
             settlement.went_through = is_towards_onedrive;
             // Whatever the task kept of the step: its own tries, or one the store could not be written.
             settlement.local_step_tries = LocalStepTriesChange::Forgotten;
+            // A directory's removal answered by a 404 says nothing of what was below: an item moved out of it in OneDrive meanwhile is listed again.
+            if matches!(step, SyncStep::OneDrive(OneDriveStep::SendDirectoryRemoval { .. })) {
+                settlement.cycle = CycleRequest::Changes;
+            }
         }
         StepOutcome::RowsChanged(RowsChangedFollowUp::Nothing | RowsChangedFollowUp::MadeItemRemoved(_)) => {}
         StepOutcome::RowsChanged(RowsChangedFollowUp::CycleWanted | RowsChangedFollowUp::MadeItemLeft(_)) => settlement.cycle = CycleRequest::Changes,
@@ -280,7 +285,7 @@ pub(crate) fn decide_step_settlement(step: &SyncStep, outcome: &StepOutcome, tri
             StepRefusal::UploadSessionGone => count_failed_try(&mut settlement, Reason::SessionEnded),
             StepRefusal::Transient { .. } => count_failed_try(&mut settlement, Reason::Network),
         },
-        StepOutcome::NotRun(StepObstacle::OpenForWriting | StepObstacle::SendingStopped) => {}
+        StepOutcome::NotRun(StepObstacle::OpenForWriting | StepObstacle::SendingStopped | StepObstacle::ListingAwaited) => {}
         StepOutcome::NotRun(StepObstacle::ContentChanged) => count_failed_try(&mut settlement, Reason::Changed),
         StepOutcome::NotRun(StepObstacle::BackingFileMissing | StepObstacle::PlaceHeldOnDisk { .. }) => count_failed_try(&mut settlement, Reason::LocalIo),
         StepOutcome::Failed(StepFailure::UndoFailed { .. }) => {}

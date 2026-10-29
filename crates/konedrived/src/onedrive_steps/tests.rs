@@ -197,17 +197,39 @@ async fn stage(staged: StagedStep) -> (StepsFolder, OneDriveStep) {
     let folder = StepsFolder::start(fixture).await;
     let step = if let OneDriveStep::SendDirectoryRemoval { item, below } = &step {
         assert_eq!(folder.run(step.clone()).await, StepOutcome::RowsChanged(RowsChangedFollowUp::CycleWanted));
-        let changes = folder.graph.with(|cloud| cloud.items.values().filter(|row| row.parent.is_some()).map(|row| {
-            konedrive_tree::Change::Upsert(konedrive_tree::Row {
-                id: row.id.clone(), parent_id: row.parent.clone(), name: row.name.clone(),
-                kind: if row.folder { konedrive_tree::Kind::Folder } else { konedrive_tree::Kind::File },
-                size: row.size, mtime: row.mtime, etag: Some(row.etag.clone()), ctag: Some(row.ctag.clone()), quickxor: row.hash.clone(), mime: None, placement: konedrive_tree::Placement::Placed,
-            })
-        }).collect());
-        folder.fixture.write_listing(changes);
+        folder.list_cloud();
         OneDriveStep::SendDirectoryRemoval { item: folder.fixture.versions_of(item.local_item_id), below: below.iter().map(|child| folder.fixture.versions_of(child.local_item_id)).collect() }
     } else { step };
     (folder, step)
+}
+
+/// `item` as a listing gives it: a folder with no cTag, as OneDrive personal gives one.
+pub(in crate::onedrive_steps) fn listed_row(item: &crate::fake_onedrive::FakeItem) -> konedrive_tree::Row {
+    konedrive_tree::Row {
+        id: item.id.clone(), parent_id: item.parent.clone(), name: item.name.clone(),
+        kind: if item.folder { konedrive_tree::Kind::Folder } else { konedrive_tree::Kind::File },
+        size: item.size, mtime: item.mtime, etag: Some(item.etag.clone()), ctag: (!item.folder).then(|| item.ctag.clone()), quickxor: item.hash.clone(), mime: None, placement: konedrive_tree::Placement::Placed,
+    }
+}
+
+impl StepsFolder {
+    /// A cycle of the listing over what the fake drive has now: every item, and what went
+    /// to its recycle bin as deleted. It ends now.
+    pub(in crate::onedrive_steps) fn list_cloud(&self) {
+        let changes = self.graph.with(|cloud| {
+            let mut changes: Vec<konedrive_tree::Change> = cloud.items.values().filter(|item| item.parent.is_some()).map(|item| konedrive_tree::Change::Upsert(listed_row(item))).collect();
+            changes.extend(cloud.bin.keys().map(|id| konedrive_tree::Change::Delete(id.clone())));
+            changes
+        });
+        self.fixture.write_listing(changes);
+        self.write_listing_end(crate::clock::unix_now());
+    }
+
+    /// The last listing ended at `at`, unix seconds of the machine's clock: what the cycle
+    /// writes as it ends (`listing_cycle`).
+    pub(in crate::onedrive_steps) fn write_listing_end(&self, at: i64) {
+        self.fixture.write_rows(move |store| store.set_last_checked(at));
+    }
 }
 
 /// What the fake drive holds once `staged` went through.
@@ -419,7 +441,8 @@ async fn a_step_whose_answer_was_lost_and_whose_read_failed_ends_transient_with_
         assert!(!is_committed(&folder, staged, &step), "{staged:?}: nothing is written yet");
 
         let round = folder.settle_records().await;
-        assert_eq!((round.done_count, round.failed_count, round.left_to_listing_count), (1, 0, 0), "{staged:?}");
+        let listing_wanted = usize::from(matches!(staged, StagedStep::SendDirectoryRemoval));
+        assert_eq!((round.done_count, round.failed_count, round.left_to_listing_count), (1, 0, listing_wanted), "{staged:?}: a directory's removal asks for a cycle");
         assert!((is_committed(&folder, staged, &step) != matches!(staged, StagedStep::SendEmptyNewFile)) && folder.records().is_empty(), "{staged:?}: {:?}", folder.fixture.find_item(step.item().local_item_id));
         assert_eq!(folder.count(staged.request().0, staged.request().1), 1, "{staged:?}: nothing is sent twice");
     }
@@ -581,7 +604,7 @@ async fn a_move_to_where_the_rows_say_onedrive_has_the_item_sends_nothing() {
 }
 
 #[tokio::test]
-async fn a_directory_made_while_its_row_went_is_kept_without_its_original_folder_ctag() {
+async fn a_directory_made_while_its_row_went_is_kept_in_onedrive() {
     let (folder, step) = stage(StagedStep::MakeDirectory).await;
     let folder = Arc::new(folder);
     let item = step.item().local_item_id;
@@ -636,8 +659,10 @@ async fn a_directorys_removal_is_not_sent_while_a_record_names_an_item_below_it_
     assert_eq!(folder.run(step.clone()).await, StepOutcome::RowsChanged(RowsChangedFollowUp::Nothing));
     assert_eq!((folder.count("DELETE", "items"), folder.records().len(), folder.cloud_paths()), (0, 1, vec!["docs".to_owned(), "docs/c.txt".to_owned()]));
 
-    // The record settled, the removal is sent.
+    // The record settled, the removal is sent, after a listing of its own: the attempt held back used its listing up.
     folder.fixture.write_rows(move |store| store.step_memory().forget_request_record(other));
+    assert_eq!(folder.run(step.clone()).await, StepOutcome::RowsChanged(RowsChangedFollowUp::CycleWanted));
+    folder.fixture.write_listing(vec![]);
     assert!(matches!(folder.run(step).await, StepOutcome::Written { .. }));
 
     // A running step that sends an item into the directory.
@@ -648,6 +673,8 @@ async fn a_directorys_removal_is_not_sent_while_a_record_names_an_item_below_it_
     assert_eq!(folder.run(step.clone()).await, StepOutcome::RowsChanged(RowsChangedFollowUp::Nothing));
     assert_eq!((folder.count("DELETE", "items"), folder.records()), (0, vec![]));
     folder.fixture.running_steps.end(other);
+    assert_eq!(folder.run(step.clone()).await, StepOutcome::RowsChanged(RowsChangedFollowUp::CycleWanted));
+    folder.fixture.write_listing(vec![]);
     assert!(matches!(folder.run(step).await, StepOutcome::Written { .. }));
 }
 

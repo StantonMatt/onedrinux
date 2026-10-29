@@ -116,6 +116,8 @@ fn migrate(conn: &Connection) -> Result<(), TreeError> {
         at_version(conn, "32", |tx| {
             // Earlier opening windows used the machine clock. They cannot prove
             // ownership against Graph's timestamps; leave any unknown holder alone.
+            // `onedrive_folder_ctag` is unused and always null (OneDrive personal gives a
+            // folder no cTag); the next migration drops it.
             tx.execute_batch("ALTER TABLE items ADD COLUMN onedrive_folder_ctag TEXT;
                               DELETE FROM upload_session_openings;")?;
             #[cfg(feature = "fault-injection")]
@@ -439,6 +441,11 @@ fn make_snapshot(path: &Path, conn: &Connection, stored: &StoredVersion) -> Resu
         .tempdir_in(super::quarantine::parent(path))?;
     let output = temporary.path().join("snapshot");
     conn.execute("VACUUM INTO ?1", [output.to_string_lossy().as_ref()])?;
+    // VACUUM INTO makes the file with the umask's mode; the store's own files are 0600.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&output, std::fs::Permissions::from_mode(0o600))?;
+    }
     std::fs::File::open(&output)?.sync_all()?;
     std::fs::rename(output, snapshot)?;
     sync_parent(path)?;
