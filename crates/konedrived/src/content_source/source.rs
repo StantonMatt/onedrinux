@@ -59,6 +59,7 @@ pub(crate) struct Fetched {
 /// cTag, and the quickXorHash the whole file must match.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Version {
+    /// Empty when Graph supplied a hash without a cTag.
     pub(crate) ctag: String,
     pub(crate) quick_xor: Option<[u8; konedrive_graph::quickxor::LEN]>,
 }
@@ -82,11 +83,13 @@ pub(crate) trait ContentSource: Send + Sync {
 
     /// Bytes `from`..`end` of `item_id` for a program that reads the file, not for a download
     /// of it: a folder served through FUSE answers a read of a file that is not downloaded
-    /// with them (`crate::mount`). Nothing is verified against them, so only `served_from`
-    /// and the stream of the answer count; a source may leave the rest empty. A source that
+    /// with them (`crate::mount`). A remote source must bind every range to one metadata version and check that
+    /// version again after consuming its body, before returning any bytes. The answer
+    /// carries the version for comparison with `opened_as`. Remembered range identities
+    /// belong to that opened content generation, not to the item id for its lifetime. A source that
     /// asks for an address before it asks for the bytes may remember the address between
     /// reads ([`forget`](Self::forget)).
-    async fn read_range(&self, item_id: &str, from: u64, end: u64) -> Result<Fetched, SourceError> {
+    async fn read_range(&self, item_id: &str, _opened_as: &konedrive_tree::ContentVersion, from: u64, end: u64) -> Result<Fetched, SourceError> {
         self.fetch(item_id, from, Some(end)).await
     }
 

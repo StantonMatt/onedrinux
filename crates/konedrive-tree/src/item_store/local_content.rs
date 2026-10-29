@@ -27,6 +27,8 @@
 // test: a_landing_of_content_the_row_no_longer_has_writes_nothing
 // test: a_copy_is_freed_in_the_row_only_while_its_content_is_the_synced_one
 // test: a_copy_that_was_changed_since_it_was_asked_about_is_not_freed
+// test: a_free_up_commit_refuses_a_pending_move_or_mutation_record
+
 use rusqlite::Connection;
 
 use super::item_row::{find_item, set_content_presence, write_item};
@@ -171,7 +173,7 @@ impl ItemStore<'_> {
     /// tree lock, with the content it decided on.
     pub fn commit_freed_content(&mut self, item: LocalItemId, content: &ContentVersion) -> Result<StepCommitOutcome, TreeError> {
         self.write(|tx| {
-            let is_clean = find_shown_file(tx, item)?.is_some_and(|(row, local_content)| local_content == *content && row.synced_content.as_ref() == Some(content) && row.content_before_write.is_none());
+            let is_clean = can_free_content(tx, item)? && find_shown_file(tx, item)?.is_some_and(|(row, local_content)| local_content == *content && row.synced_content.as_ref() == Some(content) && row.content_before_write.is_none());
             if is_clean {
                 set_content_presence(tx, item, ContentPresence::NotOnDisk)?;
             }
@@ -220,6 +222,38 @@ impl ItemStore<'_> {
             }
             Ok(outcomes)
         })
+    }
+}
+
+/// Every durable pending operation protects its local copy, including an unchanged
+/// content at a name whose move has not reached OneDrive yet.
+fn can_free_content(conn: &rusqlite::Connection, item: LocalItemId) -> Result<bool, TreeError> {
+    let mut at = item;
+    let mut seen = std::collections::HashSet::new();
+    while at != LocalItemId::ROOT {
+        if !seen.insert(at) { return Ok(false); }
+        let Some(row) = find_item(conn, at)? else { return Ok(false) };
+        let place = row.local.as_ref().and_then(|v| v.place.as_ref());
+        if matches!(row.local.as_ref().and_then(|v| v.content.as_ref()), Some(ContentVersion::Hashed { hash: None, .. }))
+            || place.is_none() || place != row.synced_place.as_ref() || row.unsent_since.is_some()
+            || row.content_before_write.is_some() || !crate::step_memory::find_item_memory(conn, at)?.is_empty() {
+            return Ok(false);
+        }
+        let pending: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM request_records WHERE local_item_id = ?1)
+             OR EXISTS(SELECT 1 FROM place_change_records WHERE item_id = ?1 OR other_item_id = ?1)",
+            [at.as_i64()], |row| row.get(0))?;
+        if pending { return Ok(false); }
+        at = place.expect("a shown place was checked").parent_local_item_id;
+    }
+    Ok(true)
+}
+
+impl super::ItemReader<'_> {
+    /// Whether the row has no unsent namespace change, held operation or mutation on
+    /// record. Free-up checks this again inside its commit transaction.
+    pub fn can_free_content(&self, item: LocalItemId) -> Result<bool, TreeError> {
+        can_free_content(self.conn(), item)
     }
 }
 

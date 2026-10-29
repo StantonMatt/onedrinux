@@ -36,6 +36,7 @@ fn not_unsent(number: i64) -> ItemVersions {
         local: Some(version.clone()),
         onedrive: Some(ItemVersion { place: Some(place(".konedrive-temporary")), ..version }),
         onedrive_etag: Some("e1".to_owned()),
+        onedrive_folder_ctag: None,
         synced_place: Some(place("report")),
         synced_content: Some(content("agreed")),
         content_presence: ContentPresence::OnDisk,

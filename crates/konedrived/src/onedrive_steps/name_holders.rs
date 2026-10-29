@@ -26,6 +26,9 @@
 // test: another_items_session_is_waited_for_until_it_ended_and_forgotten_then
 // test: a_file_with_the_hash_sent_that_no_row_is_bound_to_is_adopted_and_any_other_holder_is_another_item
 
+// test: empty_name_holders_require_our_application_and_both_server_times
+// test: a_foreign_or_unidentified_empty_holder_is_never_deleted
+
 use std::ffi::{OsStr, OsString};
 use std::sync::{Arc, Mutex};
 
@@ -41,9 +44,9 @@ use super::session_cancellations::SessionCancellations;
 use super::GraphAccess;
 use crate::sync_parts::step_outcome::{StepFailure, StepOutcome, StepRefusal};
 
-/// How far OneDrive's clock may be behind or ahead of this computer's when the time an
-/// empty file was made is compared with an opening's window, in seconds.
-const CLOCK_SLACK: i64 = 5 * 60;
+/// Maximum delay between the Graph Date sampled before the request and the empty
+/// holder timestamps, in seconds. The machine clock never widens this window.
+const CLOCK_SLACK: i64 = 60;
 
 /// How long after it was first seen holding a name a session of another item that names
 /// no end counts as ended, in seconds: a day, the longest an abandoned empty file of an
@@ -53,6 +56,8 @@ const SESSION_WITH_NO_END_KEPT: i64 = 24 * 60 * 60;
 /// What is known of a taken name, gathered before the decision.
 #[derive(Debug, Clone)]
 pub(crate) struct NameHolderFacts {
+    /// The configured OAuth application, never guessed from a holder.
+    pub(crate) client_id: Option<String>,
     /// What OneDrive has under the name now; `None` when nothing is there any more.
     pub(crate) holder: Option<DriveItem>,
     /// The holder as a commit takes it, when it can be read as one
@@ -97,26 +102,21 @@ pub(crate) enum NameHolder {
     /// again.
     AbandonedSession(UploadSessionAddress),
     /// An empty file no listing told of, made within a window in which this folder was
-    /// about to open a session there (the clock's slack: 5 minutes, [`CLOCK_SLACK`]):
-    /// provably this folder's own, removed, then the request sent again.
+    /// about to open a session there (Graph Date plus [`CLOCK_SLACK`] seconds, and this application id):
+    /// owned only with this application id and both server timestamps; removed, then retried.
     OwnEmptyFile(OneDriveItemReference),
-    /// A file no row is bound to that holds the content sent: this step's own earlier
-    /// upload, adopted. Before `UnknownEmptyFile` on purpose: an empty file is sent by
-    /// one request with no opening kept, so the replay of one whose answer was lost finds
-    /// an empty file no listing told of, and adopts it; after the cases above, so that an empty file a
-    /// session or an opening of this folder explains is never adopted — a cancel of that
-    /// session would take the item.
+    /// A nonempty file no row is bound to that holds the content sent: this step's
+    /// own earlier upload, adopted. Empty content cannot identify its creator.
     OwnEarlierUpload(ConfirmedItem),
-    /// An empty file no listing told of, of nobody known, where the content sent is not
-    /// empty: the step waits for it. Never copied, never removed.
+    /// An unlisted empty file without ownership proof. The step waits, including when
+    /// it sends empty content itself. Never copied, never removed.
     UnknownEmptyFile,
     /// Another item, spelt so by OneDrive.
     AnotherItem { holder_name: OsString },
 }
 
 /// Who holds the name, from `facts`. Pure; the first case that holds, in the order of
-/// [`NameHolder`]'s cases. `now` is the clock's, for the windows and for the end of
-/// another item's session. A session is "this item's own" by `item.local_item_id`.
+/// [`NameHolder`]'s cases. `now` is the clock's, for the end of another item's session. A session is "this item's own" by `item.local_item_id`.
 pub(crate) fn decide_name_holder(facts: &NameHolderFacts, item: &ItemVersions, now: i64) -> NameHolder {
     let Some(holder) = &facts.holder else { return NameHolder::Nobody };
     let sessions = &facts.empty_file_sessions;
@@ -147,20 +147,23 @@ pub(crate) fn decide_name_holder(facts: &NameHolderFacts, item: &ItemVersions, n
     let Some(holder_item) = &facts.holder_item else { return holder_name() };
     let is_unlisted_file = holder.file.is_some() && !facts.is_holder_bound;
     let is_empty = holder.size == Some(0);
-    let is_made_within_window = holder
-        .created_date_time
-        .as_deref()
-        .and_then(parse_graph_time)
-        .is_some_and(|made_at| facts.opening_windows.iter().any(|window| window.first_at - CLOCK_SLACK <= made_at && made_at <= window.last_unknown_at + CLOCK_SLACK));
-    if is_unlisted_file && is_empty && is_made_within_window {
+    let own_application = facts.client_id.as_deref().filter(|id| !id.is_empty()).is_some_and(|id| {
+        holder.created_by.as_ref().and_then(|by| by.pointer("/application/id")).and_then(serde_json::Value::as_str).is_some_and(|made_by| made_by.eq_ignore_ascii_case(id))
+    });
+    let is_made_within_window = holder.created_date_time.as_deref().and_then(parse_graph_time)
+        .zip(holder.last_modified_date_time.as_deref().and_then(parse_graph_time))
+        .is_some_and(|(made, modified)| facts.opening_windows.iter().any(|window| {
+            window.first_at <= made && made <= modified && modified <= window.last_unknown_at.saturating_add(CLOCK_SLACK)
+        }));
+    if is_unlisted_file && is_empty && own_application && is_made_within_window {
         return NameHolder::OwnEmptyFile(holder_item.item.clone());
     }
     let has_sent_content = facts.sent_hash.as_deref().is_some_and(|sent_hash| holder.quick_xor_hash() == Some(sent_hash) || (holder.quick_xor_hash().is_none() && is_empty && sent_hash == QuickXor::new().finish_base64()));
-    if is_unlisted_file && has_sent_content {
+    if is_unlisted_file && has_sent_content && !is_empty {
         return NameHolder::OwnEarlierUpload(holder_item.clone());
     }
     if is_unlisted_file && is_empty {
-        return NameHolder::UnknownEmptyFile;
+        return if own_application { NameHolder::UnknownEmptyFile } else { holder_name() };
     }
     holder_name()
 }
@@ -169,6 +172,7 @@ pub(crate) fn decide_name_holder(facts: &NameHolderFacts, item: &ItemVersions, n
 #[derive(Clone)]
 pub(crate) struct NameHolders {
     graph: GraphAccess,
+    write_scope: crate::config::WriteScopeSource,
     session_cancellations: SessionCancellations,
     /// When each session of another item that names no end was first seen holding a name.
     sessions_first_seen: Arc<Mutex<Vec<(UploadSessionAddress, i64)>>>,
@@ -176,7 +180,13 @@ pub(crate) struct NameHolders {
 
 impl NameHolders {
     pub fn new(graph: GraphAccess, session_cancellations: SessionCancellations) -> Self {
-        Self { graph, session_cancellations, sessions_first_seen: Arc::default() }
+        Self { graph, write_scope: Default::default(), session_cancellations, sessions_first_seen: Arc::default() }
+    }
+
+    pub(super) fn with_write_scope(mut self, source: crate::config::WriteScopeSource) -> Self {
+        self.session_cancellations = self.session_cancellations.with_write_scope(source.clone());
+        self.write_scope = source;
+        self
     }
 
     /// What OneDrive has under `name` in `parent` now; none when nothing is there. One
@@ -249,7 +259,7 @@ impl NameHolders {
             .map_err(store_failure)?;
         let now = (self.graph.clock)();
         let sessions_first_seen = self.note_sessions_seen(&empty_file_sessions, now);
-        let facts = NameHolderFacts { holder, holder_item, is_holder_bound, sent_hash: sent_hash.map(str::to_owned), empty_file_sessions, opening_windows, sessions_first_seen };
+        let facts = NameHolderFacts { client_id: self.graph.drive.application_id().map(str::to_owned), holder, holder_item, is_holder_bound, sent_hash: sent_hash.map(str::to_owned), empty_file_sessions, opening_windows, sessions_first_seen };
         let name_holder = decide_name_holder(&facts, item, now);
         let is_place_resolved = match &name_holder {
             NameHolder::Nobody | NameHolder::OwnEarlierUpload(_) | NameHolder::UnknownEmptyFile | NameHolder::AnotherItem { .. } => true,
@@ -267,6 +277,11 @@ impl NameHolders {
                 false
             }
             NameHolder::OwnEmptyFile(empty_file) => {
+                let allowed = match facts.holder.as_ref().map(|holder| super::confirmed_item::to_confirmed_item(holder, &self.graph.drive_id)) {
+                    Some(Ok(confirmed)) => super::write_scope::allows_confirmed(&self.graph, &self.write_scope, &confirmed).await,
+                    _ => self.write_scope.get().unrestricted(),
+                };
+                if !allowed { return Err(StepOutcome::Refused(StepRefusal::NameHeldByUploadSession)); }
                 let guard = facts.holder.as_ref().map(to_guard_of_answer);
                 let removed = {
                     let _slot = self.graph.drive.pool().acquire(Class::Metadata).await;

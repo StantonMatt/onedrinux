@@ -76,6 +76,11 @@
 // test: a_new_file_made_and_removed_here_before_its_commit_is_removed_in_onedrive
 // test: a_content_the_row_no_longer_has_is_not_sent
 
+// test: write_scope_refuses_a_resumed_upload_whose_original_target_is_outside
+// test: write_scope_keeps_an_earlier_upload_left_outside_the_allowlist
+// test: a_hashless_upload_is_read_back_before_commit_and_held_if_still_unverifiable
+// test: a_file_changed_after_its_last_fragment_is_never_marked_synced
+
 use std::ffi::OsString;
 use std::sync::Arc;
 
@@ -227,6 +232,7 @@ fn find_new_file_place(target: &ContentTarget) -> Option<&NewFilePlace> {
 #[derive(Clone)]
 pub(crate) struct ContentUpload {
     graph: GraphAccess,
+    write_scope: crate::config::WriteScopeSource,
     lost_answers: LostAnswers,
     /// Asked between two fragments and before a session is opened.
     sending_holds: Arc<SendingHolds>,
@@ -238,7 +244,12 @@ pub(crate) struct ContentUpload {
 
 impl ContentUpload {
     pub fn new(graph: GraphAccess, lost_answers: LostAnswers, sending_holds: Arc<SendingHolds>, onedrive_space: Arc<OneDriveSpace>, running_steps: Arc<RunningSteps>, limits: Limits) -> Self {
-        Self { graph, lost_answers, sending_holds, onedrive_space, running_steps, limits }
+        Self { graph, lost_answers, sending_holds, onedrive_space, running_steps, limits, write_scope: Default::default() }
+    }
+
+    pub(super) fn with_write_scope(mut self, source: crate::config::WriteScopeSource) -> Self {
+        self.write_scope = source;
+        self
     }
 
     /// Whether the upload stops now ([`decide_stop_between_fragments`]).
@@ -361,8 +372,9 @@ impl ContentUpload {
         }
         let memory = self.graph.store.read_items(move |items| items.find_item_memory(id)).await.map_err(fail_store)?;
         self.running_steps.tell_progress(id, 0, size);
-        let sent = match decide_upload_start(&memory, size) {
+        let mut sent = match decide_upload_start(&memory, size) {
             UploadStart::Empty => return self.send_empty_content(item, target, file, slot).await,
+            UploadStart::Resume(session) if session.next_offset == size => self.verify_completed_session(item, target, file, &session).await?,
             UploadStart::Resume(session) => match self.find_session_target(target, &session).await? {
                 Some(session_target) => self.go_on_with_session(item, &session_target, file, session).await?,
                 None => {
@@ -374,7 +386,10 @@ impl ContentUpload {
         };
         // An upload found in OneDrive by its hash holds the hash sent: nothing to ask.
         if sent.ended_session.is_some() {
-            self.check_sent_content(item, target, &sent).await?;
+            self.check_sent_content(item, target, &mut sent).await?;
+            if hash_content(file).await? != sent.sent_hash {
+                return Err(StepOutcome::NotRun(StepObstacle::ContentChanged).into());
+            }
         }
         slot.succeeded();
         Ok(sent)
@@ -435,7 +450,9 @@ impl ContentUpload {
             Ok(answer) => match to_confirmed_item(&answer, &self.graph.drive_id) {
                 Ok(made) => {
                     slot.succeeded();
-                    return Ok(SentContent { item: made, sent_hash: sent_hash.clone(), ended_session: None, new_file_place: find_new_file_place(target).cloned() });
+                    let mut sent = SentContent { item: made, sent_hash: sent_hash.clone(), ended_session: None, new_file_place: find_new_file_place(target).cloned() };
+                    self.check_sent_content(item, target, &mut sent).await?;
+                    return Ok(sent);
                 }
                 // The request went through and nothing readable says as what: read as a lost answer.
                 Err(failure) => format!("{failure:?}"),
@@ -533,8 +550,17 @@ impl ContentUpload {
         };
         let opening_try = match empty_file_place.clone() {
             Some(place) => {
-                let now = (self.graph.clock)();
-                Some(self.write_memory(move |memory| memory.remember_upload_session_opening(id, &place, now)).await?)
+                let ContentTarget::NewFile(target_place) = target else { unreachable!() };
+                let date = {
+                    let _slot = self.graph.drive.pool().acquire(Class::Metadata).await;
+                    self.graph.drive.item_with_date(target_place.parent.item_id.as_str()).await
+                        .map_err(|error| StepOutcome::Refused(super::graph_refusal::decide_read_refusal(error)))?.1
+                };
+                match date {
+                    Some(now) => Some(self.write_memory(move |memory| memory.remember_upload_session_opening(id, &place, now)).await?),
+                    // An orphan is safer than a holder claimed from an untrusted clock.
+                    None => None,
+                }
             }
             None => None,
         };
@@ -557,8 +583,8 @@ impl ContentUpload {
             }
         };
         let session = UploadSession { address: UploadSessionAddress::new(opened.url), expires_at: opened.expires, next_offset: 0, content, empty_file_place };
-        let (kept, unsent_since) = (session.clone(), item.unsent_since);
-        match self.write_memory(move |memory| memory.remember_upload_session(id, unsent_since, &kept)).await? {
+        let (kept, planned) = (session.clone(), item.clone());
+        match self.write_memory(move |memory| memory.remember_upload_session_for_binding(&planned, &kept)).await? {
             UploadSessionStanding::Continued => self.send_fragments(item, target, file, session).await,
             // The row went or the bytes changed: the cancel is queued already.
             UploadSessionStanding::Abandoned => Err(StepOutcome::NotRun(StepObstacle::ContentChanged).into()),
@@ -651,11 +677,16 @@ impl ContentUpload {
                     next = progress.next;
                 }
                 Ok(ChunkOutcome::Done(answer)) => {
+                    let (completed, expires) = (address.clone(), session.expires_at);
+                    // A row removed meanwhile still needs the normal made-item cleanup
+                    // after the response; an abandoned session does not hide that answer.
+                    let _ = self.write_memory(move |memory| memory.advance_upload_session(id, &completed, size, expires)).await?;
                     self.running_steps.tell_progress(id, size, size);
                     return match to_confirmed_item(&answer, &self.graph.drive_id) {
                         Ok(made) => Ok(SentContent { item: made, sent_hash: hasher.finish_base64(), ended_session: Some(address), new_file_place: find_new_file_place(target).cloned() }),
-                        // The session ended and nothing readable says as what: the item is read.
-                        Err(_) => Ok(self.follow_gone_session(item, target, file, &session).await?),
+                        // The final fragment was acknowledged: keep the completion marker
+                        // and verify by metadata, even when its answer is unreadable.
+                        Err(_) => Ok(self.verify_completed_session(item, target, file, &session).await?),
                     };
                 }
                 Err(WriteError::SessionGone) => return Ok(self.follow_gone_session(item, target, file, &session).await?),
@@ -685,6 +716,25 @@ impl ContentUpload {
                     };
                 }
             }
+        }
+    }
+
+    /// The final fragment was acknowledged but its hash could not yet be verified.
+    /// `next_offset == size` is an existing durable session field, now a completion
+    /// marker. Retry only metadata, even after refresh or restart; never reopen or PUT.
+    async fn verify_completed_session(&self, item: &ItemVersions, target: &ContentTarget, file: &Arc<LocalContentFile>, session: &UploadSession) -> Result<SentContent, StepOutcome> {
+        let session_target = self.find_session_target(target, session).await?;
+        let Some(target) = session_target.as_ref() else {
+            return Err(StepOutcome::Refused(StepRefusal::RefusedForGood { message: "The completed upload's original place cannot be verified; local content is kept".into() }));
+        };
+        let sent_hash = hash_content(file).await?;
+        let request = match target {
+            ContentTarget::NewFile(place) => SentRequest::SendNewFile { parent: &place.parent, name: &place.name, sent_hash: &sent_hash },
+            ContentTarget::ExistingItem { .. } => SentRequest::SendContent { sent_hash: &sent_hash },
+        };
+        match self.lost_answers.read_request_outcome(item, request).await.map_err(FailedRead::into_outcome)? {
+            LostAnswerFate::WentThrough(Some(found)) => Ok(SentContent { item: found, sent_hash, ended_session: Some(session.address.clone()), new_file_place: find_new_file_place(target).cloned() }),
+            _ => Err(StepOutcome::Refused(StepRefusal::Transient { detail: "Upload verification is still pending; local content is kept and no bytes are sent again".into() })),
         }
     }
 
@@ -720,8 +770,9 @@ impl ContentUpload {
         }
     }
 
-    /// Asks that `sent.item` holds the hash of the content sent; an answer that carries no
-    /// hash is taken as sent. When it
+    /// Asks that `sent.item` holds the hash of the exact bytes sent. An answer without
+    /// a hash is followed by fresh metadata; still unverifiable is held, with local
+    /// bytes and session kept. When it
     /// holds another, nothing is committed and the step answers
     /// `StepRefusal::ContentMismatch`, after: for a new file the made item
     /// remembered (`StepMemory::remember_mismatched_item`, with
@@ -737,13 +788,30 @@ impl ContentUpload {
     /// (`ItemStore::remember_own_upload_content`: OneDrive's content of the answer, the
     /// local content sent). The content is then sent again (`docs/design/writes.md` §4.3). The session that
     /// ended is forgotten here (`forget_ended_upload_session`): no commit will.
-    async fn check_sent_content(&self, item: &ItemVersions, target: &ContentTarget, sent: &SentContent) -> Result<(), StepOutcome> {
+    async fn check_sent_content(&self, item: &ItemVersions, target: &ContentTarget, sent: &mut SentContent) -> Result<(), StepOutcome> {
         let id = item.local_item_id;
+        if !matches!(&sent.item.content, Some(ContentVersion::Hashed { hash: Some(_), .. })) {
+            let fresh = self.graph.drive.item(sent.item.item.item_id.as_str()).await
+                .map_err(|e| StepOutcome::Refused(StepRefusal::Transient { detail: format!("Upload verification is pending; metadata could not be read ({e}); the local copy is kept") }))?;
+            let response_ctag = match &sent.item.content { Some(ContentVersion::Hashed { ctag, .. }) => ctag.as_ref(), _ => None };
+            let same_version = match (response_ctag, fresh.c_tag.as_ref()) {
+                (Some(before), Some(after)) => before == after,
+                _ => fresh.e_tag.as_deref() == Some(sent.item.etag.as_str()),
+            };
+            if !same_version { return Err(StepOutcome::Refused(StepRefusal::ItemChanged)); }
+            if fresh.quick_xor_hash().is_none() {
+                // Keep the completed session and retry metadata with the normal backoff.
+                return Err(StepOutcome::Refused(StepRefusal::Transient {
+                    detail: "OneDrive supplied no quickXorHash after upload; verification is pending and the local copy is kept".into(),
+                }));
+            }
+            sent.item = to_confirmed_item(&fresh, &self.graph.drive_id).map_err(StepOutcome::Failed)?;
+        }
         let (answered_hash, answered_ctag) = match &sent.item.content {
             Some(ContentVersion::Hashed { hash, ctag, .. }) => (hash.as_deref(), ctag.as_deref()),
             Some(ContentVersion::ChangedHere { .. }) | None => (None, None),
         };
-        if answered_hash.is_none_or(|answered| answered == sent.sent_hash) {
+        if answered_hash.is_some_and(|answered| answered == sent.sent_hash) {
             return Ok(());
         }
         tracing::warn!("OneDrive holds other content than was sent for item {id}: it is sent again");
@@ -758,7 +826,7 @@ impl ContentUpload {
                 if let Err(outcome) = &standing {
                     tracing::warn!("what OneDrive holds for item {id} with other content is not remembered: {outcome:?}");
                 }
-                if !matches!(standing, Ok(MismatchedItemStanding::OfFolder)) {
+                if !matches!(standing, Ok(MismatchedItemStanding::OfFolder)) && super::write_scope::allows_confirmed(&self.graph, &self.write_scope, &sent.item).await {
                     match self.graph.drive.delete_item(sent.item.item.item_id.as_str(), &sent.item.etag).await {
                         Ok(()) | Err(WriteError::NotFound) => {
                             let removed = sent.item.item.clone();
@@ -821,6 +889,12 @@ impl ContentUpload {
             }
             Err(error) => return Err(StepOutcome::Refused(decide_read_refusal(error))),
         };
+        if !self.write_scope.get().unrestricted() {
+            let confirmed = to_confirmed_item(&found, &self.graph.drive_id).map_err(StepOutcome::Failed)?;
+            if !super::write_scope::allows_confirmed(&self.graph, &self.write_scope, &confirmed).await {
+                return Err(StepOutcome::Refused(StepRefusal::Transient { detail: "an earlier upload left an item outside the account's write scope".into() }));
+            }
+        }
         let sent_hash = hash_content(file).await?;
         if found.quick_xor_hash() == Some(sent_hash.as_str()) {
             let bound = left.item.clone();

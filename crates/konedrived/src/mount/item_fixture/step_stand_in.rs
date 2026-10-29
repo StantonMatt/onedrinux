@@ -117,6 +117,7 @@ impl Answers {
                     FolderStep::ShowItem { item } => items.commit_show_item(item, self.is_name_ignored(&onedrive_name(item))),
                     FolderStep::MoveItem { item } => items.commit_move_item(item, self.is_name_ignored(&onedrive_name(item)), None),
                     FolderStep::TakeMoveBack { item } => items.commit_take_move_back(item, self.is_name_ignored(&onedrive_name(item)), None),
+                    FolderStep::ReplaceContent { item } => items.commit_replace_content(item, None),
                     FolderStep::TakeOneDriveContent { item } => items.commit_take_onedrive_content(item, None),
                     FolderStep::RemoveItem { item } => items.commit_remove_item(item, None),
                     FolderStep::DownloadContent { item } => items.commit_download_content(item, None),

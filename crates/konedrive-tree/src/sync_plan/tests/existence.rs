@@ -109,9 +109,9 @@ fn nothing_is_sent_into_a_directory_onedrive_does_not_have() {
 }
 
 #[test]
-fn a_file_not_on_disk_moved_here_that_onedrive_removed_goes_here() {
+fn a_file_not_on_disk_moved_here_that_onedrive_removed_stays_as_a_visible_conflict() {
     let given = input(vec![removed_in_onedrive(moved_here(synced_file(2, ROOT, "a.txt"), ROOT, "b.txt"))]);
-    assert_eq!(answer(&given, 2), folder_step(FolderStep::RemoveItem { item: versions(&given, 2) }));
+    assert!(matches!(answer(&given, 2), Answer::Wait(WaitReason::User(Reason::Refused(Some(_))))));
 }
 
 /// What the rows say OneDrive removed waits while a listing is under way

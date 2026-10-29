@@ -9,10 +9,10 @@ document does not repeat them.
 
 ## 1. What the user sees
 
-- **A folder is read-only until its account is switched.** "Two-way sync" on OneDrive Settings,
-  or `konedrivectl account mode read-write`, signs in again in the
-  browser to ask for permission to change files. Until then the folder refuses every change
-  (`EROFS`).
+- **New accounts are two-way by default.** The first sign-in asks for write permission, so one
+  browser visit suffices. `konedrivectl account add --read-only` selects read-only. Existing
+  accounts keep their mode; `konedrivectl account mode read-write` switches a read-only account
+  by asking for write consent in the browser.
 - **Anything a program does in a read-write folder counts**: a file saved, a folder made, a
   rename, a move inside the folder, a removal. A file's content goes up once it has not changed
   for 2 seconds and no program holds it open for writing; ten saves of one document while offline
@@ -46,7 +46,8 @@ Every one of these has a command: `account mode`, `sync upload-queue`, `sync not
 
 ### 2.1 Two facts, two owners
 
-The mode is per account: `mode` in its section of `config.toml`, `read-only` for a new account.
+The mode is per account: `mode` in its section of `config.toml`. New accounts use the daemon-wide
+`new_account_mode`, `read-write` by default; missing modes on existing entries remain read-only.
 `Account.Mode` is the mode the account *runs* in: read-write only while `config.toml` says so,
 the token carries `Files.ReadWrite` and the token was last seen to reach the drive `config.toml`
 records ([accounts.md](accounts.md)). A read-only account asks for
@@ -66,6 +67,18 @@ stopped or started for a switch. Beside them, `account_folder/mode.rs` watches t
 sets the hold `WritesNotAllowed` while a read-write account may not write after all: `config.toml`
 cannot be read or records no drive, the token's drive is not seen yet or is another, or the
 sign-in grants no writes (`decide_account_holds`).
+
+The optional per-account `write_paths` further restricts mutations to relative subtrees.
+`Account.SetWriteScope`, `ClearWriteScope`, `WritePaths` and `WriteScopeEnabled` expose it;
+`konedrivectl account write-scope {show,set,clear}` controls it. Both ends of a rename must be
+allowed. The mount returns `EROFS` outside scope before touching content or queuing hydration,
+and rechecks queued operations on the write-operation thread. Writes through existing handles
+are checked too; an unlinked writer keeps the admission given at open for its unnamed inode.
+The sender checks local paths and cloud paths independently before any step
+starts, including removals whose local path is gone. A step outside scope keeps its local
+version and retries with backoff. Pin, download and free-up are independent. A scope change
+controls new admissions; already admitted operations may finish. Set it before starting the
+trial. [accounts.md](accounts.md) §10.1 gives validation and cleanup behavior.
 
 ### 2.2 To read-write
 
@@ -171,7 +184,7 @@ must outlive a crash before its request, sends with no lock held and commits und
 | `SendContent` | `POST /items/{id}/createUploadSession` with `conflictBehavior: replace` and `fileSystemInfo`, then the fragments | `If-Match` |
 | `SendMove` | `PATCH /items/{id}` with only what differs: `name`, `parentReference.id` | `If-Match` |
 | `SendFileRemoval` | `DELETE /items/{id}`, into the recycle bin | `If-Match` |
-| `SendDirectoryRemoval` | `DELETE /items/{id}`, the directory whole, into the recycle bin | none |
+| `SendDirectoryRemoval` | `DELETE /items/{id}`, the directory whole, into the recycle bin | the planned folder cTag in `If-Match` |
 | a session's status, its cancel | `GET`, `DELETE` of the upload URL | — |
 
 A `SendMove` for which nothing differs from where the row says OneDrive has the item (an answer
@@ -194,14 +207,15 @@ OneDrive takes either tag in `If-Match`.
   cTag: a rename or a move made in OneDrive meanwhile does not hold the upload back, and neither
   does the eTag OneDrive raises when a session is opened with the file's time.
 - **A new item**: `conflictBehavior: fail`, so a name that is taken is answered `409`.
-- **A directory's removal** is unguarded: OneDrive removes it whole, whatever it holds by then. So
-  it is sent only while the rows say that everything OneDrive has in it was shown here and
-  removed here, none of it is a file whose content OneDrive changed since, no listing is under
-  way and no request not yet settled is about any of it; this is asked by the plan, again under
-  the tree lock just before the request, and again by the commit
-  (`ItemStore::can_directory_removal_be_sent`, [sync.md](sync.md) §6). Otherwise the removal is
-  of the folder alone, and a directory that holds in OneDrive what the folder never showed cannot
-  be removed here (F299).
+- **A directory's removal** first asks for a listing cycle begun after the removal was
+  observed. It uses the folder cTag from that listing, which must cover descendant changes.
+  The store still checks every known descendant, the listing state and outstanding requests
+  (`ItemStore::can_directory_removal_be_sent`); `If-Match` then covers a change after those
+  checks. A missing or empty folder cTag waits for another listing. There is no unconditional
+  DELETE retry. A `412` asks for a listing, so an unseen child is re-shown instead of removed.
+  Personal OneDrive's semantics must pass the guarded live checks before enabling real writes.
+  Cleanup of a newly created directory whose commit failed keeps the orphan because it has
+  no saved folder cTag from the creation response.
 
 A `412` means the item changed in OneDrive: the step reads once whether its own earlier request
 went through (§4.5), and otherwise ends `ItemChanged`, which asks for a listing. OneDrive moves an
@@ -267,8 +281,7 @@ downloads. The plan's task starts a few more uploads than there are slots, which
 ### 4.4 The empty file a session leaves
 
 Until a new file's session completes or is cancelled, OneDrive holds its name with an empty file,
-and a second request for that name is answered `409`. Nothing in OneDrive says which device
-opened a session, so `NameHolders` (`onedrive_steps/name_holders.rs`) decides from what this
+and a second request for that name is answered `409`. The application facet identifies a client application, but does not identify a device. So `NameHolders` (`onedrive_steps/name_holders.rs`) decides from what this
 folder kept, the first that holds (`decide_name_holder`):
 
 | The holder | What is done |
@@ -278,15 +291,22 @@ folder kept, the first that holds (`decide_name_holder`):
 | the empty file of another item's live session | the step waits (`NameHeldByUploadSession`) |
 | the empty file of another item's session that ended: its expiry passed, or it names none and was first seen a day ago | that session is forgotten, and the request sent again |
 | the empty file of a session nothing goes on with | the session is cancelled, and the request sent again |
-| an empty file no listing told of, made within a window in which this folder was about to open a session there (5 minutes of slack for the clocks) | it is this folder's own: removed, guarded by its eTag, and the request sent again |
-| a file no row is bound to that holds the content sent | this step's own earlier upload: adopted |
+| an unlisted empty file whose `createdBy.application.id` matches our configured client id, with created and last-modified times in a recorded Graph-clock opening window | removed with its eTag, and the request sent again |
+| a nonempty file no row is bound to that holds the content sent | this step's own earlier upload: adopted |
 | an empty file no listing told of, of nobody known | the step waits; it is never removed and never copied |
 | anything else | `NameTaken`: another item has the name (§4.6) |
 
+Before opening a new upload session, a metadata GET of its parent samples the Graph `Date`
+response header. The durable opening window uses this server time, with at most 60 seconds
+for the request to take effect; the machine clock supplies no slack. Both `createdDateTime`
+and `lastModifiedDateTime` must fall in that window in order. Missing or foreign application identity reports a name conflict and leaves the holder alone.
+Missing or invalid dates or times outside the window never permit cleanup. A missing Date header records no ownership window. An empty hash alone does
+not establish ownership, even when this step sends an empty file. An orphan may wait for the
+known session's expiry; it is preferable to deleting another writer's file.
+
 A step sends its request again at most once. An opening is kept for 7 days after its latest try
-whose outcome is not known. An empty file made at that name by someone else inside a recorded
-window could be taken for this folder's own; that is the cost of never deleting a holder this
-folder did not record (F172). What an upload of this folder left in OneDrive — such an empty file,
+whose outcome is not known. Another device using the same application can create an empty file inside the same server
+window; the application facet does not distinguish devices (F172). What an upload of this folder left in OneDrive — such an empty file,
 an item of another content — is not shown in the folder ([sync.md](sync.md) §6).
 
 ### 4.5 Lost answers
@@ -534,11 +554,16 @@ konedrivectl --account Test account mode read-write
 konedrivectl --account Test dev export-access-token --read-write --out /tmp/kd-rw.token
 konedrivectl --account Test account mode read-only
 konedrivectl --account Test dev export-access-token --out /tmp/kd-ro.token
-cargo run -p konedrive-write-test -- --graph-test-drive <id> \
+cargo run -p konedrive-write-test --bin konedrive-write-test -- --graph-test-drive <id> \
     --graph-token /tmp/kd-rw.token --graph-read-only-token /tmp/kd-ro.token \
     --daemon-config ~/.config/konedrive/config.toml
 rm /tmp/kd-rw.token /tmp/kd-ro.token
 ```
+
+`--only remote` checks folder cTags in GET and delta after descendant create/edit/remove,
+412 on stale folder DELETE, zero-byte PUT guards and `createdBy.application.id`. It uses
+the write token only and retains every allowlist and wire guard. These checks are written
+but have not been run against any account as part of this change.
 
 `--only placeholders` (what holds a session's empty file and what frees it) and
 `--only notifications` (what a write sends on the notification socket) run alone, with the
@@ -590,3 +615,39 @@ and keeps a directory OneDrive removed (F255); a move between accounts (F124); n
 files (F300); the executable bit kept here only (F303); a trash with KDE Frameworks before 6.21
 (K34); no automatic hold without NetworkManager, UPower or power-profiles-daemon (F175); a store
 that is lost, with its unsent removals and moves and its open sessions (D36).
+
+### 8.3 A read-only metadata sample
+
+`tests/write-account/README.md` describes `metadata-probe`. It verifies an explicitly named
+expected drive, then enumerates metadata only, never `/content` or a download URL. It prints
+aggregate presence counts for folder cTags and file quickXorHash, for at most N distinct
+items of each kind in delta order (not a random sample). It uses an explicit owner-only
+token file and never the daemon, wallet, configuration or mount. Build and unit tests do
+not contact an account. No account was probed during implementation.
+
+### 8.4 Saving over a cloud file
+
+A save by rename keeps the destination's cloud id and version history, even when the temporary
+file has already uploaded. The replacing inode takes the destination's binding, cloud version
+and synced version in one transaction. A hidden row takes the temporary cloud identity and
+its agreed content; its removal uses that version's guard. A remote change to either file
+refuses the corresponding request and asks for a listing. Open handles still follow their
+inodes. A cloud-only source renamed over a bound destination is refused `EAGAIN` before any
+change: it must be hydrated first, because its only bytes still belong to the temporary cloud
+item. Automatic hydration before this rename is a follow-up in the kernel request path. Sessions for the old bindings are abandoned; an in-flight request resolves its original
+binding at commit and cannot upload into the newly acquired destination identity. Descriptor
+marks are written only while the row still owns the confirmed binding, serialized with rename.
+
+### Upload verification before a local generation becomes synced
+
+The uploader hashes the exact fragment bytes it sends, including the prefix checked when a
+session resumes. It compares that hash with the completed item's quickXorHash and hashes the
+local file again before returning the completion: an edit after the last fragment read is
+never marked synced. Normal row-version checks still protect the commit from a concurrent
+writer. If the response has no hash, fresh metadata must supply it before commit. Missing
+metadata or a still-missing hash holds the upload with transient backoff for the current local
+generation, keeping its local bytes, ended session or request record. Refresh/sign-in makes
+verification due again. A completed session is retained with `next_offset == size` as a durable completion marker.
+Even after refresh or restart it retries metadata only, and sends no more fragments or new
+session requests. Verification can commit when metadata becomes available; a new local
+generation goes through the normal conflict and upload rules.

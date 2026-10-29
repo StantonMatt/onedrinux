@@ -24,3 +24,15 @@ fn the_published_state_is_computed_from_the_registration_and_the_sync() {
     assert_eq!(published_error(&s), expected, "a conflict is not a problem; it is not in LastError");
     assert_eq!(published_state(&SyncSnapshot::default()), "none");
 }
+
+#[test]
+fn exported_namespace_changes_remain_a_counted_issue_after_other_trouble_clears() {
+    let mut snapshot = SyncSnapshot::default();
+    snapshot.store_recovery = Some("2 unsent removal(s) or move(s) need manual recovery; see state/unsent-changes.txt".into());
+    let notice = published_error(&snapshot);
+    assert!(notice.contains("2 unsent"));
+    assert!(matches!(running_trouble(&snapshot), Some((_, TroubleKind::Other))));
+    snapshot.cycle.sync_trouble = Some(SyncTrouble::Cycle(CycleError::Offline("offline".into())));
+    snapshot.cycle.sync_trouble = None;
+    assert_eq!(published_error(&snapshot), notice);
+}

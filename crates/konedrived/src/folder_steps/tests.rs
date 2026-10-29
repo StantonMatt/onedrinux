@@ -14,7 +14,7 @@ use crate::status::report::Report;
 mod races;
 
 pub(super) fn make_steps(fixture: &ItemFixture) -> Arc<FolderSteps> {
-    let landing = Arc::new(ItemDownloadLanding::new(Arc::clone(&fixture.place_changes), fixture.store.clone(), Arc::clone(&fixture.running_steps), Arc::clone(&fixture.mount_take_down)));
+    let landing = Arc::new(ItemDownloadLanding::new(Arc::clone(&fixture.place_changes), fixture.store.clone(), Arc::clone(&fixture.running_steps), Arc::clone(&fixture.mount_take_down), Arc::clone(&fixture.item_handles)).expect("the replacement observer"));
     let downloader = Arc::new(ItemDownloader::new(
         Arc::clone(&fixture.backing_directory),
         Arc::clone(&fixture.download_states),
@@ -44,7 +44,7 @@ pub(super) fn make_steps(fixture: &ItemFixture) -> Arc<FolderSteps> {
 }
 
 pub(super) fn run(fixture: &ItemFixture, steps: &Arc<FolderSteps>, step: FolderStep) -> StepOutcome {
-    if let FolderStep::DownloadContent { item } = &step {
+    if let FolderStep::DownloadContent { item } | FolderStep::ReplaceContent { item } = &step {
         // The plan's task says the step runs before it starts it.
         fixture.running_steps.end(item.local_item_id);
         assert!(fixture.running_steps.begin(RunningStep { class: StepClass::Download, item: item.local_item_id, other_items: Vec::new(), destination: None, sent: 0, total: 0 }));
@@ -157,7 +157,7 @@ fn run_in_halves(fixture: &ItemFixture, steps: &Arc<FolderSteps>, step: &FolderS
             FolderStep::RenameToConflictCopy { item, name } => steps.prepare_move(item, &ItemPlace { parent_local_item_id: item.local.clone().unwrap().place.unwrap().parent_local_item_id, name: name.clone() }),
             FolderStep::RemoveItem { item } => steps.prepare_set_aside(item, true),
             FolderStep::TakeOneDriveContent { item } => steps.prepare_set_aside(item, false),
-            FolderStep::ShowItem { .. } | FolderStep::DownloadContent { .. } => panic!("a step that changes no name has no halves"),
+            FolderStep::ShowItem { .. } | FolderStep::DownloadContent { .. } | FolderStep::ReplaceContent { .. } => panic!("a step that changes no name has no halves"),
         };
         let (change, disk_change) = match prepared {
             Ok(prepared) => prepared,
@@ -174,7 +174,7 @@ fn run_in_halves(fixture: &ItemFixture, steps: &Arc<FolderSteps>, step: &FolderS
             }
             FolderStep::RemoveItem { .. } => Box::new(move |store, record| store.item_store().commit_remove_item(&item, record)),
             FolderStep::TakeOneDriveContent { .. } => Box::new(move |store, record| store.item_store().commit_take_onedrive_content(&item, record)),
-            FolderStep::ShowItem { .. } | FolderStep::DownloadContent { .. } => unreachable!(),
+            FolderStep::ShowItem { .. } | FolderStep::DownloadContent { .. } | FolderStep::ReplaceContent { .. } => unreachable!(),
         };
         Some(match steps.commit_on_record(change, disk_change, commit) {
             Ok(_) => StepOutcome::Written { events: Vec::new() },

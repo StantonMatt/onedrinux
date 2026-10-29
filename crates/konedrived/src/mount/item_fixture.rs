@@ -493,6 +493,7 @@ impl ItemFixture {
             free_space_reserve: Arc::new(|| 0),
             tree_lock: Arc::clone(&self.tree_lock),
             ignore: Arc::clone(&self.ignore),
+            write_scope: self.upload_rules.write_scope.clone(),
             sync_plan_wake: Arc::clone(&self.sync_plan_wake),
             running_steps: Arc::clone(&self.running_steps),
             published_plan: Arc::clone(&self.published_plan),

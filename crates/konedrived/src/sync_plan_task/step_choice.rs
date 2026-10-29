@@ -90,6 +90,7 @@ pub(crate) fn describe_running_step(step: &SyncStep) -> RunningStep {
 /// told with. Pure.
 pub(crate) fn find_download_size(step: &SyncStep) -> Option<u64> {
     match step {
+        SyncStep::Folder(FolderStep::ReplaceContent { item }) => Some(item.onedrive.as_ref().and_then(|v| v.content.as_ref()).map_or(0, konedrive_tree::ContentVersion::size)),
         SyncStep::Folder(FolderStep::DownloadContent { item }) => Some(item.local.as_ref().and_then(|local| local.content.as_ref()).map_or(0, konedrive_tree::ContentVersion::size)),
         SyncStep::Folder(_) | SyncStep::OneDrive(_) | SyncStep::Row(_) => None,
     }
@@ -138,7 +139,7 @@ pub(crate) fn decide_step_class(step: &SyncStep) -> StepClass {
     match step {
         SyncStep::OneDrive(OneDriveStep::SendNewFile { .. } | OneDriveStep::SendContent { .. }) => StepClass::Content,
         SyncStep::OneDrive(_) => StepClass::Metadata,
-        SyncStep::Folder(FolderStep::DownloadContent { .. }) => StepClass::Download,
+        SyncStep::Folder(FolderStep::DownloadContent { .. } | FolderStep::ReplaceContent { .. }) => StepClass::Download,
         SyncStep::Folder(_) => StepClass::Folder,
         SyncStep::Row(_) => StepClass::Row,
     }

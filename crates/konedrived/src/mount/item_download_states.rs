@@ -83,7 +83,7 @@ pub(crate) struct DownloadKey {
 
 /// Who asks for a download, with what only that asker has: the one place that says a
 /// download is the plan's, and from which versions.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(super) enum DownloadAsker {
     /// A read: at the threshold of bytes read as ranges, with no waiter; and of a content
     /// OneDrive stated another one for in its answer to the last download, with one.
@@ -96,7 +96,11 @@ pub(super) enum DownloadAsker {
     /// landing commits as the step (`ItemStore::commit_download_content`), where every
     /// other asker's asks the content alone. The one asker whose asking is taken back
     /// (`ItemDownloadStates::abort_if_plan_alone_asked`).
-    PlanPin { planned_from: ItemVersions },
+    PlanPin {
+        planned_from: ItemVersions,
+        /// Reader waits run without this lease; the final replacement job holds it.
+        landing_lease: Option<crate::sync_parts::lease::Lease>,
+    },
 }
 
 /// One download that runs, told from every other — also from an earlier and a later one
@@ -457,6 +461,7 @@ impl ItemDownloadStates {
     /// The watermark is raised by the downloader's source alone, and only for bytes of
     /// an answer it has told to be of the key's content
     /// (`item_downloader::download_source`): what is below it is of that content.
+    #[cfg(test)]
     pub(super) fn find_running_download(&self, key: &DownloadKey) -> Option<RunningDownloadFile> {
         match crate::panic::lock(&self.states).by_key.get(key) {
             Some(State::Running { written_up_to, file: Some(file), .. }) => Some(RunningDownloadFile { file: Arc::clone(file), written_up_to: written_up_to.load(Ordering::SeqCst) }),
@@ -689,6 +694,7 @@ impl ItemDownloadStates {
 pub(super) type Waiter = oneshot::Sender<Result<(), i32>>;
 
 /// The file a running download writes into, and how far it is written in order.
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub(super) struct RunningDownloadFile {
     pub(super) file: Arc<File>,

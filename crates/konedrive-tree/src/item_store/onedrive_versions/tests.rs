@@ -283,6 +283,7 @@ fn an_item_the_client_did_not_know_gets_a_row_with_what_the_listing_says() {
             local: None,
             onedrive: version(ROOT, "Docs", None),
             onedrive_etag: Some("e-D".to_owned()),
+            onedrive_folder_ctag: Some("c-D".to_owned()),
             onedrive_mime: None,
             synced_place: None,
             synced_content: None,
@@ -298,7 +299,7 @@ fn an_item_the_client_did_not_know_gets_a_row_with_what_the_listing_says() {
     let a = listed(&mut store, "A");
     assert_eq!(
         a,
-        Item { local_item_id: a.local_item_id, onedrive_item: Some(reference("A")), kind: ItemKind::File, onedrive: version(docs.local_item_id, "a.txt", Some("1")), onedrive_etag: Some("e-A-1".to_owned()), onedrive_mime: Some("text/plain".to_owned()), ..docs.clone() }
+        Item { local_item_id: a.local_item_id, onedrive_item: Some(reference("A")), kind: ItemKind::File, onedrive_folder_ctag: None, onedrive: version(docs.local_item_id, "a.txt", Some("1")), onedrive_etag: Some("e-A-1".to_owned()), onedrive_mime: Some("text/plain".to_owned()), ..docs.clone() }
     );
     assert_eq!(listed(&mut store, "L").placement, Placement::Skipped(SkipReason::NameTooLong));
 }
@@ -370,7 +371,7 @@ fn a_parent_named_before_it_arrives_gets_its_row_at_its_first_mention() {
     assert_eq!(store.item_store().find_folder_visibility(a.local_item_id).unwrap(), FolderVisibility::NotKnownYet, "its directory was never listed");
 
     write(&mut store, &[directory("D", "R", "Docs")]);
-    assert_eq!(listed(&mut store, "D"), Item { onedrive: version(ROOT, "Docs", None), onedrive_etag: Some("e-D".to_owned()), ..docs });
+    assert_eq!(listed(&mut store, "D"), Item { onedrive: version(ROOT, "Docs", None), onedrive_etag: Some("e-D".to_owned()), onedrive_folder_ctag: Some("c-D".to_owned()), ..docs });
     assert_eq!(store.item_store().find_folder_visibility(a.local_item_id).unwrap(), FolderVisibility::CanBeShown);
 
     write(&mut store, &[file("C", "N", "c", "1"), directory("N", "M", "N"), directory("M", "R", "M")]);

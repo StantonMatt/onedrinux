@@ -5,8 +5,8 @@ use crate::*;
 /// A store of a version no step starts from — a newer daemon's — is
 /// rebuilt once, from a full listing, and then kept.
 #[test]
-fn a_store_of_a_version_with_no_step_is_rebuilt_once() {
-    for version in ["1", "99"] {
+fn an_unsupported_older_store_is_quarantined_once() {
+    for version in ["1", "29"] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tree.sqlite");
         TreeStore::open(&path).unwrap().set_meta("delta_link", Some("link-1")).unwrap();
@@ -24,7 +24,7 @@ fn a_store_of_a_version_with_no_step_is_rebuilt_once() {
 /// open: a file that is not a database, and a schema a crash cut short
 /// (some tables, no `meta`).
 #[test]
-fn a_store_that_is_not_one_is_rebuilt() {
+fn an_unreadable_store_or_missing_metadata_is_quarantined() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("tree.sqlite");
     std::fs::write(&path, b"this is not sqlite at all, not even a little").unwrap();

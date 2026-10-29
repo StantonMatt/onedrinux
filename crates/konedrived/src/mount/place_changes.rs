@@ -442,6 +442,13 @@ impl PlaceChanges {
         renameat2(AT_FDCWD, &from, AT_FDCWD, &to, RenameFlags::RENAME_NOREPLACE).map_err(io::Error::from)
     }
 
+    /// Rename used for an undo: its old names are durable before their record goes.
+    fn rename_and_sync(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.rename_without_replacing(from, to)?;
+        self.sync_directory(from.parent().unwrap_or(Path::new("")))?;
+        self.sync_directory(to.parent().unwrap_or(Path::new("")))
+    }
+
     /// Makes the directories above `path` that are not on disk, and marks each directory
     /// above `path` with the id `directory_marks` has for it. The directories it made, the
     /// outermost first. When it is refused, what it made is removed again.
@@ -521,6 +528,47 @@ impl PlaceChanges {
 }
 
 impl PlaceChange<'_> {
+    /// Replace a resident file by exchanging its name with a synced staging file.
+    /// The caller records `SetAside` first. Before the exchange the aside name holds
+    /// the new copy; afterwards it holds the old one. At every crash point at least
+    /// one complete version has the visible name. Only `undo_replacement` undoes this.
+    pub(super) fn replace_file(&self, file: &File, path: &Path, item: LocalItemId) -> Result<PlaceUndo, PlaceRefusal> {
+        let aside = PathBuf::from(make_aside_entry_name(item));
+        let linked = self.link_file(file, &aside, &DirectoryMarks::new())?;
+        if let Err(error) = self.exchange_files(path, &aside) {
+            self.undo(linked).map_err(|e| PlaceRefusal::NotPutBack { errno: e.raw_os_error().unwrap_or(libc::EIO), path: path.to_owned() })?;
+            return Err(to_refusal(&error, path));
+        }
+        let undo = PlaceUndo::Restore { set_aside: aside, path: path.to_owned() };
+        let synced = self.place_changes.sync_directory(path.parent().unwrap_or(Path::new("")))
+            .and_then(|()| self.place_changes.sync_directory(Path::new("")));
+        if let Err(error) = synced {
+            self.undo_replacement(undo).map_err(|e| PlaceRefusal::NotPutBack { errno: e.raw_os_error().unwrap_or(libc::EIO), path: path.to_owned() })?;
+            return Err(to_refusal(&error, path));
+        }
+        Ok(undo)
+    }
+
+    fn exchange_files(&self, path: &Path, aside: &Path) -> io::Result<()> {
+        let path = CString::new(self.place_changes.backing_directory.resolve_path(path).into_os_string().into_encoded_bytes())?;
+        let aside = CString::new(self.place_changes.backing_directory.resolve_path(aside).into_os_string().into_encoded_bytes())?;
+        // SAFETY: owned NUL-terminated paths; exchange is atomic on this filesystem.
+        match unsafe { libc::renameat2(libc::AT_FDCWD, path.as_ptr(), libc::AT_FDCWD, aside.as_ptr(), libc::RENAME_EXCHANGE) } {
+            0 => Ok(()),
+            _ => Err(io::Error::last_os_error()),
+        }
+    }
+
+    /// Put the old inode back atomically, sync its name, then discard the new one.
+    pub(super) fn undo_replacement(&self, undo: PlaceUndo) -> io::Result<()> {
+        let PlaceUndo::Restore { set_aside, path } = &undo else { return Err(io::Error::other("not a replacement undo")) };
+        self.exchange_files(path, set_aside)?;
+        self.place_changes.sync_directory(path.parent().unwrap_or(Path::new("")))?;
+        self.place_changes.sync_directory(Path::new(""))?;
+        self.place_changes.discard(undo);
+        Ok(())
+    }
+
     /// Makes a file or a directory at `path`, with the directories above it that are not
     /// on disk, each marked. A file is refused when something is at `path`. A directory
     /// that is on disk already — one a removal left there because it still held what no
@@ -619,7 +667,7 @@ impl PlaceChange<'_> {
         let place_changes = self.place_changes;
         let directories_made = place_changes.make_directories_above(to, directory_marks)?;
         match place_changes.rename_without_replacing(from, to) {
-            Ok(()) => Ok(PlaceUndo::MoveBack { from: from.to_owned(), to: to.to_owned(), directories_made }),
+            Ok(()) => self.sync_or_undo(PlaceUndo::MoveBack { from: from.to_owned(), to: to.to_owned(), directories_made }, &[from, to]),
             Err(error) => {
                 place_changes.remove_directories(&directories_made);
                 Err(self.describe_move_refusal(&error, from, to))
@@ -648,9 +696,9 @@ impl PlaceChange<'_> {
             EntryToSetAside::Movable => {
                 place_changes.move_aside(to, &set_aside).map_err(|error| to_refusal(&error, to))?;
                 match place_changes.rename_without_replacing(from, to) {
-                    Ok(()) => Ok(PlaceUndo::MoveBackAndRestore { from: from.to_owned(), to: to.to_owned(), set_aside }),
+                    Ok(()) => self.sync_or_undo(PlaceUndo::MoveBackAndRestore { from: from.to_owned(), to: to.to_owned(), set_aside: set_aside.clone() }, &[from, to, &set_aside]),
                     Err(error) => {
-                        if let Err(put_back) = place_changes.rename_without_replacing(&set_aside, to) {
+                        if let Err(put_back) = place_changes.rename_and_sync(&set_aside, to) {
                             tracing::error!("cannot put {} back in the backing directory from {}, where it was set aside for a move that failed: {put_back}", to.display(), set_aside.display());
                             return Err(PlaceRefusal::NotPutBack { errno: error.raw_os_error().unwrap_or(libc::EIO), path: to.to_owned() });
                         }
@@ -681,7 +729,29 @@ impl PlaceChange<'_> {
             EntryToSetAside::Movable => {
                 let set_aside = PathBuf::from(make_aside_entry_name(item));
                 place_changes.move_aside(path, &set_aside).map_err(|error| to_refusal(&error, path))?;
-                Ok(PlaceUndo::Restore { set_aside, path: path.to_owned() })
+                self.sync_or_undo(PlaceUndo::Restore { set_aside: set_aside.clone(), path: path.to_owned() }, &[path, &set_aside])
+            }
+        }
+    }
+
+    /// A rename is durable before the row can commit or displaced bytes can go.
+    /// On failure, undo and sync the old names. An undo that cannot be synced keeps
+    /// the operation's record and asks the caller for take-down, just like a failed undo.
+    fn sync_or_undo(&self, undo: PlaceUndo, paths: &[&Path]) -> Result<PlaceUndo, PlaceRefusal> {
+        let made = match &undo {
+            PlaceUndo::MoveBack { directories_made, .. } => directories_made.clone(),
+            _ => Vec::new(),
+        };
+        let sync = || made.iter().map(PathBuf::as_path).chain(paths.iter().copied())
+            .try_for_each(|path| self.place_changes.sync_directory(path.parent().unwrap_or(Path::new(""))));
+        match sync() {
+            Ok(()) => Ok(undo),
+            Err(error) => {
+                let path = paths.first().copied().unwrap_or(Path::new(""));
+                match self.undo(undo).and_then(|()| sync()) {
+                    Ok(()) => Err(to_refusal(&error, path)),
+                    Err(_) => Err(PlaceRefusal::NotPutBack { errno: libc::EIO, path: path.to_owned() }),
+                }
             }
         }
     }
@@ -705,14 +775,14 @@ impl PlaceChange<'_> {
                 Ok(())
             }
             PlaceUndo::MoveBack { from, to, directories_made } => {
-                place_changes.rename_without_replacing(&to, &from)?;
+                place_changes.rename_and_sync(&to, &from)?;
                 place_changes.try_remove_directories(&directories_made)
             }
             PlaceUndo::MoveBackAndRestore { from, to, set_aside } => {
-                place_changes.rename_without_replacing(&to, &from)?;
-                place_changes.rename_without_replacing(&set_aside, &to)
+                place_changes.rename_and_sync(&to, &from)?;
+                place_changes.rename_and_sync(&set_aside, &to)
             }
-            PlaceUndo::Restore { set_aside, path } => place_changes.rename_without_replacing(&set_aside, &path),
+            PlaceUndo::Restore { set_aside, path } => place_changes.rename_and_sync(&set_aside, &path),
             PlaceUndo::RestoreMark { path, mark } => place_changes.backing_directory.mark_with_onedrive_id(&path, mark.as_str()),
         }
     }

@@ -21,6 +21,7 @@ mod checks;
 mod guard;
 mod harness;
 mod proxy;
+mod token_file;
 #[cfg(test)]
 mod tests;
 

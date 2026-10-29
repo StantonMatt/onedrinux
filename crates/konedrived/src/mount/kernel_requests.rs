@@ -329,8 +329,11 @@ impl Filesystem for KernelRequests {
         }
     }
 
-    fn flush(&self, _req: &Request, _ino: INodeNo, _fh: FileHandle, _lock_owner: LockOwner, reply: ReplyEmpty) {
-        reply.ok();
+    fn flush(&self, _req: &Request, _ino: INodeNo, fh: FileHandle, _lock_owner: LockOwner, reply: ReplyEmpty) {
+        match self.requests.answer_fsync(to_fh(fh)) {
+            Ok(()) => reply.ok(),
+            Err(errno) => reply.error(errno),
+        }
     }
 
     fn fsync(&self, _req: &Request, _ino: INodeNo, fh: FileHandle, _datasync: bool, reply: ReplyEmpty) {
@@ -368,8 +371,10 @@ impl Filesystem for KernelRequests {
     }
 
     fn release(&self, _req: &Request, _ino: INodeNo, fh: FileHandle, _flags: OpenFlags, _lock_owner: Option<LockOwner>, _flush: bool, reply: ReplyEmpty) {
-        self.requests.answer_release(to_fh(fh));
-        reply.ok();
+        self.requests.queue_release(to_fh(fh), Box::new(move |answer| match answer {
+            Ok(()) => reply.ok(),
+            Err(errno) => reply.error(errno),
+        }));
     }
 
     fn opendir(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
@@ -493,6 +498,7 @@ impl Filesystem for KernelRequests {
 
     /// Only a regular file is made: nothing else has a place in OneDrive.
     fn mknod(&self, req: &Request, parent: INodeNo, name: &OsStr, mode: u32, _umask: u32, _rdev: u32, reply: ReplyEntry) {
+        if let Err(errno) = self.requests.check_write_scope(to_local_item_id(parent), Some(name)) { return reply.error(errno); }
         if mode & libc::S_IFMT != libc::S_IFREG {
             return reply.error(self.refuse_unsupported(Errno::EPERM));
         }
@@ -504,13 +510,15 @@ impl Filesystem for KernelRequests {
     }
 
     /// A symbolic link has nothing OneDrive could hold: none is made.
-    fn symlink(&self, _req: &Request, _parent: INodeNo, _name: &OsStr, _target: &Path, reply: ReplyEntry) {
+    fn symlink(&self, _req: &Request, parent: INodeNo, name: &OsStr, _target: &Path, reply: ReplyEntry) {
+        if let Err(errno) = self.requests.check_write_scope(to_local_item_id(parent), Some(name)) { return reply.error(errno); }
         reply.error(self.refuse_unsupported(Errno::EPERM));
     }
 
     /// OneDrive has no second name of a file: `EPERM`, as link(2) answers of a filesystem
     /// that makes no hard links.
-    fn link(&self, _req: &Request, _ino: INodeNo, _newparent: INodeNo, _newname: &OsStr, reply: ReplyEntry) {
+    fn link(&self, _req: &Request, ino: INodeNo, newparent: INodeNo, newname: &OsStr, reply: ReplyEntry) {
+        if let Err(errno) = self.requests.check_write_scope(to_local_item_id(ino), None).and_then(|()| self.requests.check_write_scope(to_local_item_id(newparent), Some(newname))) { return reply.error(errno); }
         reply.error(self.refuse_unsupported(Errno::EPERM));
     }
 
@@ -532,11 +540,13 @@ impl Filesystem for KernelRequests {
     /// file copied in with its attributes (`cp -a`) or a `setfattr` would write: none
     /// reaches the backing file, whose marks the check at start reads, by this way. The
     /// marks of a backing file are written by the daemon alone, on the backing directory.
-    fn setxattr(&self, _req: &Request, _ino: INodeNo, _name: &OsStr, _value: &[u8], _flags: i32, _position: u32, reply: ReplyEmpty) {
+    fn setxattr(&self, _req: &Request, ino: INodeNo, _name: &OsStr, _value: &[u8], _flags: i32, _position: u32, reply: ReplyEmpty) {
+        if let Err(errno) = self.requests.check_write_scope(to_local_item_id(ino), None) { return reply.error(errno); }
         reply.error(self.refuse_unsupported(Errno::ENOTSUP));
     }
 
-    fn removexattr(&self, _req: &Request, _ino: INodeNo, _name: &OsStr, reply: ReplyEmpty) {
+    fn removexattr(&self, _req: &Request, ino: INodeNo, _name: &OsStr, reply: ReplyEmpty) {
+        if let Err(errno) = self.requests.check_write_scope(to_local_item_id(ino), None) { return reply.error(errno); }
         reply.error(self.refuse_unsupported(Errno::ENOTSUP));
     }
 

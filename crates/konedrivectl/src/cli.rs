@@ -31,6 +31,11 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand)]
 pub(crate) enum Cmd {
+    /// Preserve and reset an offline store (the daemon must be stopped)
+    Store {
+        #[command(subcommand)]
+        command: StoreCmd,
+    },
     /// Show or change the machine-wide download guard
     Guard {
         #[command(subcommand)]
@@ -87,7 +92,16 @@ pub(crate) enum AccountCmd {
     /// sign-in over SSH). Nothing is added unless the sign-in succeeds, and a OneDrive
     /// account that is added already is not added again. `account rename` gives the account
     /// another label.
-    Add,
+    Add {
+        /// Add a read-only account (new accounts are two-way by default)
+        #[arg(long)]
+        read_only: bool,
+    },
+    /// Limit writes to relative subtrees for a staged trial
+    WriteScope {
+        #[command(subcommand)]
+        command: WriteScopeCmd,
+    },
     /// Give an account a new label
     Rename {
         /// The account: its id, label or email
@@ -129,6 +143,16 @@ pub(crate) enum AccountCmd {
         #[arg(long, requires = "mode")]
         force: bool,
     },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum WriteScopeCmd {
+    /// Show the current restriction
+    Show,
+    /// Allow writes only in these subtrees (relative to the drive root)
+    Set { #[arg(required = true)] paths: Vec<String> },
+    /// Allow writes throughout the drive (read-only mode still applies)
+    Clear,
 }
 
 #[derive(Subcommand)]
@@ -358,3 +382,16 @@ pub(crate) enum GuardCmd {
 
 #[cfg(test)]
 mod tests;
+
+#[derive(Subcommand)]
+pub(crate) enum StoreCmd {
+    /// Quarantine the database and WAL; readable pins return on the next start.
+    /// Pending removals and moves are exported for manual recovery, never replayed.
+    Reset {
+        /// The store's file, normally STATE/konedrive/accounts/ACCOUNT/fuse.sqlite
+        path: std::path::PathBuf,
+        /// The daemon's config.toml, when it uses a custom configuration
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
+    },
+}

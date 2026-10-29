@@ -307,7 +307,7 @@ impl AccountManager {
         }
     }
 
-    /// A signed-out, read-only account with no folder, after every other, under a label the
+    /// A signed-out account in the configured new-account mode, with no folder, after every other, under a label the
     /// caller chose (a development build's `DevTools.AddAccount`, tests),
     /// listed before its objects are put on the bus, and taken off the list again when they
     /// cannot be.
@@ -338,7 +338,9 @@ impl AccountManager {
             if let Err(e) = self.config.remove_account(&entry.id) {
                 tracing::warn!("cannot take the account {:?} out of config.toml again: {e}", entry.label);
             }
-            remove_account_dir(&account.paths.dir);
+            if let Err(error) = remove_account_dir(&account.paths.dir) {
+                tracing::warn!("the failed account's state could not be archived: {error}");
+            }
             return Err(ManagerError::Failed(format!("cannot put the account on the bus: {e}")));
         }
         tracing::info!("added the account {:?} ({})", entry.label, entry.id);
@@ -385,11 +387,12 @@ impl AccountManager {
             tracing::error!("{error}");
             return Err(error);
         }
-        remove_account_dir(&account.paths.dir);
+        let archived = remove_account_dir(&account.paths.dir);
         self.unexport(connection, &account, false).await;
         self.unlist(&account);
         self.siblings.remove(&account.id);
         tracing::info!("removed the account {} ({path})", account.account.state().get().label);
+        archived.map_err(|error| ManagerError::Failed(format!("the account was removed but its state archive could not be synced; all state files were retained: {error}")))?;
         Ok(())
     }
 
@@ -620,12 +623,33 @@ impl HalfRemoved {
     }
 }
 
-/// Removes an account's own directory, with everything the daemon kept in it.
-fn remove_account_dir(dir: &Path) {
-    if let Err(e) = std::fs::remove_dir_all(dir) {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            tracing::warn!("cannot remove {}: {e}", dir.display());
+/// Removing an account must not unlink its live or quarantined store. Archive its
+/// state beside the old directory; config.toml no longer names it and cannot start it.
+fn remove_account_dir(dir: &Path) -> std::io::Result<()> {
+    let mut entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if entries.next().transpose()?.is_none() {
+        // A failed add can leave an empty directory, with no store or pending state.
+        // remove_dir refuses if anything appeared after the check.
+        std::fs::remove_dir(dir)?;
+        if let Some(parent) = dir.parent() { std::fs::File::open(parent)?.sync_all()?; }
+        return Ok(());
+    }
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let mut name = dir.as_os_str().to_owned();
+    name.push(format!(".removed-{stamp}"));
+    let archive = PathBuf::from(name);
+    match std::fs::rename(dir, &archive) {
+        Ok(()) => {
+            if let Some(parent) = dir.parent() { std::fs::File::open(parent)?.sync_all()?; }
+            tracing::info!("removed account state preserved at {}", archive.display());
+            Ok(())
         }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
     }
 }
 

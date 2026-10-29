@@ -169,3 +169,19 @@ fn a_directory_read_in_parts_reads_the_items_it_listed_first() {
     handles.keep_listed_items(fh, listed);
     assert!(handles.find_listed_items(fh).is_none(), "closed: nothing is kept for it");
 }
+
+#[tokio::test]
+async fn a_pending_replacement_is_woken_only_after_its_last_reader_closes() {
+    let handles = ItemHandles::new();
+    let item = LocalItemId::new(7);
+    let content = konedrive_tree::ContentVersion::Hashed { size: 1, mtime: 0, mtime_nsec: 0, hash: None, ctag: Some("c".into()) };
+    let first = handles.add_file(OpenItemFile::ReadingNotOnDisk { item, content: content.clone() });
+    let second = handles.add_file(OpenItemFile::ReadingNotOnDisk { item, content });
+    let waiting = handles.wait_for_no_readers(item, || std::future::ready(true));
+    tokio::pin!(waiting);
+    assert!(futures_util::poll!(waiting.as_mut()).is_pending());
+    handles.close_reader(first);
+    assert!(futures_util::poll!(waiting.as_mut()).is_pending());
+    handles.close_reader(second);
+    assert!(waiting.await);
+}

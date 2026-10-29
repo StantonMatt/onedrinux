@@ -275,3 +275,15 @@ fn a_freed_copy_and_a_mended_row_are_announced_and_what_is_left_is_not() {
         "each by its item and the place the folder shows it at"
     );
 }
+
+#[test]
+fn a_pending_rename_and_a_policy_hold_keep_the_resident_copy() {
+    let fixture = ItemFixture::new();
+    let clean = make_clean_copy(&fixture, "report.txt", b"only local copy while offline");
+    let mut renamed = clean.clone();
+    renamed.local.as_mut().unwrap().place.as_mut().unwrap().name = "renamed.txt".into();
+    assert_eq!(decide_item_free_up(&renamed, false, false, false), FreeUpDecision::LeaveModifiedHere);
+    let protected = Arc::new(ItemFreeUp::new(Arc::clone(&fixture.place_changes), fixture.store.clone(), Arc::clone(&fixture.item_handles), Arc::clone(&fixture.download_states), Arc::clone(&fixture.running_steps), Arc::clone(&fixture.inotify_bridge)).with_protection(Arc::new(|_| true)));
+    assert_eq!(free(&fixture, &protected, &clean), FreedCopy::Left(FreeUpDecision::LeaveModifiedHere));
+    assert_eq!(fixture.read_disk_file("report.txt").as_deref(), Some(b"only local copy while offline".as_slice()));
+}

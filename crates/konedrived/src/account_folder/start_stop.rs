@@ -167,14 +167,14 @@ impl SyncService {
     fn describe_rebuild_loss(loss: &konedrive_tree::RebuildLoss) -> Option<String> {
         let lost: Vec<String> = [
             (loss.pins, "pin(s)"),
-            (loss.unsent_changes_not_on_disk, "change(s) that were not sent to OneDrive and are not on disk"),
+            (loss.unsent_changes_not_on_disk, "change(s) exported for manual recovery (not replayed)"),
             (loss.open_upload_sessions, "upload(s) that were under way"),
         ]
         .into_iter()
         .filter(|(count, _)| *count > 0)
         .map(|(count, what)| format!("{count} {what}"))
         .collect();
-        (!lost.is_empty()).then(|| format!("The database of this folder was of an older version and was rebuilt; lost with it: {}", lost.join(", ")))
+        (!lost.is_empty()).then(|| format!("The database of this folder was quarantined; readable pins were restored. Needs attention: {}", lost.join(", ")))
     }
 
     /// A start of the folder at `root` was refused: why its sync does not run, written into the state

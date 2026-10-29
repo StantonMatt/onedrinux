@@ -132,6 +132,69 @@ open(sys.argv[2], 'wb').write(start + rest)" "$F/big.bin" "$SRC/got" &
     check "a read afterwards gives the file whole" "$(is_seed big.bin X && echo equal)" equal
 }
 
+resident_replacement_keeps_readers_and_mmaps_on_one_version() {
+    begin_folder
+    seed_random X R big.bin 4194304
+    register_folder read-only
+    daemon pin "$F/big.bin" > /dev/null
+    check_state big.bin hydrated
+    $U python3 -c "
+import mmap, pathlib, sys, time
+with open(sys.argv[1], 'rb', buffering=0) as f:
+    try:
+        mapping = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ, trackfd=False)
+    except TypeError:
+        mapping = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+    start = f.read(65536)
+    _ = mapping[:65536]
+    pathlib.Path(sys.argv[2] + '/reader-ready').touch()
+    deadline = time.monotonic() + 60
+    while not pathlib.Path(sys.argv[2] + '/reader-continue').exists():
+        if time.monotonic() >= deadline: raise RuntimeError('reader release timed out')
+        time.sleep(.01)
+    pathlib.Path(sys.argv[2] + '/reader-got').write_bytes(start + f.read())
+    f.close()
+    pathlib.Path(sys.argv[2] + '/reader-closed').touch()
+    while not pathlib.Path(sys.argv[2] + '/mapping-continue').exists():
+        if time.monotonic() >= deadline: raise RuntimeError('mapping release timed out')
+        time.sleep(.01)
+    pathlib.Path(sys.argv[2] + '/mapping-got').write_bytes(mapping[:])
+    mapping.close()" "$F/big.bin" "$SRC" &
+    local reader=$!
+    check_within 10 "the reader and mapping are open" test -f "$SRC/reader-ready"
+    python3 -c "import pathlib, os; pathlib.Path('$SRC/new-version').write_bytes(os.urandom(4194304))"
+    onedrive edit X "$SRC/new-version" > /dev/null
+    daemon refresh > /dev/null
+    replacement_started() { [ "$(onedrive count GET dl/X)" -ge 2 ]; }
+    check_within 20 "the replacement download started" replacement_started
+    check "new opens still read the complete old version while it is held" "$(is_seed big.bin X && echo equal)" equal
+    touch "$SRC/reader-continue"
+    check_within 10 "the file descriptor closed while its mmap stays" test -f "$SRC/reader-closed"
+    check "the mmap alone still keeps the complete old version" "$(is_seed big.bin X && echo equal)" equal
+    touch "$SRC/mapping-continue"
+    wait $reader
+    check "the held reader got exactly the old version" "$(cmp -s "$SRC/reader-got" "$SRC/seed-X" && echo equal)" equal
+    check "the held mmap got exactly the old version" "$(cmp -s "$SRC/mapping-got" "$SRC/seed-X" && echo equal)" equal
+    replacement_landed() { user "cmp -s big.bin '$SRC/new-version'"; }
+    check_within 20 "after close the complete new version lands" replacement_landed
+    check_state big.bin hydrated
+    python3 -c "import pathlib; pathlib.Path('$SRC/grown-version').write_bytes(b'G' * 8388608)"
+    onedrive edit X "$SRC/grown-version" > /dev/null
+    daemon refresh > /dev/null
+    growth_started() { [ "$(onedrive count GET dl/X)" -ge 3 ]; }
+    check_within 20 "the larger replacement started" growth_started
+    check_state big.bin hydrated
+    check "a new open sees the complete larger version" "$(user "cmp -s big.bin '$SRC/grown-version'" && echo equal)" equal
+    python3 -c "import pathlib; pathlib.Path('$SRC/shrunk-version').write_bytes(b'S' * 2048)"
+    onedrive edit X "$SRC/shrunk-version" > /dev/null
+    daemon refresh > /dev/null
+    shrink_started() { [ "$(onedrive count GET dl/X)" -ge 4 ]; }
+    check_within 20 "the smaller replacement started" shrink_started
+    check_state big.bin hydrated
+    check "a new open sees the smaller version with no cached tail" "$(user "cmp -s big.bin '$SRC/shrunk-version'" && echo equal)" equal
+
+}
+
 slow_download_does_not_stall_another_file() {
     begin_folder
     seed_random X R slow.bin 1048576
@@ -155,6 +218,9 @@ many_files_read_at_once_all_get_their_content() {
     seed_folder M R many
     for n in $(seq -w 1 200); do seed_file M$n M f$n.txt "the content of file $n, which no other file has"; done
     register_folder read-only
+    # A finished listing can precede the planner placing all of its children.
+    many_files_are_shown() { [ "$(user "ls many" | wc -l)" -eq 200 ]; }
+    check_within 20 "all 200 files are placed before the concurrent reads" many_files_are_shown
     # This scenario exercises the transfer pool with 200 deliberate concurrent reads.
     # The guard's cutoff is exercised separately in download_guard.sh.
     daemon guard enabled off > /dev/null
@@ -227,6 +293,7 @@ file_reads() {
         file_changed_in_onedrive_during_its_download_is_read_as_it_is_now \
         download_in_flight_when_the_folder_is_forgotten_leaves_no_wrong_bytes \
         free_up_while_a_reader_holds_the_file_gives_it_no_wrong_bytes \
+        resident_replacement_keeps_readers_and_mmaps_on_one_version \
         slow_download_does_not_stall_another_file \
         many_files_read_at_once_all_get_their_content \
         read_while_onedrive_asks_to_wait_fails_at_once_and_works_after \

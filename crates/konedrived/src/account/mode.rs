@@ -1,6 +1,21 @@
 use super::*;
 
 impl AccountService {
+    /// The persisted write scope. None allows every subtree; an empty list allows none.
+    pub fn write_paths(&self) -> Option<Vec<String>> {
+        self.config.account(&self.id).and_then(|account| account.write_paths)
+    }
+
+    /// Changes only write admission; downloads, pins and free-up remain available.
+    pub fn set_write_scope(&self, paths: Option<Vec<String>>) -> Result<(), ModeError> {
+        if self.is_retired() { return Err(ModeError::Failed(RETIRED.into())); }
+        crate::config::WriteScope::parse(paths.as_deref()).map_err(ModeError::InvalidMode)?;
+        self.config.update_account(&self.id, |account| {
+            account.write_paths = paths;
+            Ok::<_, crate::config::ConfigError>(())
+        }).map_err(|error| ModeError::Failed(error.to_string()))
+    }
+
     /// `Account.SetMode` (`docs/design/accounts.md` §10): switches the account to `mode` — `read-only` or
     /// `read-write` — and answers the URL of the sign-in the switch needs, empty when it
     /// needs none.

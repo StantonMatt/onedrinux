@@ -30,3 +30,19 @@ fn a_half_removal_says_what_was_done_under_the_failures_own_name() {
     let unwritable = half(None).refusal("Personal", ManagerError::from(ConfigError::Write("read-only file system".into())));
     assert!(matches!(&unwritable, ManagerError::Failed(said) if said.contains("is not removed: read-only file system")), "{unwritable:?}");
 }
+
+#[test]
+fn removing_an_account_archives_its_live_and_quarantined_stores() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = directory.path().join("account");
+    std::fs::create_dir(&state).unwrap();
+    for (name, bytes) in [("fuse.sqlite", b"live".as_slice()), ("fuse.sqlite.19-stamp", b"quarantined".as_slice()), ("fuse.sqlite.19-stamp-wal", b"pending".as_slice())] {
+        std::fs::write(state.join(name), bytes).unwrap();
+    }
+    super::remove_account_dir(&state).unwrap();
+    assert!(!state.exists());
+    let archive = std::fs::read_dir(directory.path()).unwrap().next().unwrap().unwrap().path();
+    assert_eq!(std::fs::read(archive.join("fuse.sqlite")).unwrap(), b"live");
+    assert_eq!(std::fs::read(archive.join("fuse.sqlite.19-stamp")).unwrap(), b"quarantined");
+    assert_eq!(std::fs::read(archive.join("fuse.sqlite.19-stamp-wal")).unwrap(), b"pending");
+}

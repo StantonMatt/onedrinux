@@ -9,3 +9,5 @@ pub(crate) mod guard;
 pub(crate) mod status;
 pub(crate) mod sync;
 pub(crate) mod version;
+
+pub(crate) mod store;

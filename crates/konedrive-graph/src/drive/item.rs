@@ -7,6 +7,9 @@ use serde::Deserialize;
 #[serde(rename_all = "camelCase")]
 pub struct DriveItem {
     pub id: String,
+    /// Graph identitySet: only the application id proves which client created a holder.
+    #[serde(default)]
+    pub created_by: Option<serde_json::Value>,
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]

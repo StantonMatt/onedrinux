@@ -103,9 +103,14 @@ stream checks; without room reads stay as ranges ([download-guard.md](download-g
 Explicit `Files.Hydrate` keeps its existing behavior: the disk can answer `ENOSPC`.
 
 **New and changed items.** What OneDrive adds to a pinned directory, and what is moved into one,
-is a file the pin holds for whose content is not on disk: the next plan downloads it. A pinned
-file that changes in OneDrive takes OneDrive's content as any downloaded file does — its copy goes
-(`FolderStep::TakeOneDriveContent`) — and is then downloaded again.
+is a file the pin holds for whose content is not on disk: the next plan downloads it. A resident pinned
+file that changes in OneDrive uses `FolderStep::ReplaceContent`: the replacement downloads to
+unnamed staging, is checked by its hash and synced, then atomically exchanges names with the
+old inode. One store job commits the new content and its on-disk presence. A failed download or
+lack of space leaves the old version available with the update pending; a local edit cancels
+the swap and the next plan resolves the conflict. Existing readers of resident copies get the
+same protection, including when a new reader opens after planning. Unpinned files with nobody
+reading keep the discard-then-download path.
 
 ## 4. The calls
 
@@ -136,7 +141,7 @@ pinned files that are not on disk.
 A free-up of a file is the mount's (`mount/item_free_up.rs`, [mount.md](mount.md) §6): the row
 says not on disk first, then the copy goes. Its decision (`decide_item_free_up`), the first that
 holds: a file a pin holds for is left; a file changed here, or open for writing, or that a
-download or a step is busy with, is left; a clean copy is freed.
+download or a step is busy with, is left; a clean copy with no pending namespace change, recorded mutation, recovery uncertainty or held operation is freed. The durable checks are repeated in the commit transaction.
 
 - **`FreeUp(paths)`** takes the pins off first (as `Unpin`), then frees each path, a directory
   file by file, each in its own job of the write-operation thread, so that a program's write

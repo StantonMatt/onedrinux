@@ -24,8 +24,8 @@ its text. An id is never given twice: a new entry takes the next number its lett
 ## What OneDrive and Microsoft decide
 
 - [P7](P7.md) — Some OneDrive items are never shown in the folder
-- [F34](F34.md) — A file OneDrive gives without a hash is downloaded unverified
-- [F297](F297.md) — A range read of a file that is not on disk is not checked against the content's version
+- [F34](F34.md) — A file OneDrive gives without a hash cannot become a verified resident copy
+- [F297](F297.md) — A range read cannot check a whole-file hash
 - [F39](F39.md) — An upload cannot tell OneDrive its size up front
 - [F66](F66.md) — Consent to write stays with Microsoft after the account turns read-only
 - [F172](F172.md) — An unfinished upload holds its name in OneDrive with an empty file

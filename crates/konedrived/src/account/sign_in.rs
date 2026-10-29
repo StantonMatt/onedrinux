@@ -33,6 +33,7 @@ pub fn claim_new(config: &mut Config, drive: &DriveId, email: Option<&str>, unse
     let id = AccountId::fresh(config.accounts.iter().map(|a| &a.id));
     let label = crate::config::signed_in_label(config, &id, email);
     let mut account = AccountConfig::new(id, label, Origin::Added);
+    account.mode = config.new_account_mode;
     account.drive_id = Some(drive.clone());
     if let Some(email) = email.filter(|email| !email.is_empty()) {
         account.login_hint = email.to_owned();

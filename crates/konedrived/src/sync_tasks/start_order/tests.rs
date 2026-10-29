@@ -400,3 +400,72 @@ fn a_refused_start_says_what_the_rebuild_of_its_store_lost() {
         store.close().await;
     });
 }
+
+#[test]
+fn a_newer_schema_refuses_the_account_start_with_both_recovery_options() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("fuse.sqlite");
+    make_old_store_with_sessions(&path, "99", &[]);
+    let before = std::fs::read(&path).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let refusal = runtime.block_on(open_folder_store(&path)).err().expect("newer schema cannot start");
+    let StartRefusal::Store(text) = refusal else { panic!("not a store refusal") };
+    assert!(text.contains("Install the newer build"), "{text}");
+    assert!(text.contains("konedrivectl store reset"), "{text}");
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn pending_upload_verification_settles_with_backoff_and_refresh_retries_only_metadata() {
+    use serde_json::json;
+    use wiremock::ResponseTemplate;
+    use crate::sync_tasks::tests::start_over_kept_parts;
+    let fixture = ItemFixture::new();
+    let file = fixture.show_onedrive_file("report.txt", b"old");
+    fixture.land_copy(file.local_item_id, b"old");
+    let content = b"new uploaded content";
+    let changed = fixture.change_file_here(file.local_item_id, content);
+    let id = changed.local_item_id;
+    fixture.runtime().block_on(async {
+        let graph = fixture.start_fake_onedrive().await;
+        let metadata = |hash: Option<String>| json!({"id":"report.txt", "name":"report.txt", "eTag":"e-confirmed", "cTag":"c-confirmed", "size":content.len(),
+            "parentReference":{"id":"R", "driveId":DRIVE_ID}, "file":{"hashes":{"quickXorHash":hash}},
+            "fileSystemInfo":{"lastModifiedDateTime":"2024-05-01T10:00:00Z"}});
+        graph.with(|cloud| {
+            cloud.script("PUT", "upload/", ResponseTemplate::new(200).set_body_json(metadata(None)), 1);
+            cloud.script("GET", "items/report.txt", ResponseTemplate::new(500).set_body_json(json!({"error":{"code":"generalException"}})), 1);
+        });
+        let mut input = make_start_input(&fixture, graph.client());
+        input.settings.quiet_time = 0;
+        let started = start_over_kept_parts(&fixture, input).await;
+        let memory = || fixture.read_rows(move |rows| rows.find_item_memory(id));
+        wait_until("verification failure is settled", || memory().failed_tries.is_some()).await;
+        let pending = memory();
+        assert!(pending.refusal.is_none(), "verification is not a permanent refusal");
+        assert_eq!(pending.upload_session.as_ref().unwrap().next_offset, content.len() as u64);
+        assert_eq!(pending.failed_tries.as_ref().unwrap().last_failure, konedrive_tree::Reason::Network);
+        assert!(pending.failed_tries.as_ref().unwrap().next_try_at.unwrap() > (fixture.clock())());
+        let puts = graph.with(|cloud| cloud.count("PUT", "upload/"));
+        let openings = graph.with(|cloud| cloud.count("POST", "createUploadSession"));
+        let reads = graph.with(|cloud| cloud.count("GET", "items/report.txt"));
+        graph.with(|cloud| {
+            cloud.script("GET", "items/report.txt", ResponseTemplate::new(200).set_body_json(metadata(None)), 1);
+            cloud.delay("GET", "delta", std::time::Duration::from_millis(500), 1);
+        });
+        started.tasks.refresh();
+        wait_until("hashless retry settles too", || memory().failed_tries.as_ref().is_some_and(|tries| tries.count >= 2)).await;
+        assert!(memory().refusal.is_none());
+        assert!(graph.with(|cloud| cloud.count("GET", "items/report.txt")) > reads);
+        graph.with(|cloud| {
+            cloud.script("GET", "items/report.txt", ResponseTemplate::new(200).set_body_json(metadata(Some(crate::fake_onedrive::qx(content)))), 1);
+            cloud.delay("GET", "delta", std::time::Duration::from_millis(500), 1);
+        });
+        started.tasks.refresh();
+        wait_until("verified completion commits through the planner", || fixture.find_item(id).unwrap().unsent_since.is_none()).await;
+        assert!(memory().upload_session.is_none());
+        assert_eq!(graph.with(|cloud| cloud.count("PUT", "upload/")), puts);
+        assert_eq!(graph.with(|cloud| cloud.count("POST", "createUploadSession")), openings);
+        assert_eq!(fixture.read_disk_file("report.txt").as_deref(), Some(content.as_slice()));
+        stop(started).await;
+    });
+}

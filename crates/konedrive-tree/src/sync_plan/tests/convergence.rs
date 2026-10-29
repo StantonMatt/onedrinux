@@ -316,6 +316,16 @@ impl World {
         if !plan.steps.is_empty() || !plan.faults.is_empty() {
             return Err(format!("the plan over every row of what has converged: steps {:?}, faults {:?}", plan.steps, plan.faults));
         }
+        // A rename whose remote item was deleted cannot be recovered from cloud-only
+        // content. It must remain visible and blocked, rather than converge by loss of
+        // the user's namespace change. Limit this exception to those exact row facts.
+        let conflicts: BTreeSet<_> = rows.iter().filter(|row| {
+            row.kind == ItemKind::File && row.content_presence == ContentPresence::NotOnDisk
+                && row.onedrive.is_none() && row.synced_place.is_some()
+                && row.local.as_ref().and_then(|v| v.place.as_ref()).is_some_and(|place| Some(place) != row.synced_place.as_ref())
+                && row.local.as_ref().and_then(|v| v.content.as_ref()) == row.synced_content.as_ref()
+        }).map(|row| row.local_item_id).collect();
+        let mut conflict_waiters = BTreeSet::new();
         let waited_for = |item: LocalItemId| plan.waits.iter().find(|wait| wait.item == item).map(|wait| &wait.reason);
         for wait in &plan.waits {
             let (mut at, mut reason) = (wait.item, Some(&wait.reason));
@@ -323,7 +333,9 @@ impl World {
                 let Some(WaitReason::AnotherItem(another)) = reason else { break };
                 (at, reason) = (*another, waited_for(*another));
             }
-            if !matches!(reason, Some(WaitReason::User(Reason::Parent))) || !(left_as_they_are.contains(&at) || by_id.get(&at).is_some_and(|row| row.local.as_ref().and_then(|local| local.place.as_ref()).is_some_and(|place| left_as_they_are.contains(&place.parent_local_item_id)))) {
+            let is_conflict = conflicts.contains(&at) && matches!(reason, Some(WaitReason::User(Reason::Refused(Some(_)))));
+            if is_conflict { conflict_waiters.insert(wait.item); }
+            if !is_conflict && (!matches!(reason, Some(WaitReason::User(Reason::Parent))) || !(left_as_they_are.contains(&at) || by_id.get(&at).is_some_and(|row| row.local.as_ref().and_then(|local| local.place.as_ref()).is_some_and(|place| left_as_they_are.contains(&place.parent_local_item_id))))) {
                 return Err(format!("the plan over every row of what has converged leaves item {} waiting: {:?}, at last item {at} for {reason:?}", wait.item, wait.reason));
             }
             left_as_they_are.insert(wait.item);
@@ -343,7 +355,7 @@ impl World {
                 return Err(format!("item {} does not have its three versions equal but for the time of OneDrive's content, and waits for nothing", row.local_item_id));
             }
         }
-        if !self.changes.gives_ignored_names && !left_as_they_are.is_empty() {
+        if !self.changes.gives_ignored_names && left_as_they_are.difference(&conflict_waiters).next().is_some() {
             return Err(format!("no name is ignored, and the items {left_as_they_are:?} are left as they are"));
         }
         expected.find_loss(&rows, &left_as_they_are).map_or(Ok(()), Err)

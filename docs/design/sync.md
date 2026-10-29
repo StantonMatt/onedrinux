@@ -116,8 +116,10 @@ whose row is gone, or that the folder does not show, is answered `ESTALE` ([moun
 writing connection (`Store`); readers use `ItemReader`, one read transaction per closure, and never
 wait for the writer. Beside `items`: the step memory (§7.5), the records of place changes
 ([mount.md](mount.md) §3), the pins, the thumbnail marks, the activity log, the conflicts, and in
-`meta` the delta link and the listing under way. A store of another layout is rebuilt, but for the
-one just before when the change only added ([D36](../limitations/D36.md)).
+`meta` the delta link and the listing under way. Supported older layouts migrate sequentially
+with a durable WAL-inclusive snapshot. Unsupported/damaged stores are quarantined; readable
+pins return and pending namespace changes are exported without replay. Newer layouts refuse
+to start ([store preservation](store.md), [D36](../limitations/D36.md)).
 
 ## 3. Who writes what
 
@@ -520,8 +522,8 @@ the access mode and a change of the ignored names run beside the tasks.
 
 `start_order::start_folder_sync`, run in a task of its own and never cut between stages:
 
-0. the upload sessions a store of an older version holds are cancelled before that store goes;
-1. the store opened, made or rebuilt; the activity log attached;
+0. readable upload sessions of a store that will be quarantined are cancelled; newer layouts are never cancelled;
+1. the store admitted, migrated or quarantined; readable pins restored and pending changes exported before listing; the activity log attached;
 2. the drive for the check decided; a folder whose drive is not known is not mounted;
 3. the leaf state made, then the mount built — the start-up check runs in it — and served
    ([mount.md](mount.md) §7);
@@ -577,7 +579,7 @@ a directory that holds what the folder cannot show cannot be removed here
 ([F299](../limitations/F299.md)), nor its name used ([F304](../limitations/F304.md)); a file never uploaded keeps a directory OneDrive removed
 ([F255](../limitations/F255.md)); a change on disk while no daemon runs is no move or removal in
 OneDrive ([F298](../limitations/F298.md)); an unfinished upload holds its name
-([F172](../limitations/F172.md)); a store of another version is rebuilt ([D36](../limitations/D36.md)).
+([F172](../limitations/F172.md)); unsupported stores are quarantined and newer schemas refused ([D36](../limitations/D36.md)).
 
 Beside them: Graph lists a drive only from its root, so the whole drive is listed; a guessed binding
 and a real one renamed while no store was there read the same and are both given up (§6.3); and the

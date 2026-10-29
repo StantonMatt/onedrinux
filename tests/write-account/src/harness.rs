@@ -179,6 +179,7 @@ pub async fn run(options: Options) -> Ended {
                 None => run.all().await,
                 Some(Only::Placeholders) => run.placeholders().await,
                 Some(Only::Notifications) => run.notifications().await,
+                Some(Only::Remote) => run.remote().await,
             };
         }
         let outcome = run.cleanup().await;

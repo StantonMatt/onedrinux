@@ -166,7 +166,11 @@ pub fn persist(file: &Path) -> Persist {
     };
     let account = match store.snapshot().accounts.first() {
         Some(account) => account.id.clone(),
-        None => store.add_account("Personal").map(|a| a.id).unwrap_or_else(|_| crate::config::AccountId::new("0123456789ab")),
+        None => store.add_account("Personal").map(|a| {
+            // Most fixtures model an existing read-only account; two-way scenarios opt in.
+            let _ = store.update_account(&a.id, |account| { account.mode = crate::config::Mode::ReadOnly; Ok::<_, crate::config::ConfigError>(()) });
+            a.id
+        }).unwrap_or_else(|_| crate::config::AccountId::new("0123456789ab")),
     };
     Persist { store: Arc::new(store), account }
 }
@@ -208,8 +212,8 @@ impl ContentSource for Replaceable {
         self.now().fetch(item_id, from, end).await
     }
 
-    async fn read_range(&self, item_id: &str, from: u64, end: u64) -> Result<Fetched, SourceError> {
-        self.now().read_range(item_id, from, end).await
+    async fn read_range(&self, item_id: &str, opened_as: &konedrive_tree::ContentVersion, from: u64, end: u64) -> Result<Fetched, SourceError> {
+        self.now().read_range(item_id, opened_as, from, end).await
     }
 
     fn forget(&self, item_id: &str) {

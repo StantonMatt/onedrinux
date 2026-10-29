@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use tokio::task::JoinHandle;
-use zbus::object_server::InterfaceRef;
+use zbus::object_server::{InterfaceRef, SignalEmitter};
 use zbus::zvariant::ObjectPath;
 use zbus::{interface, Connection};
 
@@ -45,6 +45,26 @@ impl Account {
     async fn set_mode(&self, mode: &str, force: bool) -> Result<String> {
         Ok(self.service.set_mode(mode, force).await?)
     }
+
+    async fn set_write_scope(&self, paths: Vec<String>, #[zbus(signal_emitter)] emitter: SignalEmitter<'_>) -> Result<()> {
+        self.service.set_write_scope(Some(paths))?;
+        self.write_paths_changed(&emitter).await?;
+        self.write_scope_enabled_changed(&emitter).await?;
+        Ok(())
+    }
+
+    async fn clear_write_scope(&self, #[zbus(signal_emitter)] emitter: SignalEmitter<'_>) -> Result<()> {
+        self.service.set_write_scope(None)?;
+        self.write_paths_changed(&emitter).await?;
+        self.write_scope_enabled_changed(&emitter).await?;
+        Ok(())
+    }
+
+    #[zbus(property)]
+    async fn write_paths(&self) -> Vec<String> { self.service.write_paths().unwrap_or_default() }
+
+    #[zbus(property)]
+    async fn write_scope_enabled(&self) -> bool { self.service.write_paths().is_some() }
 
     #[zbus(property)]
     async fn id(&self) -> String {

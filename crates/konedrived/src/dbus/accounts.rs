@@ -21,6 +21,15 @@ impl Accounts {
         Ok(self.manager.sign_in(connection).await?)
     }
 
+    /// Starts the same sign-in as SignIn, with an explicit mode (empty uses the default).
+    #[zbus(out_args("sign_in", "url"))]
+    async fn add(&self, mode: &str, #[zbus(connection)] connection: &Connection) -> Result<(u32, String), Fault> {
+        let mode = if mode.is_empty() { None } else {
+            Some(crate::config::Mode::parse(mode).ok_or_else(|| crate::daemon::manager::ManagerError::InvalidArgs("mode must be read-only or read-write".into()))?)
+        };
+        Ok(self.manager.sign_in_with_mode(mode, connection).await?)
+    }
+
     /// Cancels the sign-in `sign_in`: whether this call ended it. `false` for a number
     /// that is not under way, a sign-in whose account is being made included.
     #[zbus(out_args("cancelled"))]

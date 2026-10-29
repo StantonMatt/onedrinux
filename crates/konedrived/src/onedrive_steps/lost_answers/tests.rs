@@ -79,8 +79,8 @@ fn a_file_of_the_name_is_the_steps_own_only_with_the_hash_sent_unbound_and_no_se
         (request, Some(found(file(Some("other"), 5, "e", "c", "P", "a.txt"), false, false)), "name held"),
         (request, Some(found(directory(Some(0)), false, false)), "name held"),
         // An empty file with no hash holds the empty content.
-        (empty_request, Some(found(file(None, 0, "e", "c", "P", "a.txt"), false, false)), "went through"),
-        (empty_request, Some(found(file(Some(&empty_hash), 0, "e", "c", "P", "a.txt"), false, false)), "went through"),
+        (empty_request, Some(found(file(None, 0, "e", "c", "P", "a.txt"), false, false)), "name held"),
+        (empty_request, Some(found(file(Some(&empty_hash), 0, "e", "c", "P", "a.txt"), false, false)), "name held"),
         // The empty file of an upload session of this folder is never adopted.
         (empty_request, Some(found(file(None, 0, "e", "c", "P", "a.txt"), false, true)), "name held"),
         (request, Some(found(file(None, 0, "e", "c", "P", "a.txt"), false, false)), "name held"),
@@ -234,9 +234,9 @@ async fn an_empty_file_found_where_a_session_or_an_opening_is_kept_is_not_the_st
     let (root, empty_hash) = (StepsFolder::root(), qx(b""));
     let request = SentRequest::SendNewFile { parent: &root, name: OsStr::new("a.txt"), sent_hash: &empty_hash };
 
-    // Nothing of this folder explains the empty file: it holds the content sent.
+    // Equal empty content cannot identify its creator, even with no recorded session.
     let unexplained = folder.lost_answers.read_request_outcome(&versions, request).await;
-    assert!(matches!(unexplained, Ok(LostAnswerFate::WentThrough(Some(_)))), "{unexplained:?}");
+    assert_eq!(unexplained, Ok(LostAnswerFate::NameHeld { holder_name: "a.txt".into() }));
 
     let (other, place) = (other.local_item_id, ItemPlace { parent_local_item_id: LocalItemId::ROOT, name: "a.txt".into() });
     folder.fixture.write_rows(move |store| store.step_memory().remember_upload_session_opening(other, &place, 1));

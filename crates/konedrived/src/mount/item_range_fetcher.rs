@@ -61,7 +61,7 @@ pub(super) struct RangeAnswerFacts {
 impl RangeAnswerFacts {
     fn of(fetched: &Fetched) -> Self {
         let mtime = fetched.mtime.duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs() as i64);
-        RangeAnswerFacts { size: fetched.size, mtime, ctag: fetched.version.as_ref().map(|version| version.ctag.clone()) }
+        RangeAnswerFacts { size: fetched.size, mtime, ctag: fetched.version.as_ref().filter(|version| !version.ctag.is_empty()).map(|version| version.ctag.clone()) }
     }
 }
 
@@ -114,21 +114,16 @@ impl ItemRangeFetcher {
     /// throttle itself (`SourceError::Throttled`: the drive waited out as much as it
     /// does) is the same refusal.
     ///
-    /// **The limit:** the source over Graph answers a range with no size, no time and no
-    /// cTag, so that through it another content is told only by OneDrive not having the
-    /// file; a content OneDrive replaced is read as the one opened until the listing's
-    /// step changes the row (`decide_not_on_disk_read_origin` then says `ESTALE`). And
-    /// where a source says a size and a time and no cTag, a content of the same size and
-    /// time reads as the same content.
-    // Graph's answer to a range names no version: another content is told after the
-    // answer, not by a refused request (`docs/limitations/F297.md`).
+    /// Graph holds each buffered range against metadata before and after its body,
+    /// and retains the first range's version and optional response ETag. A range has
+    /// no independent whole-file hash; that remaining limit is F297.
     pub(super) async fn fetch_range(&self, item: LocalItemId, source: &RangeSource, from: u64, end: u64) -> Result<Vec<u8>, RangeRefusal> {
         use tokio::io::AsyncReadExt;
         let onedrive_item_id = source.onedrive_item.item_id.as_str();
         let asked = std::time::Instant::now();
         let asking = async {
             let active_read = self.range_readers.begin_read(onedrive_item_id).await;
-            (self.source.read_range(onedrive_item_id, from, end).await, active_read)
+            (self.source.read_range(onedrive_item_id, &source.content, from, end).await, active_read)
         };
         let (fetched, _active_read) = match self.throttle_wait.ask_unless_refused(ContentAsker::Program, asking).await {
             Ok(answered) => answered,
@@ -153,6 +148,11 @@ impl ItemRangeFetcher {
                 return Err(RangeRefusal::Failed { errno: libc::EIO });
             }
         };
+        if let ContentVersion::Hashed { hash: Some(opened), .. } = &source.content {
+            if let (Some(opened), Some(answered)) = (konedrive_graph::quickxor::decode_base64(opened), fetched.version.as_ref().and_then(|v| v.quick_xor)) {
+                if opened != answered { return Err(RangeRefusal::AnotherContent); }
+            }
+        }
         if decide_is_another_content(&RangeAnswerFacts::of(&fetched), &source.content) {
             tracing::info!("a range of item {item} is of another content than the one that was opened: nothing of it is read");
             return Err(RangeRefusal::AnotherContent);

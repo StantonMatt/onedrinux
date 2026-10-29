@@ -213,3 +213,13 @@ non-zero. The refusals have D-Bus error names — `org.konedrive.Error.ModifiedL
 A command that has a question to ask (`sync forget` and `account remove`, when changes were not
 sent) fails when its input is not a terminal, unless it is given `--yes`. Answered "no" on a
 terminal, it changes nothing and exits with status 1.
+
+## Offline store recovery
+
+Stop the daemon before resetting a store. `konedrivectl store reset <store-path>` preserves
+its database, WAL and SHM in quarantine. It works without the session bus or a Microsoft
+sign-in and refuses a store in use. For a custom daemon configuration, also pass
+`--config <config.toml>` so the command takes the correct daemon lock. The next start
+restores readable pins and exports pending moves/removals for manual recovery, without
+replaying them. Prefer installing the newer build when a downgrade reports a newer schema.
+See [store preservation](design/store.md).

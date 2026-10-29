@@ -15,6 +15,7 @@
 // test: a_new_item_whose_row_is_still_there_asks_for_a_cycle
 // test: a_made_item_that_cannot_be_removed_is_left_and_said
 // test: the_fate_of_a_made_item_is_by_its_row
+// test: write_scope_leaves_unresolvable_cleanup_items_in_onedrive
 
 use konedrive_graph::drive::WriteError;
 use konedrive_graph::pool::Class;
@@ -46,18 +47,23 @@ pub(crate) fn decide_made_item_fate(row: Option<&Item>) -> MadeItemFate {
 #[derive(Clone)]
 pub(crate) struct MadeItems {
     graph: GraphAccess,
+    write_scope: crate::config::WriteScopeSource,
 }
 
 impl MadeItems {
     pub fn new(graph: GraphAccess) -> Self {
-        Self { graph }
+        Self { graph, write_scope: Default::default() }
+    }
+
+    pub(crate) fn with_write_scope(mut self, source: crate::config::WriteScopeSource) -> Self {
+        self.write_scope = source;
+        self
     }
 
     /// After `RowsChanged` on `MakeDirectory` or `SendNewFile`: reads the row,
     /// [`decide_made_item_fate`], and removes what was made (`delete_item`, guarded by
-    /// the eTag of the answer; `delete_folder`, for
-    /// a directory: unguarded, and it takes only what this step made — a directory is
-    /// adopted as the step's own only when it is empty, `lost_answers`) or asks for a
+    /// the eTag of the answer). A directory whose original folder cTag was not kept is
+    /// left for a listing, because a GET cannot prove a later descendant was ours. Or asks for a
     /// cycle. Called with NO lock held: the tree lock of the
     /// commit was let go. Answers `MadeItemRemoved` for an item removed or found gone,
     /// `MadeItemLeft` for a removal OneDrive did not carry out (a 412: another changed it
@@ -75,12 +81,17 @@ impl MadeItems {
         if decide_made_item_fate(row.as_ref()) == MadeItemFate::LeaveForListing {
             return RowsChangedFollowUp::CycleWanted;
         }
+        if !super::write_scope::allows_reference(&self.graph, &self.write_scope, &made.item).await {
+            return RowsChangedFollowUp::MadeItemLeft(made.item.clone());
+        }
         let made_id = made.item.item_id.as_str();
         let removed = {
             let _slot = self.graph.drive.pool().acquire(Class::Metadata).await;
             match made.content {
                 Some(_) => self.graph.drive.delete_item(made_id, &made.etag).await,
-                None => self.graph.drive.delete_folder(made_id).await,
+                // ConfirmedItem carries no folder cTag from the create response. A fresh
+                // GET cannot prove that a new descendant was ours: leave the orphan.
+                None => return RowsChangedFollowUp::MadeItemLeft(made.item.clone()),
             }
         };
         match removed {

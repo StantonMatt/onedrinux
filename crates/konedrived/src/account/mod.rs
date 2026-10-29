@@ -406,6 +406,7 @@ impl AccountService {
     /// tokens.
     pub(crate) fn drive(&self) -> anyhow::Result<konedrive_graph::drive::DriveClient> {
         konedrive_graph::drive::DriveClient::new(self.endpoints.graph.clone(), Arc::clone(&self.tokens) as Arc<dyn konedrive_graph::token::TokenSource>)
+            .map(|drive| drive.with_application_id(self.state.get().client_id))
     }
 
     /// The client the account's own questions go through (who is signed in, which drive it

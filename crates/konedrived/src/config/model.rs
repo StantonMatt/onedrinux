@@ -47,6 +47,9 @@ pub struct Config {
     /// Machine-wide thresholds, reader roles and persistent app rules.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download_guard_limits: Option<crate::download_guard::GuardConfig>,
+    /// Mode of newly added accounts only. Existing entries keep their own mode.
+    #[serde(default = "new_account_mode")]
+    pub new_account_mode: Mode,
     /// Every account, in the order it was added.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub accounts: Vec<AccountConfig>,
@@ -145,6 +148,7 @@ impl Default for Config {
             on_battery: None,
             download_guard: None,
             download_guard_limits: None,
+            new_account_mode: new_account_mode(),
             accounts: Vec::new(),
             transfers: None,
         }
@@ -159,6 +163,10 @@ pub struct AccountConfig {
     pub(crate) label: String,
     #[serde(default)]
     pub mode: Mode,
+    /// Relative subtrees programs and the sender may change. None allows the whole drive;
+    /// an empty list allows no writes. Invalid paths fail closed when checked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_paths: Option<Vec<String>>,
     #[serde(default)]
     pub(crate) origin: Origin,
     /// The Graph drive id: the account's identity, recorded at its first sign-in or its
@@ -229,6 +237,7 @@ impl AccountConfig {
             id,
             label: label.into(),
             mode: Mode::ReadOnly,
+            write_paths: None,
             origin,
             drive_id: None,
             login_hint: String::new(),
@@ -345,7 +354,13 @@ fn local_source() -> String {
     "local".into()
 }
 
-/// An account's mode (`docs/design/writes.md` §2.1): read-only, the default, or read-write. The mode in
+/// The default for new accounts, separate from the read-only deserialization default
+/// of an existing account whose mode is absent.
+fn new_account_mode() -> Mode {
+    Mode::ReadWrite
+}
+
+/// An account's mode (`docs/design/writes.md` §2.1): read-only or read-write. The mode in
 /// `config.toml` is the one the user chose; the account runs read-write only while its token
 /// carries `Files.ReadWrite` and reaches the drive recorded for it (`AccountService::mode`).
 /// A value this version does not know loads as

@@ -103,6 +103,8 @@ pub struct SyncSnapshot {
     pub upload_queue: UploadQueueStatus,
     pub pause: PauseStatus,
     pub transfers: TransferStatus,
+    /// Persistent manual-recovery notice, loaded before the first listing.
+    pub(crate) store_recovery: Option<String>,
 }
 
 /// The folder's registration, worked out from the folder's state in one place
@@ -264,7 +266,7 @@ pub struct DiskSpaceShortage {
 /// saying anything.
 pub fn running_trouble(s: &SyncSnapshot) -> Option<(String, TroubleKind)> {
     let kind = s.cycle.sync_trouble.as_ref().map_or(TroubleKind::Other, SyncTrouble::kind);
-    let alone = s.folder.trouble.is_none() && s.upload_queue.note.is_none() && s.transfers.disk_space_shortage.is_none();
+    let alone = s.folder.trouble.is_none() && s.upload_queue.note.is_none() && s.transfers.disk_space_shortage.is_none() && s.store_recovery.is_none();
     let text = published_error(s);
     (!text.is_empty()).then_some((text, if alone { kind } else { TroubleKind::Other }))
 }
@@ -297,6 +299,7 @@ pub fn published_state(s: &SyncSnapshot) -> &'static str {
 pub fn published_error(s: &SyncSnapshot) -> String {
     joined([
         s.folder.trouble.as_ref().map(|t| t as &dyn std::fmt::Display),
+        s.store_recovery.as_ref().map(|t| t as &dyn std::fmt::Display),
         s.cycle.sync_trouble.as_ref().map(|t| t as &dyn std::fmt::Display),
         s.upload_queue.note.as_ref().map(|t| t as &dyn std::fmt::Display),
         s.transfers.disk_space_shortage.as_ref().map(|t| t as &dyn std::fmt::Display),

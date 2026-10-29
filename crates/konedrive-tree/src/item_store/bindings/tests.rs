@@ -91,6 +91,7 @@ fn give_up_binding_leaves_the_item_local_and_a_new_row_takes_the_binding() {
             local: None,
             onedrive: None,
             onedrive_etag: None,
+            onedrive_folder_ctag: None,
             onedrive_mime: None,
             synced_place: None,
             synced_content: None,
@@ -335,6 +336,7 @@ fn make_onedrive_item_makes_a_row_with_the_binding_and_the_kind_alone() {
             local: None,
             onedrive: None,
             onedrive_etag: None,
+            onedrive_folder_ctag: None,
             onedrive_mime: None,
             synced_place: None,
             synced_content: None,
@@ -430,4 +432,51 @@ fn give_up_binding_hands_what_onedrive_has_to_the_row_that_takes_the_binding() {
     assert_eq!((taker_row.onedrive, taker_row.onedrive_etag, taker_row.placement, taker_row.confirmed_at_count), (listed_row.onedrive, Some("e-P".to_owned()), listed_row.placement, 7));
     assert_eq!(seen_in_full_listing(&store, taker), 3);
     assert_eq!(item(&mut store, child).onedrive.unwrap().place, Some(place(taker, "child")));
+}
+
+#[test]
+fn a_binding_exchange_rolls_back_whole_on_a_failure_between_rows() {
+    let mut store = TreeStore::in_memory().unwrap();
+    let (temp, original) = (make_file(&mut store, ROOT, "temp"), make_file(&mut store, ROOT, "original"));
+    synced(&mut store, temp, "TEMP");
+    synced(&mut store, original, "ORIGINAL");
+    let before = [item(&mut store, temp), item(&mut store, original)];
+    // The first new binding has been written when the second write fails.
+    store.bench_sql(&format!("CREATE TRIGGER fail_exchange BEFORE UPDATE ON items WHEN NEW.local_item_id = {} AND NEW.onedrive_item_id = 'TEMP' BEGIN SELECT RAISE(ABORT, 'interrupted exchange'); END", original.as_i64())).unwrap();
+    assert!(store.item_store().apply(&LocalVersionChange::SavedOver { replacing: temp, replaced: original }).is_err());
+    assert_eq!([item(&mut store, temp), item(&mut store, original)], before);
+    store.bench_sql("DROP TRIGGER fail_exchange").unwrap();
+    store.item_store().apply(&LocalVersionChange::SavedOver { replacing: temp, replaced: original }).unwrap();
+    assert_eq!(bound_to(&mut store, "ORIGINAL"), Some(temp));
+    assert_eq!(bound_to(&mut store, "TEMP"), Some(original));
+}
+
+#[test]
+fn an_atomic_save_keeps_both_bindings_after_reopening_before_either_cloud_step() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("items.db");
+    let mut store = TreeStore::open(&path).unwrap();
+    let (temp, original) = (make_file(&mut store, ROOT, "temp"), make_file(&mut store, ROOT, "original"));
+    synced(&mut store, temp, "TEMP");
+    synced(&mut store, original, "ORIGINAL");
+    store.item_store().apply(&LocalVersionChange::SavedOver { replacing: temp, replaced: original }).unwrap();
+    drop(store);
+    let mut reopened = TreeStore::open(&path).unwrap();
+    assert_eq!(bound_to(&mut reopened, "ORIGINAL"), Some(temp));
+    assert_eq!(bound_to(&mut reopened, "TEMP"), Some(original));
+    assert_eq!(item(&mut reopened, temp).local.unwrap().place, Some(place(ROOT, "original")));
+    assert!(item(&mut reopened, original).local.is_none());
+}
+
+#[test]
+fn a_cloud_only_source_cannot_lose_its_only_content_by_a_binding_exchange() {
+    let mut store = TreeStore::in_memory().unwrap();
+    let (temp, original) = (make_file(&mut store, ROOT, "temp"), make_file(&mut store, ROOT, "original"));
+    let mut source = synced(&mut store, temp, "TEMP");
+    source.content_presence = ContentPresence::NotOnDisk;
+    write_item(&store.conn, &source).unwrap();
+    let destination = synced(&mut store, original, "ORIGINAL");
+    assert!(is_refused(store.item_store().apply(&LocalVersionChange::SavedOver { replacing: temp, replaced: original })));
+    assert_eq!(item(&mut store, temp), source);
+    assert_eq!(item(&mut store, original), destination);
 }

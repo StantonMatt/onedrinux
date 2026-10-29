@@ -93,6 +93,7 @@ pub struct Run {
     run_id: String,
     delta_link: String,
     delta_wait: Duration,
+    client_id: String,
     /// Every file the run wrote, by id: its name and the eTag its last write answered.
     files: HashMap<String, (String, Option<String>)>,
     gone: HashSet<String>,
@@ -119,6 +120,7 @@ impl Run {
             run_id: options.run_id.clone(),
             delta_link,
             delta_wait: options.delta_wait,
+            client_id: if options.config.client_id.is_empty() { konedrived::config::DEFAULT_CLIENT_ID.to_owned() } else { options.config.client_id.clone() },
             files: HashMap::new(),
             gone: HashSet::new(),
             seed: seed | 1,
@@ -137,6 +139,8 @@ impl Run {
                 }
             };
         }
+        check!("remote namespace safety", self.remote_safety());
+        check!("createdBy.application identifies this client", self.remote_application());
         check!("an empty file: conflictBehavior=fail in the URL refuses a taken name", self.empty_file_name_taken());
         check!("an empty file: If-Match is honoured on a 0-byte PUT", self.empty_file_if_match());
         check!("a small file: a one-request session, its guards, its time and its hash", self.small_file());
@@ -572,3 +576,4 @@ fn message(answer: &Value) -> String {
 // After `step!`, which it uses.
 mod notifications;
 mod placeholders;
+mod remote;

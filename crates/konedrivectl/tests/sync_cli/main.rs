@@ -130,6 +130,9 @@ async fn harness_onedrive() -> (Harness, wiremock::MockServer) {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
     let graph = MockServer::start().await;
+    let mut hash = konedrive_graph::quickxor::QuickXor::new();
+    hash.update(b"abc");
+    let quick_xor = hash.finish_base64();
     Mock::given(method("GET"))
         .and(path("/me/drive"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": MOCKED_DRIVE})))
@@ -141,7 +144,7 @@ async fn harness_onedrive() -> (Harness, wiremock::MockServer) {
             "value": [
                 {"id": "R", "root": {}, "folder": {}},
                 {"id": "D", "name": "docs", "folder": {}, "parentReference": {"id": "R"}},
-                {"id": "F", "name": "f.txt", "size": 3, "cTag": "c1", "file": {}, "parentReference": {"id": "D"}},
+                {"id": "F", "name": "f.txt", "size": 3, "cTag": "c1", "file": {"hashes": {"quickXorHash": quick_xor}}, "parentReference": {"id": "D"}},
                 {"id": "V", "name": "Personal Vault", "folder": {}, "specialFolder": {"name": "vault"}, "parentReference": {"id": "R"}}
             ],
             "@odata.deltaLink": format!("{}/me/drive/root/delta?token=L1", graph.uri())

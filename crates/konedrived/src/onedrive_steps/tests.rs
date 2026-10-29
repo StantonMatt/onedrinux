@@ -194,7 +194,20 @@ async fn stage(staged: StagedStep) -> (StepsFolder, OneDriveStep) {
         StagedStep::SendFileRemoval => OneDriveStep::SendFileRemoval { item: versions },
         StagedStep::SendDirectoryRemoval => OneDriveStep::SendDirectoryRemoval { item: versions, below },
     };
-    (StepsFolder::start(fixture).await, step)
+    let folder = StepsFolder::start(fixture).await;
+    let step = if let OneDriveStep::SendDirectoryRemoval { item, below } = &step {
+        assert_eq!(folder.run(step.clone()).await, StepOutcome::RowsChanged(RowsChangedFollowUp::CycleWanted));
+        let changes = folder.graph.with(|cloud| cloud.items.values().filter(|row| row.parent.is_some()).map(|row| {
+            konedrive_tree::Change::Upsert(konedrive_tree::Row {
+                id: row.id.clone(), parent_id: row.parent.clone(), name: row.name.clone(),
+                kind: if row.folder { konedrive_tree::Kind::Folder } else { konedrive_tree::Kind::File },
+                size: row.size, mtime: row.mtime, etag: Some(row.etag.clone()), ctag: Some(row.ctag.clone()), quickxor: row.hash.clone(), mime: None, placement: konedrive_tree::Placement::Placed,
+            })
+        }).collect());
+        folder.fixture.write_listing(changes);
+        OneDriveStep::SendDirectoryRemoval { item: folder.fixture.versions_of(item.local_item_id), below: below.iter().map(|child| folder.fixture.versions_of(child.local_item_id)).collect() }
+    } else { step };
+    (folder, step)
 }
 
 /// What the fake drive holds once `staged` went through.
@@ -376,6 +389,12 @@ async fn a_step_whose_answer_was_lost_reads_onedrive_once_and_commits_what_went_
         folder.graph.with(|cloud| cloud.lose_answers(staged.request().0, staged.request().1, 1));
         let reads_before = folder.count("GET", staged.read());
         let outcome = folder.run(step.clone()).await;
+        if matches!(staged, StagedStep::SendEmptyNewFile) {
+            assert!(matches!(outcome, StepOutcome::Refused(_)), "an unproven empty identity is kept: {outcome:?}");
+            assert!(!is_committed(&folder, staged, &step));
+            assert_eq!(folder.count("DELETE", ""), 0);
+            continue;
+        }
         assert!(matches!(outcome, StepOutcome::Written { .. }), "{staged:?}: {outcome:?}");
         assert_eq!(folder.count("GET", staged.read()), reads_before + 1, "{staged:?}: one read");
         assert_eq!(folder.cloud_paths(), sent_paths(staged), "{staged:?}");
@@ -401,7 +420,7 @@ async fn a_step_whose_answer_was_lost_and_whose_read_failed_ends_transient_with_
 
         let round = folder.settle_records().await;
         assert_eq!((round.done_count, round.failed_count, round.left_to_listing_count), (1, 0, 0), "{staged:?}");
-        assert!(is_committed(&folder, staged, &step) && folder.records().is_empty(), "{staged:?}: {:?}", folder.fixture.find_item(step.item().local_item_id));
+        assert!((is_committed(&folder, staged, &step) != matches!(staged, StagedStep::SendEmptyNewFile)) && folder.records().is_empty(), "{staged:?}: {:?}", folder.fixture.find_item(step.item().local_item_id));
         assert_eq!(folder.count(staged.request().0, staged.request().1), 1, "{staged:?}: nothing is sent twice");
     }
 }
@@ -422,7 +441,7 @@ async fn a_step_whose_commit_may_not_begin_writes_nothing() {
 
         // The next start: the record is settled by reading OneDrive.
         assert_eq!(folder.settle_records().await.done_count, 1, "{staged:?}");
-        assert!(is_committed(&folder, staged, &step) && folder.records().is_empty(), "{staged:?}");
+        assert!((is_committed(&folder, staged, &step) != matches!(staged, StagedStep::SendEmptyNewFile)) && folder.records().is_empty(), "{staged:?}");
     }
 }
 
@@ -562,7 +581,7 @@ async fn a_move_to_where_the_rows_say_onedrive_has_the_item_sends_nothing() {
 }
 
 #[tokio::test]
-async fn a_commit_that_finds_the_rows_changed_after_a_new_item_was_made_removes_it_when_the_row_is_gone() {
+async fn a_directory_made_while_its_row_went_is_kept_without_its_original_folder_ctag() {
     let (folder, step) = stage(StagedStep::MakeDirectory).await;
     let folder = Arc::new(folder);
     let item = step.item().local_item_id;
@@ -579,8 +598,9 @@ async fn a_commit_that_finds_the_rows_changed_after_a_new_item_was_made_removes_
     folder.fixture.write_rows(move |store| store.item_store().apply(&konedrive_tree::LocalVersionChange::Removed { item }));
 
     let outcome = running.await.expect("the step's task");
-    assert!(matches!(outcome, StepOutcome::RowsChanged(RowsChangedFollowUp::MadeItemRemoved(_))), "{outcome:?}");
-    assert_eq!((folder.cloud_paths(), folder.records()), (Vec::<String>::new(), vec![]));
+    assert!(matches!(outcome, StepOutcome::RowsChanged(RowsChangedFollowUp::MadeItemLeft(_))), "{outcome:?}");
+    assert_eq!((folder.cloud_paths(), folder.records()), (vec!["new".to_owned()], vec![]));
+    assert_eq!(folder.count("DELETE", ""), 0);
 }
 
 #[tokio::test]
@@ -677,4 +697,83 @@ async fn a_step_that_sends_no_content_holds_a_metadata_slot_for_its_request() {
     assert_eq!(pool.held(Class::Metadata), 1, "held while the request is in flight");
     assert!(matches!(running.await.expect("the step's task"), StepOutcome::Written { .. }));
     assert_eq!(pool.held(Class::Metadata), 0, "let go with the answer");
+}
+
+mod remote;
+
+#[tokio::test]
+async fn write_scope_sender_checks_every_step_and_remote_rename_sources() {
+    use crate::config::{WriteScope, WriteScopeSource};
+    for staged in StagedStep::ALL {
+        let (mut folder, step) = stage(staged).await;
+        folder.steps = folder.steps.with_write_scope(WriteScopeSource::new(|| WriteScope::parse(Some(&["Trial".into()])).unwrap()));
+        let before = folder.cloud_paths();
+        assert!(matches!(folder.run(step).await, StepOutcome::Refused(StepRefusal::Transient { .. })), "{staged:?}");
+        assert_eq!(folder.cloud_paths(), before);
+        assert_eq!(folder.count(staged.request().0, staged.request().1), 0, "{staged:?}");
+        assert!(folder.records().is_empty());
+    }
+    // The source was outside the allowlist even though the planned local path is inside.
+    let fixture = ItemFixture::new();
+    fixture.show_onedrive_directory("Trial");
+    let file = fixture.show_onedrive_file("outside.txt", b"old");
+    fixture.move_here(file.local_item_id, "Trial/moved.txt");
+    let item = fixture.versions_of(file.local_item_id);
+    let parent = ItemFixture::onedrive_reference_of("Trial");
+    let mut folder = StepsFolder::start(fixture).await;
+    folder.steps = folder.steps.with_write_scope(WriteScopeSource::new(|| WriteScope::parse(Some(&["Trial".into()])).unwrap()));
+    assert!(matches!(folder.run(OneDriveStep::SendMove { item, parent, name: "moved.txt".into() }).await, StepOutcome::Refused(StepRefusal::Transient { .. })));
+    assert_eq!(folder.count("PATCH", "items/"), 0);
+}
+
+#[tokio::test]
+async fn write_scope_sender_allows_in_scope_steps_and_checks_the_actual_destination() {
+    use crate::config::{WriteScope, WriteScopeSource};
+    for staged in StagedStep::ALL {
+        let (mut folder, step) = stage(staged).await;
+        let paths = match staged {
+            StagedStep::MakeDirectory => vec!["new".into()],
+            StagedStep::SendEmptyNewFile => vec!["empty.txt".into()],
+            StagedStep::SendMove => vec!["a.txt".into(), "b.txt".into()],
+            StagedStep::SendEmptyContent | StagedStep::SendFileRemoval => vec!["a.txt".into()],
+            StagedStep::SendDirectoryRemoval => vec!["docs".into()],
+        };
+        let scope = WriteScope::parse(Some(&paths)).unwrap();
+        folder.steps = folder.steps.with_write_scope(WriteScopeSource::new(move || scope.clone()));
+        assert!(matches!(folder.run(step).await, StepOutcome::Written { .. }), "{staged:?}");
+    }
+    let (mut folder, mut step) = stage(StagedStep::MakeDirectory).await;
+    folder.steps = folder.steps.with_write_scope(WriteScopeSource::new(|| WriteScope::parse(Some(&["new".into()])).unwrap()));
+    if let OneDriveStep::MakeDirectory { name, .. } = &mut step { *name = "outside".into(); }
+    assert!(matches!(folder.run(step).await, StepOutcome::Refused(StepRefusal::Transient { .. })));
+    assert_eq!(folder.count("POST", "children"), 0);
+}
+
+#[tokio::test]
+async fn write_scope_rechecks_current_locations_after_a_step_was_planned() {
+    use crate::config::{WriteScope, WriteScopeSource};
+    for moved_remotely in [true, false] {
+        let fixture = ItemFixture::new();
+        fixture.show_onedrive_directory("Trial");
+        let file = fixture.show_onedrive_file("Trial/a.txt", b"old");
+        fixture.land_copy(file.local_item_id, b"old");
+        fixture.change_file_here(file.local_item_id, b"new");
+        let step = OneDriveStep::SendContent { item: fixture.versions_of(file.local_item_id) };
+        let mut folder = StepsFolder::start(fixture).await;
+        if moved_remotely {
+            let id = ItemFixture::onedrive_reference_of("Trial/a.txt").item_id;
+            folder.graph.with(|cloud| cloud.rename(id.as_str(), "R", "outside.txt"));
+            folder.fixture.list_onedrive_move("Trial/a.txt", "outside.txt");
+        } else {
+            folder.fixture.move_here(file.local_item_id, "outside.txt");
+        }
+        folder.steps = folder.steps.with_write_scope(WriteScopeSource::new(|| WriteScope::parse(Some(&["Trial".into()])).unwrap()));
+        let outcome = folder.run(step).await;
+        assert!(matches!(outcome, StepOutcome::Refused(StepRefusal::Transient { .. })), "remote move {moved_remotely}: {outcome:?}");
+        assert_eq!(folder.count("POST", "createUploadSession"), 0);
+        assert_eq!(folder.count("PUT", ""), 0);
+        assert!(folder.records().is_empty());
+        let path = if moved_remotely { "outside.txt" } else { "Trial/a.txt" };
+        assert_eq!(folder.graph.with(|cloud| cloud.at(path).unwrap().content.clone()), b"old");
+    }
 }

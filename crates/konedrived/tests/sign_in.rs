@@ -162,7 +162,7 @@ async fn a_sign_in_that_succeeds_makes_the_account_under_its_email() {
     let account = s.account(&path).await;
     assert_eq!(account.label().await.unwrap(), "test@outlook.com");
     assert_eq!(account.state().await.unwrap(), "signed-in");
-    assert_eq!(account.mode().await.unwrap(), "read-only");
+    assert_eq!(account.mode().await.unwrap(), "read-write");
     let config = s.config_text();
     // The drive's id as a drive id is made: its letters in lower case.
     assert!(config.contains("label = \"test@outlook.com\"") && config.contains("drive_id = \"d1\""), "{config}");
@@ -350,5 +350,43 @@ async fn dev_tools_are_a_development_builds() {
         assert_eq!(s.manager.list().await.unwrap(), [added.clone()]);
         assert_eq!(s.account(added.as_str()).await.state().await.unwrap(), "signed-out");
         assert_eq!(s.account(added.as_str()).await.label().await.unwrap(), "Local");
+    }
+}
+
+/// The mode is selected before the first browser trip. No second consent is needed;
+/// the token request and the stored account use the same choice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn add_selects_the_first_sign_in_scope_and_preserves_the_chosen_mode() {
+    for (choice, scope, expected) in [("", "Files.ReadWrite", "read-write"), ("read-write", "Files.ReadWrite", "read-write"), ("read-only", "Files.Read", "read-only")] {
+        let mut s = setup(Duration::from_secs(10)).await;
+        assert!(s.manager.add("invalid").await.is_err());
+        s.there_are(0).await;
+        let (number, address) = s.manager.add(choice).await.unwrap();
+        let url = url::Url::parse(&address).unwrap();
+        let asked = url.query_pairs().find(|(key, _)| key == "scope").unwrap().1.into_owned();
+        assert_eq!(asked.split_whitespace().next(), Some(scope));
+        simulate_browser(&address, "code=good-code").await;
+        let (ended, outcome, _, path) = s.next_finished().await;
+        assert_eq!((ended, outcome.as_str()), (number, SIGNED_IN));
+        let account = s.account(&path).await;
+        assert_eq!(account.mode().await.unwrap(), expected);
+        let config: konedrived::config::Config = toml::from_str(&s.config_text()).unwrap();
+        assert_eq!(config.accounts[0].mode.as_str(), expected);
+        let requests = s.server.received_requests().await.unwrap();
+        let codes: Vec<_> = requests.iter().filter(|r| r.url.path() == "/token").filter(|r| String::from_utf8_lossy(&r.body).contains("grant_type=authorization_code")).collect();
+        assert_eq!(codes.len(), 1);
+        assert!(url::form_urlencoded::parse(&codes[0].body).any(|(key, value)| key == "scope" && value == asked));
+        assert!(!account.write_scope_enabled().await.unwrap());
+        account.set_write_scope(&["Trial", "Documents/Trial"]).await.unwrap();
+        assert!(account.write_scope_enabled().await.unwrap());
+        assert_eq!(account.write_paths().await.unwrap(), ["Trial", "Documents/Trial"]);
+        assert!(account.set_write_scope(&["../outside"]).await.is_err());
+        assert_eq!(account.write_paths().await.unwrap(), ["Trial", "Documents/Trial"]);
+        account.set_write_scope(&[]).await.unwrap();
+        assert!(account.write_scope_enabled().await.unwrap());
+        assert!(account.write_paths().await.unwrap().is_empty());
+        account.clear_write_scope().await.unwrap();
+        assert!(!account.write_scope_enabled().await.unwrap());
+        assert_eq!(account.mode().await.unwrap(), expected);
     }
 }

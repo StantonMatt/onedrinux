@@ -11,7 +11,7 @@ use crate::sync_parts::running_steps::{RunningStep, StepClass};
 use crate::mount::item_fixture::{DiskMarksRead, ItemFixture, ONEDRIVE_MTIME};
 
 fn make_landing(fixture: &ItemFixture) -> Arc<ItemDownloadLanding> {
-    Arc::new(ItemDownloadLanding::new(Arc::clone(&fixture.place_changes), fixture.store.clone(), Arc::clone(&fixture.running_steps), Arc::clone(&fixture.mount_take_down)))
+    Arc::new(ItemDownloadLanding::new(Arc::clone(&fixture.place_changes), fixture.store.clone(), Arc::clone(&fixture.running_steps), Arc::clone(&fixture.mount_take_down), Arc::clone(&fixture.item_handles)).expect("the replacement observer"))
 }
 
 impl ItemDownloadLanding {
@@ -393,4 +393,235 @@ fn a_landing_whose_undo_fails_keeps_its_record_and_asks_for_the_mounts_take_down
     assert_eq!(*fixture.take_downs.lock().unwrap(), [crate::mount::mount_take_down::TakeDownCause::UndoFailed { path: "docs/report.txt".into() }], "the disk has what no row says: the mount is taken down");
     assert_eq!(count_records(&fixture), 1, "the record stands for the check at start");
     assert_eq!(fixture.read_disk_file("docs/report.txt").as_deref(), Some(&b"the report"[..]));
+}
+
+fn pending_replacement(fixture: &ItemFixture) -> Item {
+    let file = fixture.show_onedrive_file("report.txt", b"old version");
+    fixture.land_copy(file.local_item_id, b"old version");
+    fixture.list_onedrive_file("report.txt", b"new version")
+}
+
+#[test]
+fn a_pinned_file_rewritten_with_the_same_bytes_accepts_a_remote_replacement() {
+    let fixture = ItemFixture::new();
+    let file = fixture.show_onedrive_file("report.txt", b"old version");
+    let id = file.local_item_id;
+    fixture.land_copy(id, b"old version");
+    fixture.write_rows(|store| store.set_pin("report.txt", true));
+    let rewritten = fixture.change_file_here(id, b"old version");
+    fixture.write_rows(move |store| store.item_store().commit_hash_local_content(&ItemVersions::of(&rewritten), &qx(b"old version")));
+    let row = fixture.list_onedrive_file("report.txt", b"new version");
+    assert!(matches!(row.local.as_ref().unwrap().content, Some(ContentVersion::Hashed { ctag: None, .. })));
+    assert_ne!(row.local.as_ref().unwrap().content, row.synced_content);
+    assert!(fixture.read_rows(move |reader| reader.is_pinned(id)));
+    let landing = make_landing(&fixture);
+    begin_download_step(&fixture, &row);
+    let outcome = land(&fixture, &landing, b"new version", &LandingCondition::ReplaceVersions { item: ItemVersions::of(&row) });
+    assert!(matches!(outcome, ItemLandingOutcome::Landed { .. }), "{outcome:?}");
+    assert_eq!(fixture.read_disk_file("report.txt").as_deref(), Some(b"new version".as_slice()));
+    let after = fixture.find_item(id).unwrap();
+    assert_eq!(after.local.as_ref().unwrap().content, after.onedrive.as_ref().unwrap().content);
+    assert_eq!(after.synced_content, after.onedrive.as_ref().unwrap().content);
+    assert_eq!(count_records(&fixture), 0);
+    fixture.assert_rows_and_disk_agree();
+}
+
+#[test]
+fn a_replacement_swaps_only_a_complete_file_and_existing_readers_keep_the_old_inode() {
+    use std::io::Read;
+    let fixture = ItemFixture::new();
+    let row = pending_replacement(&fixture);
+    let mut old_reader = File::open(fixture.disk_path("report.txt")).unwrap();
+    let landing = make_landing(&fixture);
+    begin_download_step(&fixture, &row);
+    let outcome = land(&fixture, &landing, b"new version", &LandingCondition::ReplaceVersions { item: ItemVersions::of(&row) });
+    assert!(matches!(outcome, ItemLandingOutcome::Landed { .. }), "{outcome:?}");
+    assert_eq!(fixture.read_disk_file("report.txt").as_deref(), Some(b"new version".as_slice()));
+    let mut old = Vec::new(); old_reader.read_to_end(&mut old).unwrap();
+    assert_eq!(old, b"old version");
+    let after = fixture.find_item(row.local_item_id).unwrap();
+    assert_eq!(after.local.as_ref().unwrap().content, after.onedrive.as_ref().unwrap().content);
+    assert_eq!(after.content_presence, ContentPresence::OnDisk);
+    assert_eq!(count_records(&fixture), 0);
+    assert_eq!(fs::read_dir(fixture.folder()).unwrap().count(), 1, "the old aside was discarded only after commit");
+    fixture.assert_rows_and_disk_agree();
+}
+
+#[test]
+fn a_replacement_does_not_exchange_files_when_its_record_cannot_be_synced() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = ItemFixture::new();
+    let row = pending_replacement(&fixture);
+    let landing = make_landing(&fixture);
+    begin_download_step(&fixture, &row);
+    let log = fixture.store_path.with_file_name("tree.db-wal");
+    fs::set_permissions(&log, fs::Permissions::from_mode(0o000)).unwrap();
+    let outcome = land(&fixture, &landing, b"new version", &LandingCondition::ReplaceVersions { item: ItemVersions::of(&row) });
+    fs::set_permissions(&log, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(outcome, ItemLandingOutcome::Failed { errno: libc::EIO });
+    assert_eq!(fixture.read_disk_file("report.txt").as_deref(), Some(b"old version".as_slice()));
+    assert_eq!(fixture.find_item(row.local_item_id).unwrap(), row);
+    assert_eq!(fs::read_dir(fixture.folder()).unwrap().count(), 1, "nothing is linked or exchanged before the record is durable");
+    assert_eq!(count_records(&fixture), 1, "recovery can settle the recorded but unmade change");
+}
+
+#[test]
+fn a_replacement_keeps_the_old_copy_when_its_committed_row_cannot_be_synced() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = ItemFixture::new();
+    let row = pending_replacement(&fixture);
+    let landing = make_landing(&fixture);
+    begin_download_step(&fixture, &row);
+    let log = fixture.store_path.with_file_name("tree.db-wal");
+    let blocked = log.clone();
+    let outcome = land_with(&fixture, &landing, b"new version", &LandingCondition::ReplaceVersions { item: ItemVersions::of(&row) }, move || {
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).unwrap();
+    });
+    fs::set_permissions(&log, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(outcome, ItemLandingOutcome::Failed { errno: libc::EIO });
+    assert_eq!(fixture.read_disk_file("report.txt").as_deref(), Some(b"new version".as_slice()), "a committed row must not be undone");
+    let aside = crate::folder::disk::make_aside_entry_name(row.local_item_id);
+    assert_eq!(fs::read(fixture.folder().join(aside)).unwrap(), b"old version", "keep the old copy until the new row is durable");
+    let after = fixture.find_item(row.local_item_id).unwrap();
+    assert_eq!(after.local.as_ref().unwrap().content, after.onedrive.as_ref().unwrap().content);
+    assert_eq!(*fixture.take_downs.lock().unwrap(), [TakeDownCause::BackingFileBehindRow { path: "report.txt".into() }]);
+}
+
+#[test]
+fn a_local_edit_cancels_a_pending_replacement() {
+    let fixture = ItemFixture::new();
+    let row = pending_replacement(&fixture);
+    let landing = make_landing(&fixture);
+    begin_download_step(&fixture, &row);
+    fixture.change_file_here(row.local_item_id, b"my newer work");
+    assert_eq!(land(&fixture, &landing, b"new version", &LandingCondition::ReplaceVersions { item: ItemVersions::of(&row) }), ItemLandingOutcome::RowsChanged);
+    assert_eq!(fixture.read_disk_file("report.txt").as_deref(), Some(b"my newer work".as_slice()));
+    assert_eq!(count_records(&fixture), 0);
+}
+
+#[test]
+fn a_listing_that_crosses_a_replacement_commit_restores_the_old_inode() {
+    let fixture = ItemFixture::new();
+    let row = pending_replacement(&fixture);
+    let landing = make_landing(&fixture);
+    let (store, id) = (fixture.store.clone(), row.local_item_id);
+    // A row update between the exchange and commit must undo the disk too.
+    let outcome = land_with(&fixture, &landing, b"new version", &LandingCondition::ReplaceVersions { item: ItemVersions::of(&row) }, move || {
+        store.call_blocking(move |store| store.item_store().apply(&LocalVersionChange::OpenedForWriting { item: id })).unwrap();
+    });
+    assert_eq!(outcome, ItemLandingOutcome::RowsChanged);
+    assert_eq!(fixture.read_disk_file("report.txt").as_deref(), Some(b"old version".as_slice()));
+    assert_eq!(count_records(&fixture), 0);
+}
+
+#[test]
+fn a_crash_after_replacement_exchange_leaves_a_complete_version_for_recovery() {
+    let fixture = ItemFixture::new();
+    let row = pending_replacement(&fixture);
+    let landing = make_landing(&fixture);
+    let staged = make_downloaded_file(&fixture, b"new version");
+    let condition = LandingCondition::ReplaceVersions { item: ItemVersions::of(&row) };
+    fixture.run_on_write_operation_thread(move || {
+        let (change, linked) = landing.link_on_record(&staged, &condition).unwrap();
+        drop((change, linked)); // death before the row commit; no undo or discard
+    });
+    assert_eq!(fixture.read_disk_file("report.txt").as_deref(), Some(b"new version".as_slice()));
+    assert_eq!(count_records(&fixture), 1);
+    fixture.run_start_check();
+    assert_eq!(fixture.read_disk_file("report.txt").as_deref(), Some(b"new version".as_slice()));
+    assert_eq!(presence_of(&fixture, &row), ContentPresence::OnDisk);
+    assert_eq!(count_records(&fixture), 0);
+}
+
+#[test]
+fn a_replacement_waits_for_registered_readers_before_touching_names_or_rows() {
+    use crate::mount::item_handles::OpenItemFile;
+    let fixture = ItemFixture::new();
+    let row = pending_replacement(&fixture);
+    let reader = fixture.item_handles.add_file(OpenItemFile::ReadingBackingFile { item: row.local_item_id, backing_file: Arc::new(File::open(fixture.disk_path("report.txt")).unwrap()) });
+    let landing = make_landing(&fixture);
+    begin_download_step(&fixture, &row);
+    let condition = LandingCondition::ReplaceVersions { item: ItemVersions::of(&row) };
+    assert_eq!(land(&fixture, &landing, b"new version", &condition), ItemLandingOutcome::Failed { errno: libc::EBUSY });
+    assert_eq!(fixture.read_disk_file("report.txt").as_deref(), Some(b"old version".as_slice()));
+    assert_eq!(count_records(&fixture), 0);
+    fixture.item_handles.close_reader(reader);
+    assert!(matches!(land(&fixture, &landing, b"new version", &condition), ItemLandingOutcome::Landed { .. }));
+}
+
+#[test]
+fn a_local_edit_cancels_the_staged_wait_even_while_an_old_reader_stays_open() {
+    use crate::mount::item_handles::OpenItemFile;
+    let fixture = ItemFixture::new();
+    let row = pending_replacement(&fixture);
+    let reader = fixture.item_handles.add_file(OpenItemFile::ReadingBackingFile { item: row.local_item_id, backing_file: Arc::new(File::open(fixture.disk_path("report.txt")).unwrap()) });
+    let landing = make_landing(&fixture);
+    let condition = LandingCondition::ReplaceVersions { item: ItemVersions::of(&row) };
+    let id = row.local_item_id;
+    let current = fixture.runtime().block_on(async {
+        let waiting = landing.wait_for_readers(&condition);
+        tokio::pin!(waiting);
+        assert!(futures_util::poll!(waiting.as_mut()).is_pending());
+        fixture.write_rows(move |store| store.item_store().apply(&LocalVersionChange::OpenedForWriting { item: id }));
+        tokio::time::timeout(std::time::Duration::from_secs(5), waiting).await.expect("the row change wakes the replacement")
+    });
+    assert!(!current, "the old reader must not delay conflict handling of a newer local edit");
+    assert!(fixture.item_handles.is_open_for_reading(id));
+    fixture.item_handles.close_reader(reader);
+    assert_eq!(fixture.read_disk_file("report.txt").as_deref(), Some(b"old version".as_slice()));
+}
+
+#[test]
+fn account_stop_finishes_while_an_old_reader_holds_a_pending_content_change() {
+    use crate::mount::item_handles::OpenItemFile;
+    use crate::sync_parts::lease::Lease;
+    use crate::sync_tasks::tests::{make_start_input, stop, wait_until};
+    use crate::sync_tasks::start_order::{start_folder_sync, KeptFolderParts};
+    use std::time::Duration;
+
+    for resident in [false, true] {
+        let fixture = ItemFixture::new();
+        let file = fixture.show_onedrive_file("report.txt", b"old version");
+        let id = file.local_item_id;
+        let old_content = file.local.as_ref().unwrap().content.clone();
+        let opened = if resident {
+            fixture.land_copy(id, b"old version");
+            OpenItemFile::ReadingBackingFile { item: id, backing_file: Arc::new(File::open(fixture.disk_path("report.txt")).unwrap()) }
+        } else {
+            OpenItemFile::ReadingNotOnDisk { item: id, content: file.local.unwrap().content.unwrap() }
+        };
+        let parts = KeptFolderParts {
+            store: fixture.store.clone(), mount: fixture.build_mount(),
+            sync_plan_wake: Arc::clone(&fixture.sync_plan_wake),
+            running_steps: Arc::clone(&fixture.running_steps),
+            published_plan: Arc::clone(&fixture.published_plan), drive_id: fixture.drive_id(),
+        };
+        let handles = parts.mount.folder_step_parts().item_handles;
+        let reader = handles.add_file(opened);
+        fixture.list_onedrive_file("report.txt", b"new version");
+        fixture.runtime().block_on(async {
+            let graph = fixture.start_fake_onedrive().await;
+            let lock = Arc::new(tokio::sync::RwLock::new(()));
+            let mut input = make_start_input(&fixture, graph.client());
+            input.lease = Lease::on(&lock);
+            input.kept = Some(parts);
+            let started = start_folder_sync(input).await.ok().expect("the kept mount starts");
+            wait_until("the content step starts", || fixture.running_steps.has_running_step(id)).await;
+            if resident {
+                wait_until("the replacement is fetched", || !fixture.fixture_content_source().list_fetches().is_empty()).await;
+            }
+            // Let the step reach its reader wait. The reader stays registered through stop.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert!(handles.is_open_for_reading(id));
+            started.tasks.stop_handle().cancel();
+            let held = tokio::time::timeout(Duration::from_secs(5), lock.write()).await.expect("reader waits leave the account lease free");
+            let kept = tokio::time::timeout(Duration::from_secs(5), stop(started)).await.expect("account stop must finish before the old reader closes");
+            assert!(fixture.running_steps.list_steps().is_empty());
+            assert!(handles.is_open_for_reading(id));
+            assert_eq!(fixture.find_item(id).unwrap().local.as_ref().unwrap().content, old_content);
+            assert_eq!(fixture.read_disk_file("report.txt"), resident.then(|| b"old version".to_vec()));
+            handles.close_reader(reader);
+            drop((held, kept));
+        });
+    }
 }

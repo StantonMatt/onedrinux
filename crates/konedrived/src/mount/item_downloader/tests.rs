@@ -81,7 +81,7 @@ fn make_report(fixture: &ItemFixture) -> Report {
 }
 
 fn make_downloader_reporting_to(fixture: &ItemFixture, source: Arc<dyn ContentSource>, report: Report) -> (Arc<ItemDownloader>, Arc<ItemDownloadLanding>) {
-    let landing = Arc::new(ItemDownloadLanding::new(Arc::clone(&fixture.place_changes), fixture.store.clone(), Arc::clone(&fixture.running_steps), Arc::clone(&fixture.mount_take_down)));
+    let landing = Arc::new(ItemDownloadLanding::new(Arc::clone(&fixture.place_changes), fixture.store.clone(), Arc::clone(&fixture.running_steps), Arc::clone(&fixture.mount_take_down), Arc::clone(&fixture.item_handles)).expect("the replacement observer"));
     let downloader = Arc::new(ItemDownloader::new(
         Arc::clone(&fixture.backing_directory),
         Arc::clone(&fixture.download_states),
@@ -231,7 +231,7 @@ fn presence_of(fixture: &ItemFixture, row: &Item) -> ContentPresence {
 }
 
 fn plan_pin(row: &Item) -> DownloadAsker {
-    DownloadAsker::PlanPin { planned_from: ItemVersions::of(row) }
+    DownloadAsker::PlanPin { planned_from: ItemVersions::of(row), landing_lease: None }
 }
 
 #[test]
@@ -1342,4 +1342,63 @@ fn an_unattributed_new_landing_invalidates_any_older_attribution_for_the_item() 
     stale.landed();
     assert_eq!(hear(ask(&downloader, &row, DownloadAsker::Read)), Ok(()));
     assert!(downloader.app_downloads.landed("app:old-reader").is_empty());
+}
+
+#[test]
+fn a_failed_replacement_keeps_the_old_copy_until_a_verified_retry_lands() {
+    let fixture = ItemFixture::new();
+    let shown = fixture.show_onedrive_file("pinned.txt", b"old version");
+    fixture.land_copy(shown.local_item_id, b"old version");
+    let row = fixture.list_onedrive_file("pinned.txt", b"new version");
+    let id = row.local_item_id;
+    let _ = fixture.write_rows(move |store| store.item_store().set_item_pin(id, true));
+    let states = super::super::directory_states::DirectoryStates::build(
+        &fixture.store, fixture.download_states.clone(), fixture.running_steps.clone(), fixture.published_plan.clone(), fixture.inotify_bridge.clone(),
+    ).unwrap();
+    let source = HeldSource::open(&fixture);
+    source.refuse(Some(|| SourceError::Transient("offline".into())));
+    let downloader = make_downloader(&fixture, &source);
+    let file = ItemToDownload { content: row.onedrive.as_ref().unwrap().content.clone().unwrap(), ..to_download(&row) };
+    begin_download_step(&fixture, &row);
+    let first = fixture.runtime().block_on(downloader.download_and_land(file.clone(), ItemVersions::of(&row)));
+    assert!(matches!(first, Err(DownloadRefusal::Transient { .. })), "{first:?}");
+    assert_eq!(fixture.read_disk_file("pinned.txt").as_deref(), Some(b"old version".as_slice()));
+    assert_eq!(presence_of(&fixture, &row), ContentPresence::OnDisk);
+    assert_eq!(states.file_state(row.local_item_id), Some(konedrive_fs::placeholder::State::Failed), "the old bytes remain, with their pending update shown failed");
+    source.refuse(None);
+    let retry = fixture.runtime().block_on(downloader.download_and_land(file, ItemVersions::of(&row)));
+    assert!(matches!(retry, Ok(ItemLandingOutcome::Landed { .. })), "{retry:?}");
+    assert_eq!(fixture.read_disk_file("pinned.txt").as_deref(), Some(b"new version".as_slice()));
+    fixture.assert_rows_and_disk_agree();
+}
+
+#[test]
+fn a_replacement_that_cannot_leave_the_disk_reserve_keeps_the_old_copy() {
+    let fixture = ItemFixture::new();
+    let shown = fixture.show_onedrive_file("pinned.txt", b"old version");
+    fixture.land_copy(shown.local_item_id, b"old version");
+    let row = fixture.list_onedrive_file("pinned.txt", b"new version");
+    let source = HeldSource::open(&fixture);
+    let mut downloader = make_downloader(&fixture, &source);
+    Arc::get_mut(&mut downloader).unwrap().read_reserve = Some((Arc::new(crate::download_guard::DiskReservations::default()), Arc::new(|| u64::MAX)));
+    let file = ItemToDownload { content: row.onedrive.as_ref().unwrap().content.clone().unwrap(), ..to_download(&row) };
+    begin_download_step(&fixture, &row);
+    let end = fixture.runtime().block_on(downloader.download_and_land(file, ItemVersions::of(&row)));
+    assert!(!matches!(end, Ok(ItemLandingOutcome::Landed { .. })), "{end:?}");
+    assert_eq!(fixture.read_disk_file("pinned.txt").as_deref(), Some(b"old version".as_slice()));
+    assert_eq!(presence_of(&fixture, &row), ContentPresence::OnDisk);
+}
+
+#[test]
+fn hashless_remote_bytes_never_hydrate_a_write_open_as_clean() {
+    let fixture = ItemFixture::new();
+    let row = fixture.show_onedrive_file("unverified.txt", b"bytes");
+    let ctag = match row.local.as_ref().unwrap().content.as_ref().unwrap() { ContentVersion::Hashed { ctag, .. } => ctag.clone().unwrap(), _ => unreachable!() };
+    let source = Arc::new(crate::mount::item_fixture::FixtureContentSource::default());
+    source.serve(row.onedrive_item.as_ref().unwrap().item_id.as_str(), b"bytes", crate::mount::item_fixture::ONEDRIVE_MTIME,
+        Some(Version { ctag, quick_xor: None }));
+    let (downloader, _) = make_downloader_from(&fixture, source);
+    assert_eq!(hear(ask(&downloader, &row, DownloadAsker::OpenForWriting)), Err(libc::EIO));
+    assert_eq!(fixture.read_disk_file("unverified.txt"), None);
+    assert_eq!(presence_of(&fixture, &row), ContentPresence::NotOnDisk);
 }

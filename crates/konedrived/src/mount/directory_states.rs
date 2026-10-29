@@ -157,9 +157,11 @@ impl DirectoryStates {
     fn file_values(&self, row: &Row) -> (Option<State>, Option<SyncMark>) {
         let item = &row.item;
         let downloading = self.downloads.is_downloading(item.local_item_id);
-        let failed = item.content_presence == ContentPresence::NotOnDisk
+        let replacement = super::item_lookup::has_pending_replacement(item);
+        let failed = (item.content_presence == ContentPresence::NotOnDisk || replacement)
             && ((row.pinned && self.plan.is_download_held(item.local_item_id))
-                || item.local.as_ref().and_then(|local| local.content.as_ref()).is_some_and(|content| {
+                || item.local.as_ref().and_then(|local| local.content.as_ref()).into_iter()
+                    .chain(item.onedrive.as_ref().and_then(|v| v.content.as_ref()).filter(|_| replacement)).any(|content| {
                     self.downloads.has_failed_download(&DownloadKey { item: item.local_item_id, content: content.clone() }, row.pinned)
                 }));
         let state = if failed && !downloading && item.onedrive_item.is_some() {

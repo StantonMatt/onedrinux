@@ -59,16 +59,9 @@
 //! that thread has none of.
 //!
 //! **Through a handle, bytes of the content it was opened as, or none.** `decide_read`
-//! answers bytes from three places: the handle's own backing file; the backing file the
-//! row names once the content landed (the row and its path are read in one read
-//! transaction, and the row must still say that content is on disk, or kept from before
-//! a write: `decide_not_on_disk_read_origin`); and the file of the running download of
-//! that very item and content, below a mark the download's source raises only for
-//! answers it has told to be of that content (`item_downloader::download_source`), and
-//! which is taken back to 0 the moment the download finds what it wrote not to be the
-//! content. `fetch_read_range` answers what the range fetcher lets through
-//! (`item_range_fetcher::decide_is_another_content`), which through Graph cannot tell
-//! another content of the item until a download or a listing did.
+//! answers bytes from the handle's backing inode, a verified file that landed since
+//! the handle was opened, or a version-checked OneDrive range. Unfinished download
+//! staging is never a read origin: its bytes have not passed final hash verification.
 //!
 //! **A content OneDrive stated another one for** in its answer to the last download of it
 //! (`ItemDownloadStates::is_another_content`) is not an error by itself: that is a fact
@@ -135,6 +128,8 @@
 // test: while_onedrive_asks_to_wait_what_needs_its_content_fails_at_once_and_the_rest_is_answered
 // test: a_directory_is_synced_and_one_the_folder_does_not_show_has_nothing_to_sync
 
+// test: staged_bytes_are_never_served_before_the_final_hash_even_under_the_expected_version
+
 use std::ffi::OsStr;
 use std::fs::File;
 use std::os::unix::fs::FileExt;
@@ -170,10 +165,6 @@ mod tests;
 /// shows (`docs/design/mount.md` §4.1). The one such time of the mount: the kernel's
 /// interface (`kernel_requests`) answers with it too.
 pub(super) const ATTRIBUTE_LIFETIME: Duration = Duration::from_secs(1);
-
-/// How far behind its written-up-to mark the file of a running download is surely
-/// written: a piece the download writes is no larger than this.
-const WRITTEN_BEHIND: u64 = 1 << 20;
 
 /// How often an open or a read starts over because the row changed between its two
 /// reads of it (a landing, a free-up, a writer's open): each start reads the row anew.
@@ -259,9 +250,6 @@ pub(super) struct RangeToFetch {
 pub(super) enum ContentDownload {
     /// No download of it runs, or the one that runs has no file yet.
     None,
-    /// One runs, OneDrive answered it with this content, and it has written its file up
-    /// to here in order.
-    WrittenUpTo(u64),
     /// OneDrive stated another content in its answer to the last one, and has answered
     /// none since: none was started, or the one that runs has no answer yet.
     AnotherContent,
@@ -272,9 +260,6 @@ pub(super) enum ContentDownload {
 pub(super) enum RangeOrigin {
     /// Nowhere: the read starts at or past the end of the content.
     Nothing,
-    /// The file the running download of this content writes into, which is surely
-    /// written that far: the bytes from `from` up to `end`.
-    RunningDownload { from: u64, end: u64 },
     /// OneDrive: the bytes from `from` up to `end`.
     OneDrive { from: u64, end: u64 },
     /// OneDrive, once the whole download of the content was asked for and landed: the
@@ -291,8 +276,7 @@ pub(super) fn decide_range_origin(content_size: u64, download: ContentDownload, 
         return RangeOrigin::Nothing;
     }
     match download {
-        ContentDownload::WrittenUpTo(written_up_to) if end.saturating_add(WRITTEN_BEHIND) <= written_up_to => RangeOrigin::RunningDownload { from: offset, end },
-        ContentDownload::WrittenUpTo(_) | ContentDownload::None => RangeOrigin::OneDrive { from: offset, end },
+        ContentDownload::None => RangeOrigin::OneDrive { from: offset, end },
         ContentDownload::AnotherContent => RangeOrigin::WholeDownload { from: offset, end },
     }
 }
@@ -546,7 +530,7 @@ impl ItemKernelRequests {
                 })
             });
             match opened {
-                Ok(Some((backing_file, ()))) => return Ok(OpenedFile { fh: self.item_handles.add_file(OpenItemFile::ReadingBackingFile { item: node, backing_file: Arc::new(backing_file) }), keeps_cache: true, direct_io: false }),
+                Ok(Some((backing_file, ()))) => return Ok(OpenedFile { fh: self.item_handles.add_file(OpenItemFile::ReadingBackingFile { item: node, backing_file: Arc::new(backing_file) }), keeps_cache: false, direct_io: false }),
                 // The row is another since it was decided on: decided again.
                 Ok(None) => {}
                 Err(OpenAtRowError::NoFile { path }) if !is_mended => {
@@ -611,25 +595,14 @@ impl ItemKernelRequests {
                 }
             };
             let key = DownloadKey { item, content: content.clone() };
-            // The running download is read first and the memory after it, and the memory
-            // decides: a download that ended as another content between the two is not
-            // taken for none, and one that asks anew and has no answer yet is joined, not
-            // read past.
-            let running_download = self.download_states.find_running_download(&key);
-            let download = match &running_download {
-                // What one answer of OneDrive said: it answers nothing here, and only
-                // changes what the read asks of OneDrive.
-                _ if self.download_states.is_another_content(&key) => ContentDownload::AnotherContent,
-                Some(running) => ContentDownload::WrittenUpTo(running.written_up_to),
-                None => ContentDownload::None,
-            };
+            // A staged prefix has not passed the final hash. Until the whole file
+            // lands, readers use their own version-checked ranges.
+            let download = if self.download_states.is_another_content(&key) {
+                ContentDownload::AnotherContent
+            } else { ContentDownload::None };
             let to_fetch = |from, end| RangeToFetch { item, from, end, download_at_threshold: ItemToDownload { item, onedrive_item: source.onedrive_item.clone(), content: content.clone() }, source: source.clone() };
             return match decide_range_origin(content.size(), download, offset, size) {
                 RangeOrigin::Nothing => Ok(ReadAnswer::Bytes(Vec::new())),
-                RangeOrigin::RunningDownload { from, end } => match running_download {
-                    Some(running) => read_file_range(&running.file, from, (end - from) as u32).map(ReadAnswer::Bytes),
-                    None => Err(Errno::EIO),
-                },
                 RangeOrigin::OneDrive { from, end } => Ok(ReadAnswer::Range(to_fetch(from, end))),
                 RangeOrigin::WholeDownload { from, end } => Ok(ReadAnswer::WholeDownload(to_fetch(from, end))),
             };
@@ -775,9 +748,15 @@ impl ItemKernelRequests {
         self.write_operation_thread.run(move || reply(job()));
     }
 
+    /// Scope-only admission: pin/free-up/download never call this.
+    pub(super) fn check_write_scope(&self, item: LocalItemId, name: Option<&OsStr>) -> Result<(), Errno> {
+        self.write_operations.check_write_scope(item, name)
+    }
+
     /// open for writing, without `O_TRUNC`, on the mount's thread: what must be on disk
     /// first (`ItemWriteOperations::find_file_to_fill`). `EROFS` in a read-only folder.
     pub(super) fn decide_open_to_write(&self, node: LocalItemId) -> Result<FileToFill, Errno> {
+        self.check_write_scope(node, None)?;
         self.write_operations.find_file_to_fill(node, None)
     }
 
@@ -797,14 +776,20 @@ impl ItemKernelRequests {
     /// `open_to_write` as a job of the write-operation thread, which answers `reply`.
     pub(super) fn queue_open_to_write(&self, node: LocalItemId, reply: ReplyTo<OpenedFile>) {
         let write_operations = Arc::clone(&self.write_operations);
-        self.queue_change(reply, move || write_operations.open_to_write(node).map(|opened| OpenedFile { fh: opened.fh, keeps_cache: false, direct_io: false }));
+        self.queue_change(reply, move || {
+            write_operations.check_write_scope(node, None)?;
+            write_operations.open_to_write(node).map(|opened| OpenedFile { fh: opened.fh, keeps_cache: false, direct_io: false })
+        });
     }
 
     /// open with `O_TRUNC`. `open_to_overwrite` on the write-operation thread: nothing is
     /// downloaded.
     pub(super) fn queue_open_to_overwrite(&self, node: LocalItemId, reply: ReplyTo<OpenedFile>) {
         let write_operations = Arc::clone(&self.write_operations);
-        self.queue_change(reply, move || write_operations.open_to_overwrite(node).map(|opened| OpenedFile { fh: opened.fh, keeps_cache: false, direct_io: false }));
+        self.queue_change(reply, move || {
+            write_operations.check_write_scope(node, None)?;
+            write_operations.open_to_overwrite(node).map(|opened| OpenedFile { fh: opened.fh, keeps_cache: false, direct_io: false })
+        });
     }
 
     /// mkdir, mknod, create. `ItemWriteOperations::make` on the write-operation thread:
@@ -825,6 +810,7 @@ impl ItemKernelRequests {
         }
         let (write_operations, reply_attributes, name) = (Arc::clone(&self.write_operations), Arc::clone(&self.reply_attributes), name.to_owned());
         self.queue_change(reply, move || {
+            write_operations.check_write_scope(directory, Some(&name))?;
             let mut made = write_operations.make(directory, &name, kind)?;
             if is_executable && made.item.kind == ItemKind::File && write_operations.set_executable_bit(made.item.local_item_id, true).is_ok() {
                 made.item.is_executable = true;
@@ -841,7 +827,10 @@ impl ItemKernelRequests {
             return reply(decide_announced_removal(self.lookup.find_entry(directory, name).map(drop)));
         }
         let (write_operations, name) = (Arc::clone(&self.write_operations), name.to_owned());
-        self.queue_change(reply, move || write_operations.remove(directory, &name, asked_kind));
+        self.queue_change(reply, move || {
+            write_operations.check_write_scope(directory, Some(&name))?;
+            write_operations.remove(directory, &name, asked_kind)
+        });
     }
 
     /// rename. `ItemWriteOperations::rename` on the write-operation thread: the disk, then
@@ -849,7 +838,10 @@ impl ItemKernelRequests {
     /// read-only folder.
     pub(super) fn queue_rename(&self, directory: LocalItemId, name: &OsStr, new_directory: LocalItemId, new_name: &OsStr, mode: RenameMode, reply: ReplyTo<()>) {
         let (write_operations, name, new_name) = (Arc::clone(&self.write_operations), name.to_owned(), new_name.to_owned());
-        self.queue_change(reply, move || write_operations.rename(directory, &name, new_directory, &new_name, mode));
+        self.queue_change(reply, move || {
+            write_operations.check_write_places(&[(directory, Some(&name)), (new_directory, Some(&new_name))])?;
+            write_operations.rename(directory, &name, new_directory, &new_name, mode)
+        });
     }
 
     /// setattr with a size, on the mount's thread: what must be on disk first
@@ -858,6 +850,7 @@ impl ItemKernelRequests {
     /// handle of a file that was removed or saved over since is not refused here
     /// (`docs/design/mount.md` §4.1). `EROFS` in a read-only folder.
     pub(super) fn decide_truncate(&self, node: LocalItemId, size: u64) -> Result<FileToFill, Errno> {
+        self.check_write_scope(node, None)?;
         if self.item_handles.is_open_for_writing(node) {
             self.access_mode_switch.check_read_write()?;
             return Ok(FileToFill::Nothing);
@@ -885,6 +878,7 @@ impl ItemKernelRequests {
     pub(super) fn queue_truncate(&self, node: LocalItemId, fh: Option<Fh>, size: u64, reply: ReplyTo<FileAttr>) {
         let (write_operations, reply_attributes) = (Arc::clone(&self.write_operations), Arc::clone(&self.reply_attributes));
         self.queue_change(reply, move || {
+            write_operations.check_write_scope(node, None)?;
             write_operations.truncate(node, fh, size)?;
             reply_attributes.find_attributes(node, fh)
         });
@@ -901,6 +895,7 @@ impl ItemKernelRequests {
         }
         let (write_operations, reply_attributes) = (Arc::clone(&self.write_operations), Arc::clone(&self.reply_attributes));
         self.queue_change(reply, move || {
+            write_operations.check_write_scope(node, None)?;
             write_operations.set_modified_time(node, fh, mtime, mtime_nsec)?;
             reply_attributes.find_attributes(node, fh)
         });
@@ -917,6 +912,7 @@ impl ItemKernelRequests {
         }
         let (write_operations, reply_attributes) = (Arc::clone(&self.write_operations), Arc::clone(&self.reply_attributes));
         self.queue_change(reply, move || {
+            write_operations.check_write_scope(node, None)?;
             write_operations.set_executable_bit(node, is_executable)?;
             reply_attributes.find_attributes(node, fh)
         });
@@ -927,6 +923,7 @@ impl ItemKernelRequests {
     /// for a handle that may not write.
     pub(super) fn answer_write(&self, fh: Fh, offset: u64, bytes: &[u8]) -> Result<u32, Errno> {
         let (item, backing_file) = self.item_handles.find_file_to_write(fh).ok_or(Errno::EBADF)?;
+        self.write_operations.check_writer_scope(item)?;
         self.item_handles.mark_written(item);
         backing_file.write_all_at(bytes, offset).map_err(|error| to_errno(&error))?;
         Ok(bytes.len() as u32)
@@ -936,7 +933,10 @@ impl ItemKernelRequests {
     /// for a handle that may not write: it wrote nothing.
     pub(super) fn answer_fsync(&self, fh: Fh) -> Result<(), Errno> {
         match self.item_handles.find_file_to_write(fh) {
-            Some((_, backing_file)) => backing_file.sync_all().map_err(|error| to_errno(&error)),
+            Some((_, backing_file)) => {
+                backing_file.sync_all().map_err(|error| to_errno(&error))?;
+                self.store.sync_write_ahead_log().map_err(|error| to_errno(&error))
+            },
             None => Ok(()),
         }
     }
@@ -963,12 +963,20 @@ impl ItemKernelRequests {
         self.store.sync_write_ahead_log().map_err(|error| to_errno(&error))
     }
 
-    /// release. The kernel is answered at once; a reader's handle is closed on the
-    /// mount's thread (`ItemHandles::close_reader`), a writer's as a job of the
-    /// write-operation thread (`ItemWriteOperations::close_writer`), which writes
-    /// `ClosedChanged` or `ClosedUnchanged` at the last close and only then takes the
-    /// writer out. Queued whatever the access mode is: the close of a file that was open
-    /// when the folder went read-only is written.
+    /// The real kernel release, answered only after the close and its WAL sync.
+    pub(super) fn queue_release(&self, fh: Fh, reply: ReplyTo<()>) {
+        if self.item_handles.find_file_to_write(fh).is_none() {
+            self.item_handles.close_reader(fh);
+            return reply(Ok(()));
+        }
+        let write_operations = Arc::clone(&self.write_operations);
+        self.write_operation_thread.run(move || reply(write_operations.close_writer_checked(fh)));
+    }
+
+    /// Test-fixture release without a kernel reply. A reader closes at once; a writer
+    /// is queued even after a switch to read-only. Real requests use `queue_release`
+    /// and receive the close's durability error.
+    #[cfg(test)]
     pub(super) fn answer_release(&self, fh: Fh) {
         if self.item_handles.find_file_to_write(fh).is_none() {
             return self.item_handles.close_reader(fh);

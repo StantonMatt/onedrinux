@@ -122,6 +122,8 @@ async fn main() {
             }
         }
         let answer = match words.as_slice() {
+            ["write-scope", "clear"] => said(persist.store.update_account(&persist.account, |account| { account.write_paths = None; Ok::<_, ConfigError>(()) }).map(|()| "saved".into()).map_err(|e| e.to_string())),
+            ["write-scope", "set", paths @ ..] => said(persist.store.update_account(&persist.account, |account| { account.write_paths = Some(paths.iter().map(|path| (*path).to_owned()).collect()); Ok::<_, ConfigError>(()) }).map(|()| "saved".into()).map_err(|e| e.to_string())),
             ["guard", "enabled", choice] => said(persist.store.set_download_guard(*choice == "on").map(|()| "saved".into()).map_err(|e| e.to_string())),
             ["guard", "limits", files, bytes, seconds] => said((|| {
                 persist.store.set_guard_thresholds(files.parse().map_err(|_| "bad files")?, bytes.parse().map_err(|_| "bad bytes")?, seconds.parse().map_err(|_| "bad seconds")?).map_err(|e| e.to_string())?;

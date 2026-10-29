@@ -5,9 +5,8 @@
 //! Every change is guarded (`docs/design/writes.md` §4.2): `If-Match` on anything
 //! that exists, `conflictBehavior=fail` on anything new, so a guard that fails
 //! comes back as [`WriteError::Changed`] or [`WriteError::NameExists`] and is
-//! never retried unguarded here — except a folder's delete
-//! ([`DriveClient::delete_folder`]), sent with no guard at all: the whole
-//! folder goes, as on Windows, and the recycle bin is the safety net.
+//! never retried unguarded here. A folder delete ([`DriveClient::delete_folder`])
+//! uses the descendant-sensitive folder cTag and puts the whole tree in the recycle bin.
 //! Throttling (`429`, `503`) comes back as [`WriteError::Throttled`] with the
 //! wait Graph asked for: every step towards OneDrive of the folder waits it out
 //! (`docs/design/writes.md` §6.2), so nothing here sleeps ([`Throttle::Return`]).
@@ -149,16 +148,15 @@ impl DriveClient {
         done(response).await
     }
 
-    /// Deletes folder `id`, whole, into OneDrive's recycle bin: no
-    /// `If-Match`, whatever changed inside it in OneDrive since — as Windows
-    /// deletes a folder ([decisions.md](../../../../docs/design/decisions.md)
-    /// §4.4). The recycle bin
-    /// is the safety net. [`WriteError::NotFound`] means it is already gone.
-    pub async fn delete_folder(&self, id: &str) -> Result<(), WriteError> {
-        let url = self.item_url(id, None)?;
-        let response = self.send(Auth::Account, Throttle::Return, || self.api.delete(url.clone())).await?;
-        done(response).await
+    /// Deletes a folder into the recycle bin, conditional on its descendant-sensitive
+    /// cTag. A stale tag is 412.
+    pub async fn delete_folder(&self, id: &str, if_match: &str) -> Result<(), WriteError> {
+        if if_match.trim().is_empty() || if_match.trim() == "*" {
+            return Err(WriteError::Failed("a folder removal requires a specific version tag".into()));
+        }
+        self.delete_item(id, if_match).await
     }
+
 }
 
 /// A successful answer with nothing to read, or the error an unsuccessful one means.

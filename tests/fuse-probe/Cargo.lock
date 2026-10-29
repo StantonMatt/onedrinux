@@ -472,8 +472,10 @@ version = "0.1.0"
 dependencies = [
  "futures-util",
  "konedrive-graph",
+ "konedrive-tree",
  "konedrived",
  "libc",
+ "rusqlite",
  "tokio",
  "tracing-subscriber",
  "url",
@@ -1015,6 +1017,7 @@ dependencies = [
 name = "konedrive-graph"
 version = "0.2.3"
 dependencies = [
+ "httpdate",
  "anyhow",
  "async-trait",
  "base64 0.22.1",
@@ -1045,6 +1048,7 @@ dependencies = [
  "konedrive-reason",
  "rusqlite",
  "serde",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",

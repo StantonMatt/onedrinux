@@ -229,7 +229,10 @@ impl ItemWriteOperations {
         #[cfg(test)]
         self.reach(super::tests::OperationPoint::RecordWritten);
         let place_change = self.place_changes.begin();
-        if let Err(errno) = self.run_store_job("the row of a file that is to be written could not be written", move |store| store.item_store().apply_with_content_on_disk(&change)) {
+        if let Err(errno) = self.run_store_job("the row of a file that is to be written could not be written", move |store| {
+            store.item_store().apply_with_content_on_disk(&change)?;
+            store.sync_write_ahead_log()
+        }) {
             self.forget_place_change_record(record);
             return Err(errno);
         }
@@ -282,7 +285,11 @@ impl ItemWriteOperations {
         let backing_file = match decide_open_change(rank, file.row.content_presence) {
             OpenChange::Nothing => self.open_backing_file(&file.path)?,
             OpenChange::OpenedForWriting => {
-                self.run_store_job("the open of a file for writing could not be written", move |store| store.item_store().apply(&LocalVersionChange::OpenedForWriting { item: node }))?;
+                self.run_store_job("the open of a file for writing could not be written", move |store| {
+                    let item = store.item_store().apply(&LocalVersionChange::OpenedForWriting { item: node })?;
+                    store.sync_write_ahead_log()?;
+                    Ok(item)
+                })?;
                 self.wake_plan();
                 match self.open_backing_file(&file.path) {
                     Ok(backing_file) => backing_file,
@@ -303,6 +310,14 @@ impl ItemWriteOperations {
                 self.make_backing_file(&file, LocalVersionChange::OpenedForWriting { item: node }, made_as)?
             }
         };
+        // A cTag belongs to the old bytes. Clear it before a writer can change them,
+        // even when a store recovery later has no row to remember the open.
+        use xattr::FileExt;
+        match backing_file.remove_xattr(placeholder::XATTR_CTAG) {
+            Ok(()) => (),
+            Err(error) if error.raw_os_error() == Some(libc::ENODATA) => (),
+            Err(error) => return Err(to_errno(&error)),
+        }
         let backing_file = Arc::new(backing_file);
         let (fh, _) = self.item_handles.add_writer(node, Arc::clone(&backing_file));
         Ok(OpenedWriter { fh, backing_file })
@@ -356,9 +371,10 @@ impl ItemWriteOperations {
     /// Item(node) }`), the record taken by itself once the file is made — then the
     /// file is cut and given the time the row was given. A node whose row is gone, asked
     /// with the `fh` of a writer: the handle's file is cut, and no row written
-    /// (`docs/design/mount.md` §4.1). A file on disk is opened before its row is written, so that one that cannot
-    /// be opened writes none; a file that cannot be cut after its row is the mount's
-    /// take-down. The attributes after it are the caller's to read, as getattr does.
+    /// (`docs/design/mount.md` §4.1). A resident file's intent is synced before its writable
+    /// backing open or cut. If either fails after the row, the mount is taken down and
+    /// the next start repairs the row from the retained bytes. The caller reads the
+    /// resulting attributes as getattr does.
     pub(in crate::mount) fn truncate(&self, node: LocalItemId, fh: Option<Fh>, size: u64) -> Result<(), Errno> {
         self.access_mode_switch.check_read_write()?;
         if let Some((written, backing_file)) = self.find_writer(node, fh) {
@@ -372,8 +388,15 @@ impl ItemWriteOperations {
         let change = LocalVersionChange::Truncated { item: node, size, mtime, mtime_nsec };
         let backing_file = match file.row.content_presence {
             ContentPresence::OnDisk => {
-                let backing_file = self.open_backing_file(&file.path)?;
-                self.run_store_job("a truncation could not be written", move |store| store.item_store().apply(&change))?;
+                self.run_store_job("a truncation could not be written", move |store| {
+                    let item = store.item_store().apply(&change)?;
+                    store.sync_write_ahead_log()?;
+                    Ok(item)
+                })?;
+                let backing_file = self.open_backing_file(&file.path).map_err(|errno| {
+                    self.mount_take_down.ask(TakeDownCause::BackingFileBehindRow { path: file.path.clone() });
+                    errno
+                })?;
                 self.wake_plan();
                 backing_file
             }
@@ -381,6 +404,12 @@ impl ItemWriteOperations {
             ContentPresence::NotOnDisk if file.content.size() > 0 && size > 0 => return Err(Errno::ESTALE),
             ContentPresence::NotOnDisk => self.make_backing_file(&file, change, MadeFileContent::ChangedHere)?,
         };
+        use xattr::FileExt;
+        match backing_file.remove_xattr(placeholder::XATTR_CTAG) {
+            Ok(()) => (),
+            Err(error) if error.raw_os_error() == Some(libc::ENODATA) => (),
+            Err(error) => return Err(to_errno(&error)),
+        }
         backing_file.set_len(size).and_then(|()| placeholder::set_mtime(&backing_file, to_system_time(mtime, mtime_nsec))).map_err(|error| self.take_down_for_file(&file.path, &error))
     }
 
@@ -461,26 +490,42 @@ impl ItemWriteOperations {
     /// the check at start reads (`docs/design/mount.md` §7.2). Written whatever the access
     /// mode is by now.
     pub(in crate::mount) fn close_writer(&self, fh: Fh) {
-        let Some(closing) = self.item_handles.find_closing_writer(fh) else { return };
+        if let Err(errno) = self.close_writer_checked(fh) {
+            tracing::error!("a writer's close could not be made durable: {errno:?}");
+        }
+    }
+
+    /// The kernel release waits for this answer; a failed WAL sync is an error.
+    pub(in crate::mount) fn close_writer_checked(&self, fh: Fh) -> Result<(), Errno> {
+        let Some(closing) = self.item_handles.find_closing_writer(fh) else { return Ok(()) };
         if closing.outcome == CloseOutcome::StillOpenElsewhere {
             self.item_handles.remove_writer(fh);
-            return;
+            return Ok(());
         }
-        match read_size_and_time(&closing.backing_file) {
+        let result = match read_size_and_time(&closing.backing_file) {
             Ok((size, mtime, mtime_nsec)) => {
                 let closed = closing.clone();
-                let _ = self.run_store_job("the last close of a file could not be written; the check at start mends its row", move |store| {
+                self.run_store_job("the last close of a file could not be written; the check at start mends its row", move |store| {
                     let mut items = store.item_store();
                     let is_shown = items.reader().find_item(closed.item)?.is_some_and(|row| row.local.is_some());
-                    match decide_close_change(&closed, is_shown, size, mtime, mtime_nsec) {
-                        Some(change) => items.apply(&change).map(drop),
-                        None => Ok(()),
+                    if let Some(change) = decide_close_change(&closed, is_shown, size, mtime, mtime_nsec) {
+                        items.apply(&change)?;
+                        store.sync_write_ahead_log()?;
                     }
-                });
+                    Ok(())
+                })
             }
-            Err(error) => tracing::warn!("the backing file of item {} could not be looked at when its last writer closed it: {error}; the check at start mends its row", closing.item),
+            Err(error) => {
+                tracing::warn!("the backing file of item {} could not be looked at when its last writer closed it: {error}; the check at start mends its row", closing.item);
+                Err(to_errno(&error))
+            }
+        };
+        if result.is_err() {
+            let path = self.read_shown_file(closing.item).map(|file| file.path).unwrap_or_else(|_| std::path::PathBuf::from(format!("item-{}", closing.item)));
+            self.mount_take_down.ask(TakeDownCause::BackingFileBehindRow { path });
         }
         self.item_handles.remove_writer(fh);
         self.wake_plan();
+        result
     }
 }

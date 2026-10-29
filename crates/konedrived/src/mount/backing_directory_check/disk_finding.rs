@@ -178,7 +178,7 @@ pub(super) fn compare_content(row: &ContentVersion, file: &DiskContent, links: E
         (EntryLinks::One, Some(of_row), Some(mark)) => of_row == mark,
         _ => true,
     };
-    if row.size() == file.size && row.mtime().0 == file.mtime && is_marked_as_the_rows {
+    if row.size() == file.size && row.mtime().0 == file.mtime && (!matches!(row, ContentVersion::ChangedHere { .. }) || row.mtime().1 == file.mtime_nsec) && is_marked_as_the_rows {
         ContentComparison::Same
     } else {
         ContentComparison::Different

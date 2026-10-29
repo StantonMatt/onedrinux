@@ -68,6 +68,12 @@ impl TreeStore {
         set(&self.conn, key, value)
     }
 
+    /// The most recently begun listing. A sender waits for a later listing to end
+    /// before attempting a newly observed directory removal.
+    pub fn listing_count(&self) -> Result<u64, TreeError> {
+        Ok(self.meta(LISTING_COUNT)?.and_then(|n| n.parse().ok()).unwrap_or(0))
+    }
+
     pub fn delta_link(&self) -> Result<Option<String>, TreeError> {
         self.meta(DELTA_LINK)
     }

@@ -66,3 +66,15 @@ fn an_answer_gives_the_size_it_says_and_one_that_says_none_is_refused() {
     assert_eq!(check(&answer(0, None), 0, 10), Err(libc::EIO));
     assert_eq!(check(&answer(0, None), 0, 0), Err(libc::EIO), "not said is not an empty file");
 }
+
+#[test]
+fn a_remote_version_without_a_hash_never_passes_verification() {
+    let hash = QuickXor::new();
+    for ctag in ["", "version"] {
+        let version = Some(Version { ctag: ctag.into(), quick_xor: None });
+        assert!(matches!(verify("id", &version, &hash), Err(End::Fail(libc::EIO))));
+    }
+    assert!(verify("local", &None, &hash).is_ok(), "a local test source makes no remote verification claim");
+    assert!(!same_version(&Some(Version { ctag: String::new(), quick_xor: Some([1; 20]) }),
+        &Some(Version { ctag: String::new(), quick_xor: Some([2; 20]) })), "hashes distinguish versions without cTags");
+}

@@ -29,7 +29,11 @@ pub async fn single_account(
     let config = Arc::new(ConfigStore::open(&paths, async { false }).await);
     let id = match config.snapshot().accounts.first() {
         Some(account) => account.id.clone(),
-        None => config.add_account(MIGRATED_LABEL)?.id,
+        None => {
+            let id = config.add_account(MIGRATED_LABEL)?.id;
+            config.update_account(&id, |account| { account.mode = crate::config::Mode::ReadOnly; Ok::<_, crate::config::ConfigError>(()) })?;
+            id
+        },
     };
     let account_paths = paths.account(&id).ok_or_else(|| anyhow::anyhow!("{id:?} is not an account id"))?;
     AccountService::new(config, &id, account_paths, endpoints, secrets, sign_in_timeout)

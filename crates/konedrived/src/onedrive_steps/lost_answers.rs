@@ -204,7 +204,9 @@ pub fn decide_lost_answer_fate(request: &SentRequest<'_>, item: &ItemVersions, f
                 false => Ok(name_held(found, name)),
             }
         }
-        SentRequest::SendNewFile { name, sent_hash, .. } => match has_sent_content(found, sent_hash) && !is_bound && !is_held_by_upload_session {
+        // Empty content is shared by every zero-byte file. A lost answer provides no
+        // application-and-server-window proof, so never acquire that unknown identity.
+        SentRequest::SendNewFile { name, sent_hash, .. } => match found.size != Some(0) && has_sent_content(found, sent_hash) && !is_bound && !is_held_by_upload_session {
             true => went_through(found),
             false => Ok(name_held(found, name)),
         },

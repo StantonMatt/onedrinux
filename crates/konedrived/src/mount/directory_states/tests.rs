@@ -132,7 +132,7 @@ fn regression_fs4_removing_effective_pins_discards_pin_only_failures_before_repi
     for removal in 0..4 {
         let pinned = if removal == 0 { id } else { dir };
         pin(&f, pinned, true);
-        let asker = DownloadAsker::PlanPin { planned_from: ItemVersions::of(&f.find_item(id).unwrap()) };
+        let asker = DownloadAsker::PlanPin { planned_from: ItemVersions::of(&f.find_item(id).unwrap()), landing_lease: None };
         let ItemDownloadStart::Started { run, .. } = f.download_states.start_or_join(&key, &asker, None) else { panic!("a new download") };
         f.download_states.finish(&run, Err(libc::EIO));
         assert_eq!(s.file_state(id), Some(State::Failed));

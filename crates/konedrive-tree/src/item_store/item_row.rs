@@ -26,7 +26,7 @@ pub(super) const CONTENT_COLUMNS: [&str; 6] = ["size", "mtime", "mtime_nsec", "h
 pub(super) const ITEM_COLUMNS: &str = "local_item_id, onedrive_drive_id, onedrive_item_id, kind, \
      local_parent_id, local_name, local_folded_name, local_size, local_mtime, local_mtime_nsec, local_hash, local_ctag, local_change_count, \
      onedrive_parent_id, onedrive_name, onedrive_folded_name, onedrive_size, onedrive_mtime, onedrive_mtime_nsec, onedrive_hash, onedrive_ctag, onedrive_change_count, \
-     onedrive_etag, onedrive_mime, \
+     onedrive_etag, onedrive_mime, onedrive_folder_ctag, \
      synced_parent_id, synced_name, synced_size, synced_mtime, synced_mtime_nsec, synced_hash, synced_ctag, synced_change_count, \
      content_presence, \
      before_write_size, before_write_mtime, before_write_mtime_nsec, before_write_hash, before_write_ctag, before_write_change_count, \
@@ -131,6 +131,7 @@ mod column_index {
     pub(super) const ONEDRIVE_NAME: usize = column(ITEM_COLUMNS, "onedrive_name");
     pub(super) const ONEDRIVE_CONTENT: usize = column(ITEM_COLUMNS, "onedrive_size");
     pub(super) const ONEDRIVE_ETAG: usize = column(ITEM_COLUMNS, "onedrive_etag");
+    pub(super) const ONEDRIVE_FOLDER_CTAG: usize = column(ITEM_COLUMNS, "onedrive_folder_ctag");
     pub(super) const ONEDRIVE_MIME: usize = column(ITEM_COLUMNS, "onedrive_mime");
     pub(super) const SYNCED_PARENT_ID: usize = column(ITEM_COLUMNS, "synced_parent_id");
     pub(super) const SYNCED_NAME: usize = column(ITEM_COLUMNS, "synced_name");
@@ -218,6 +219,7 @@ pub(super) fn item_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
         onedrive,
         onedrive_etag: row.get(column_index::ONEDRIVE_ETAG)?,
         onedrive_mime: row.get(column_index::ONEDRIVE_MIME)?,
+        onedrive_folder_ctag: row.get(column_index::ONEDRIVE_FOLDER_CTAG)?,
         synced_place: place_from(row, column_index::SYNCED_PARENT_ID, column_index::SYNCED_NAME)?,
         synced_content: content_from(row, column_index::SYNCED_CONTENT)?,
         content_presence: ContentPresence::decode(&row.get::<_, String>(column_index::CONTENT_PRESENCE)?),
@@ -275,6 +277,7 @@ fn values_of(item: &Item) -> Vec<Value> {
     values.extend(folded_place_values(local.and_then(|local| local.place.as_ref())));
     values.extend(content_values(local.and_then(|local| local.content.as_ref())));
     values.extend(onedrive_values(item.onedrive.as_ref(), item.onedrive_etag.as_deref(), item.onedrive_mime.as_deref()));
+    values.push(item.onedrive_folder_ctag.clone().into());
     values.extend(place_values(item.synced_place.as_ref()));
     values.extend(content_values(item.synced_content.as_ref()));
     values.push(item.content_presence.as_str().to_owned().into());
@@ -436,9 +439,11 @@ fn onedrive_columns() -> Vec<String> {
 /// `seen_in_full_listing`: the id of the full listing that says so, when one does; the
 /// row keeps what it has otherwise. A name is kept as OneDrive gave it and is not asked to
 /// be the name of a directory entry: whether the folder can show the item is its placement.
-pub(super) fn set_onedrive_version(conn: &Connection, item: LocalItemId, onedrive: &ItemVersion, etag: Option<&str>, mime: Option<&str>, placement: Placement, seen_in_full_listing: Option<u64>) -> Result<(), TreeError> {
+pub(super) fn set_onedrive_version(conn: &Connection, item: LocalItemId, onedrive: &ItemVersion, etag: Option<&str>, mime: Option<&str>, folder_ctag: Option<&str>, placement: Placement, seen_in_full_listing: Option<u64>) -> Result<(), TreeError> {
     let mut values = onedrive_values(Some(onedrive), etag, mime);
     let mut sets: Vec<String> = onedrive_columns().iter().enumerate().map(|(n, column)| format!("{column} = ?{}", n + 1)).collect();
+    values.push(folder_ctag.map(str::to_owned).into());
+    sets.push(format!("onedrive_folder_ctag = ?{}", values.len()));
     values.push(placement.encode().into());
     sets.push(format!("placement = ?{}", values.len()));
     values.push(seen_in_full_listing.map(|count| count as i64).into());
@@ -514,7 +519,7 @@ pub(super) fn list_below_in_onedrive(conn: &Connection, directory: LocalItemId) 
 /// `INDEXED BY`, so that a statement an index cannot serve fails and reads no table whole.
 fn clear_onedrive_version_sql(found_by: &str) -> String {
     let sets = onedrive_columns().iter().map(|column| format!("{column} = NULL")).collect::<Vec<_>>().join(", ");
-    format!("UPDATE items {found_by} SET {sets}, placement = '{PLACED}'")
+    format!("UPDATE items {found_by} SET {sets}, onedrive_folder_ctag = NULL, placement = '{PLACED}'")
 }
 
 /// The item ids of OneDrive a query answers, one a row.

@@ -152,26 +152,26 @@ security](#5-account-and-security), [the desktop](#6-the-desktop), [testing](#7-
 - **Decision.** An open of a file that is not on disk is answered at once. A read fetches the range
   asked for from OneDrive; once the bytes read so reach `[transfers] download_after` (1 MiB unless
   `config.toml` says otherwise), or the whole of a smaller file, the file is downloaded whole, and
-  the reads go on from the download as it arrives ([mount.md](mount.md) §5).
+  reads remain version-checked ranges until the verified file lands ([mount.md](mount.md) §5).
 - **Why.** A program that reads the start of a file (a file manager finding its type, a
   thumbnailer, `file`) costs a range, not the whole file. A program that reads the file through
   gets it at the speed of one download, checked against its hash, and kept on disk. A read that
   waits for OneDrive can be interrupted: the workspace uses `fuser` with one change, which hands the
   kernel's `INTERRUPT` to the daemon (`vendor/fuser/README.konedrive.md`).
-- **Trade-off.** A range is not checked against the content's version (F297). Every read before
-  the threshold is a request to OneDrive. A patched copy of `fuser` is kept in the repository.
+- **Trade-off.** Each range needs metadata checks before and after its body. Its version is
+  checked, but it has no independent whole-file hash proof (F297). A patched copy of `fuser` is kept in the repository.
 
 ### 2.6 A read never mixes two contents
 
 - **Decision.** A handle remembers the content it was opened as. Its bytes come from its own
-  backing file, from the landed copy of that content, or from the running download of that very
-  content, below what the download has told to be of it. When OneDrive is found to have another
+  backing file, from the verified landed copy of that content, or from a range checked against
+  the opened metadata version. Unfinished staging is never served. When OneDrive is found to have another
   content, the read fails `ESTALE`, and the next open reads the new one ([mount.md](mount.md) §5).
 - **Why.** A program handed half of one version and half of another has a corrupt file and no
   error to tell it so.
 - **Trade-off.** A program reading a file while it changes in OneDrive gets an error and must open
-  the file again. Through a range alone another content is told only once a download or a listing
-  told it (F297).
+  the file again. Per-range checks rely on OneDrive binding its metadata and download response
+  to the same content (F297).
 
 ### 2.7 A download lands only checked and synced, and the row says on disk last
 
@@ -278,9 +278,9 @@ security](#5-account-and-security), [the desktop](#6-the-desktop), [testing](#7-
 
 ### 3.2 The local item id follows the file; the binding follows what OneDrive must see as one item
 
-- **Decision.** A binding moves between items only by three operations of the store
-  (`take_over_binding`, `give_up_binding`, `merge_items`): a file saved by a rename over another
-  takes its binding; a file changed here that OneDrive changed or removed gives its binding up and
+- **Decision.** A binding moves between items only by four operations of the store
+  (`take_over_binding`, `exchange_bindings`, `give_up_binding`, `merge_items`): a file saved by a rename over another
+  takes its binding, exchanging bindings if the temporary is already in OneDrive; a file changed here that OneDrive changed or removed gives its binding up and
   becomes a conflict copy or a new item; a new item here and a new one in OneDrive that are the
   same are merged ([sync.md](sync.md) §4).
 - **Why.** An editor's save by rename is one item in OneDrive whose content changed: its id,
@@ -361,29 +361,25 @@ security](#5-account-and-security), [the desktop](#6-the-desktop), [testing](#7-
   in `config.toml` too covers a store made anew.
 - **Trade-off.** One `GET /me/drive` per listing.
 
-### 3.9 A lost store is rebuilt from OneDrive and the disk
+### 3.9 A lost store is reconstructed conservatively
 
-- **Decision.** With no store, a full listing makes the OneDrive versions again, and the start-up
-  check makes the local versions from the backing directory: an entry marked with a OneDrive item id
-  that no row has is bound to that id, and taken as clean where its marks, size and time are
-  OneDrive's; an unmarked entry is a new item ([mount.md](mount.md) §7).
-- **Why.** The downloaded copies carry the id they belong to, so losing the store costs one listing
-  and no download.
-- **Trade-off.** Lost with the store: the pins, the executable bits, the activity log, the
-  conflicts on record, open upload sessions, and every unsent change that left nothing on disk (a
-  removal, a move) (D36).
+- **Decision.** A full listing restores cloud versions; marked backing entries regain their
+  bindings. Every recovered file is changed locally and hashed before agreement. Missing
+  backing entries never cause a remote move or removal ([mount.md](mount.md) §7).
+- **Why.** Size, time and a surviving cTag cannot prove what bytes a stopped writer left.
+- **Trade-off.** Recovery needs local hashing. A truly missing database cannot recover its
+  pins or unsent namespace intentions from backing bytes alone.
 
-### 3.10 A store of another version is rebuilt, not migrated
+### 3.10 Preserve stores across upgrades and downgrades
 
-- **Decision.** A store of the version just before this build's is brought up in place where the
-  change between the two only adds or makes an index anew; a store of any other version, a newer
-  daemon's, or a file that is no store, is rebuilt as a lost one is, after what the rebuild loses
-  is counted and told (`konedrive-tree/src/schema/old_store.rs`).
-- **Why.** The store can be made again from OneDrive and the disk. A migration step for every
-  layout ever shipped would be code that runs once and can lose data when it is wrong; a change
-  that only adds, or an index made again from the rows, is no reason to lose the pins.
-- **Trade-off.** An upgrade over several layouts, or a downgrade, costs a full listing and what a
-  lost store costs (D36).
+- **Decision.** Schema 30 to 31 stays supported; 31 to 32 adds nullable folder cTags. Every
+  shipped step from 32 onward remains in a sequential transaction/version chain, after a
+  durable WAL-inclusive snapshot. Unsupported older or damaged stores are renamed to quarantine,
+  readable pins restored, and unsent moves/removals exported without replay. Newer layouts
+  refuse without touching their files. Reset is an explicit offline quarantine command.
+- **Why.** The store holds user choices and pending work that a listing cannot reconstruct.
+- **Trade-off.** Extra disk for snapshots and the newest three quarantines; manual recovery
+  for namespace intentions from unsupported layouts ([store.md](store.md), D36).
 
 ### 3.11 Whole-drive listing, even when only one folder matters
 
@@ -448,25 +444,23 @@ answer a user already knows, it is followed.
 ### 4.3 Every write is guarded
 
 - **Decision.** `If-Match` on every change of an item OneDrive has, `conflictBehavior=fail` on
-  everything new. Nothing is sent without its guard, except a directory's removal (§4.4).
+  everything new. Nothing is sent without its guard. Folder removals use the descendant-sensitive cTag (§4.4).
 - **Why.** It is the only way two writers cannot overwrite each other, and with the record of every
   request (§3.5) it makes every step safe to try again. A session's guard holds to its end:
   OneDrive refuses its last fragment when the item's content changed since the session was opened,
   and keeps that change.
 - **Trade-off.** A refused guard costs a listing before the plan decides (§3.6).
 
-### 4.4 A directory's removal is one unguarded request, sent only when all in it was removed here
+### 4.4 A directory removal uses the folder cTag after a listing cycle
 
-- **Decision.** A directory removed here with everything in it is one `DELETE` of the directory,
-  with no `If-Match`. It is sent only while the rows say that everything OneDrive has below it was
-  shown here and removed here, no listing is under way and no unsettled request is about any of it:
-  asked when it is planned, again before the request leaves, and at its commit. `404` is success
-  ([writes.md](writes.md) §4).
-- **Why.** This is what OneDrive on Windows does, and one request for a tree of thousands of files.
-  An unguarded removal takes all OneDrive has in the directory, so it is sent only on that positive
-  condition; what the folder never showed is never removed with it.
-- **Trade-off.** A directory that holds in OneDrive what the folder cannot show cannot be removed
-  here (F299).
+- **Decision.** Refresh the listing before the first attempt, keep the folder's cTag from that
+  listing, and send it in `If-Match`. Keep the positive checks of the known subtree and busy
+  requests before sending and at commit. A missing cTag holds deletion; 412 refreshes the listing.
+- **Why.** Local rows cannot see a descendant created or changed after their last listing.
+  A descendant-sensitive server condition must cover that gap, including nested edits.
+- **Trade-off.** Personal OneDrive's folder cTag and DELETE behavior still need the guarded
+  live checks. Unknown created
+  directories are kept as orphans when cleanup lacks their original cTag. See writes.md §4.2.
 
 ### 4.5 A removal is sent as any change is, with no local trash and no confirmation
 
@@ -646,8 +640,9 @@ answer a user already knows, it is followed.
   quota, its store and its directory. The files on disk stay. It is not refused for what is unsent:
   the caller warns first, by `UploadQueue.UnsentCount()` ([accounts.md](accounts.md) §8).
 - **Why.** Nothing konedrive does removes a file of the user's on this computer.
-- **Trade-off.** The folder keeps only the downloaded files and what was made here; an unsent change
-  is lost with the store.
+- **Trade-off.** The folder keeps the downloaded files and what was made here. The archived
+  store preserves pending namespace intentions for manual recovery; they are never replayed
+  automatically ([store.md](store.md)).
 
 ### 5.13 Personal accounts only, for now
 

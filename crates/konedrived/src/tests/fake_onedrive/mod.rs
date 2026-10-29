@@ -28,6 +28,7 @@ use konedrive_graph::token::StaticToken;
 pub(crate) use sockets::FakeSockets;
 
 pub(crate) const ROOT: &str = "R";
+pub(crate) const APPLICATION: &str = "384b100c-c384-4a68-99b2-17a596bb66b9";
 
 #[derive(Debug, Clone)]
 pub struct FakeItem {
@@ -137,6 +138,7 @@ pub struct Cloud {
     /// session's empty file and every file a request made, at the wall clock; others
     /// as a test sets them. None for an item not in it.
     pub(crate) created: HashMap<String, i64>,
+    pub(crate) applications: HashMap<String, String>,
     /// A delete of a session's empty file (`DELETE /items/{its id}`) is
     /// refused `403` while set; otherwise it deletes the empty file and ends
     /// its session. What OneDrive does is unmeasured: both are
@@ -169,7 +171,9 @@ impl Cloud {
 
     pub fn add(&mut self, item: FakeItem) {
         self.changes.push(item.id.clone());
+        let parent = item.parent.clone();
         self.items.insert(item.id.clone(), item);
+        self.touch_above(parent);
     }
 
     /// Item `id`, and everything below it, deleted in OneDrive (another
@@ -417,6 +421,10 @@ impl Cloud {
         });
         if let Some(created) = self.created.get(&item.id) {
             value["createdDateTime"] = json!(format_graph_time(*created));
+            value["lastModifiedDateTime"] = json!(format_graph_time(*created));
+        }
+        if let Some(application) = self.applications.get(&item.id) {
+            value["createdBy"] = json!({ "application": { "id": application } });
         }
         match &item.parent {
             Some(parent) => value["parentReference"] = json!({ "id": parent, "driveId": self.drive_id.as_deref().unwrap_or("D") }),
@@ -632,7 +640,7 @@ impl Cloud {
             return ResponseTemplate::new(204);
         }
         let Some(item) = self.items.get(id).cloned() else { return error(404, "itemNotFound") };
-        if !Self::guard(&item, if_match) {
+        if (item.folder && if_match.is_none_or(|tag| tag.trim().is_empty())) || !Self::guard(&item, if_match) {
             return error(412, "preconditionFailed");
         }
         for below in self.below(id) {
@@ -672,6 +680,7 @@ impl Cloud {
                 ctag: format!("c-{id}"),
                 mtime: 0,
             };
+            self.applications.insert(id.clone(), APPLICATION.to_owned());
             self.created.insert(id.clone(), crate::clock::unix_now());
             self.placeholders.insert(sid.clone(), placeholder);
         }
@@ -731,7 +740,8 @@ impl Cloud {
                 }
                 let id = self.new_id();
                 let (etag, ctag) = (self.tag("e", &id), self.tag("c", &id));
-                self.created.insert(id.clone(), crate::clock::unix_now());
+                self.applications.insert(id.clone(), APPLICATION.to_owned());
+            self.created.insert(id.clone(), crate::clock::unix_now());
                 self.add(FakeItem {
                     id: id.clone(),
                     parent: Some(parent.clone()),
@@ -873,6 +883,7 @@ impl FakeGraph {
         let base = Url::parse(&format!("{}/", self.server.uri())).unwrap();
         DriveClient::new(base, Arc::new(StaticToken::new("T")))
             .unwrap()
+            .with_application_id(APPLICATION.to_owned())
             .with_retry(RetryPolicy { attempts: 2, default_wait: Duration::from_millis(5), max_wait: Duration::from_millis(20) })
     }
 }

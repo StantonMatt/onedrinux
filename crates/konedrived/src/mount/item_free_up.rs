@@ -33,6 +33,8 @@
 //! manager's emblem — asks again. A file that was left, and a copy that could not be
 //! removed and is on disk in its row again, are as they were: nothing is announced.
 
+// test: a_pending_rename_and_a_policy_hold_keep_the_resident_copy
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -53,6 +55,8 @@ use crate::sync_parts::running_steps::RunningSteps;
 pub(super) fn decide_item_free_up(item: &Item, is_pinned: bool, is_downloading_or_sent: bool, is_open_for_writing: bool) -> FreeUpDecision {
     match item.file_sync_state() {
         _ if is_pinned => FreeUpDecision::LeavePinned,
+        _ if matches!(item.local.as_ref().and_then(|v| v.content.as_ref()), Some(ContentVersion::Hashed { hash: None, .. })) => FreeUpDecision::LeaveModifiedHere,
+        _ if item.unsent_since.is_some() || item.local.as_ref().and_then(|v| v.place.as_ref()) != item.synced_place.as_ref() => FreeUpDecision::LeaveModifiedHere,
         Some(FileSyncState::ModifiedHere | FileSyncState::LocalOnly) => FreeUpDecision::LeaveModifiedHere,
         _ if is_open_for_writing => FreeUpDecision::LeaveOpenForWriting,
         _ if is_downloading_or_sent => FreeUpDecision::LeaveDownloading,
@@ -114,12 +118,19 @@ pub(super) struct ItemFreeUp {
     running_steps: Arc<RunningSteps>,
     /// Told of a copy that is gone and of a row that was mended.
     inotify_bridge: Arc<ItemInotifyBridge>,
+    protected: Arc<dyn Fn(LocalItemId) -> bool + Send + Sync>,
 }
 
 impl ItemFreeUp {
     /// Made by the mount's build, after the bridge.
     pub(super) fn new(place_changes: Arc<PlaceChanges>, store: Store, item_handles: Arc<ItemHandles>, download_states: Arc<ItemDownloadStates>, running_steps: Arc<RunningSteps>, inotify_bridge: Arc<ItemInotifyBridge>) -> Self {
-        Self { place_changes, store, item_handles, download_states, running_steps, inotify_bridge }
+        Self { place_changes, store, item_handles, download_states, running_steps, inotify_bridge, protected: Arc::new(|_| false) }
+    }
+
+    /// Recovery and policy holds that live outside the store's durable row facts.
+    pub(super) fn with_protection(mut self, protected: Arc<dyn Fn(LocalItemId) -> bool + Send + Sync>) -> Self {
+        self.protected = protected;
+        self
     }
 
     /// Frees the copy of the file `item`: one job of the store reads the row, its pin and
@@ -159,6 +170,7 @@ impl ItemFreeUp {
     }
 
     fn write_not_on_disk_if(&self, item: LocalItemId, expected: Option<&ContentVersion>) -> Result<FreedRow, FreedCopy> {
+        if (self.protected)(item) { return Err(FreedCopy::Left(FreeUpDecision::LeaveModifiedHere)); }
         let fail = |error: TreeError| {
             tracing::warn!("the copy of item {item} is not freed: {error}");
             FreedCopy::RowsChanged
@@ -168,9 +180,9 @@ impl ItemFreeUp {
             let reader = item_store.reader();
             let Some(row) = reader.find_item(item)? else { return Ok(None) };
             let Some(path) = reader.find_path(item)? else { return Ok(None) };
-            Ok(Some((reader.is_pinned(item)?, row, path)))
+            Ok(Some((reader.is_pinned(item)?, reader.can_free_content(item)?, row, path)))
         });
-        let Some((is_pinned, row, path)) = read.map_err(fail)? else { return Err(FreedCopy::Left(FreeUpDecision::NothingToFree)) };
+        let Some((is_pinned, can_free, row, path)) = read.map_err(fail)? else { return Err(FreedCopy::Left(FreeUpDecision::NothingToFree)) };
         // What is not on disk takes no space, whatever keeps it.
         let Some((content, place)) = find_copy_on_disk(&row) else { return Err(FreedCopy::Left(FreeUpDecision::NothingToFree)) };
         if expected.is_some_and(|expected| expected != &content) {
@@ -187,6 +199,7 @@ impl ItemFreeUp {
             Ok(RowPathStat::Facts { facts, .. }) => facts.blocks * 512,
             _ => 0,
         };
+        if !can_free || (self.protected)(item) { return Err(FreedCopy::Left(FreeUpDecision::LeaveModifiedHere)); }
         let decided = content.clone();
         match self.store.call_blocking(move |store| store.item_store().commit_freed_content(item, &decided)).map_err(fail)? {
             StepCommitOutcome::Written => Ok(FreedRow { item, place, path, content, bytes }),

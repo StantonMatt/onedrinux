@@ -15,6 +15,7 @@ impl TreeStore {
     pub fn set_pin(&self, id: &str, pinned: bool) -> Result<(), TreeError> {
         let sql = if pinned { "INSERT OR IGNORE INTO pins (id) VALUES (?1)" } else { "DELETE FROM pins WHERE id = ?1" };
         self.conn.prepare_cached(sql)?.execute([id])?;
-        Ok(())
+        self.sync_write_ahead_log()
+
     }
 }

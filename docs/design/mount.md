@@ -215,7 +215,8 @@ upload (`ItemContentFiles`), by the directories made above a place, and by the s
 file made for an overwrite or a truncation of an item of OneDrive carries the item id alone: it
 holds the user's content, not OneDrive's. No program can write a mark: the mount refuses
 `setxattr` (§4.2). No request of the kernel reads them. They serve the start-up check and a lost
-store (§7), and without the cTag a clean copy of an older content could not be told from an edit.
+store (§7). A write-open clears the old cTag before allowing an edit; recovery without rows
+hashes the bytes regardless of any surviving mark.
 
 The attributes a program reads through the mount (`user.konedrive.item-id`, `.state`, `.pin`,
 `.sync`) are not these marks: the mount answers them from the row and the plan
@@ -293,7 +294,7 @@ request calls.
 | rename | mount, write | the entry moved, over another one set aside | `Moved` or `SavedOver` |
 | setattr with a size | mount, runtime, write | a file not on disk is downloaded first, unless cut to nothing; a file open for writing is cut with no row | `Truncated` |
 | setattr with a time, with a mode | mount, write | the time into the row and the backing file; of a mode the owner's executable bit alone ([F303](../limitations/F303.md)) | the time; the executable bit |
-| write, fsync, flush | mount | into the backing file of the writer's handle | none per write |
+| write, fsync, flush | mount | writes into the backing file; fsync/flush sync it, then the WAL; errors propagate | none per write |
 | fsyncdir | mount | the directory's backing directory synced, then the store's write-ahead log, for the names only the rows hold | — |
 | release | mount, write | a reader's handle closed at once; a writer's last close is a job | `ClosedChanged` or `ClosedUnchanged` |
 
@@ -355,14 +356,13 @@ A read through a handle opened not on disk is decided on the mount's thread
 
 - the content landed since the open, or is kept in the row from before a writer's open: the
   handle goes on from the backing file, opened through `open_at_row_path`;
-- a download of that very item and content runs and has written its file far enough (1 MiB beyond
-  the bytes asked for): the bytes come from its file;
 - otherwise the range is fetched from OneDrive on the runtime, by the item's binding, and the
   kernel's interrupt aborts it.
 
 A range asks the content source for exactly those bytes (`ItemRangeFetcher::fetch_range`). Over
-Graph it is a `Range` request to the item's download address, which is kept for 30 minutes and
-asked again once when it does not serve (`graph_source.rs`). An answer that starts elsewhere than
+Graph it is a `Range` request to an address from fresh metadata. The source buffers that
+range and checks metadata again after the body, retaining the first range's metadata version
+and any download response ETag (`graph_source.rs`). A changed version is `ESTALE`. An answer that starts elsewhere than
 asked, or ends early, fails the read with `EIO`. While a file is read as ranges it holds one slot
 of the transfer pool as a file being opened does, until two seconds after its last read
 (`range_readers.rs`): what a program reads goes before the background downloads.
@@ -371,8 +371,8 @@ of the transfer pool as a file being opened does, until two seconds after its la
 
 The bytes read as ranges are counted per item. Once they reach `[transfers] download_after`
 (1 MiB by default; 0 downloads at the first read), or the whole of a smaller file, the file is
-downloaded whole, with no waiter: the reads go on as ranges and from the download's file as it is
-written, and from the backing file once it lands. A program that looks only at the start of a
+downloaded whole, with no waiter: reads continue as checked ranges until the verified backing
+file lands. Unfinished staging is never a read origin. A program that looks only at the start of a
 file, a file manager finding its type, downloads nothing more.
 
 ### 5.3 The whole download
@@ -400,7 +400,7 @@ One download, in its slot of the transfer pool (§5.6):
 3. **Checked** (`content_source/source/download.rs`, `guards.rs`). The quickXorHash is computed
    over the bytes as they are written, and a content OneDrive gives a hash for is never landed
    unless it matches; a mismatch starts the download over once, and a second is `EIO`. A file
-   OneDrive gives without a hash is landed unverified, with a warning ([F34](../limitations/F34.md)).
+   OneDrive gives without a hash fails closed with `EIO` ([F34](../limitations/F34.md)).
    A read error or a short stream is a break: the next fetch asks from where the bytes stopped,
    after 200 ms and then 400 ms; the third break ends the download.
 4. **Checkpointed**: every 16 MiB of a content with a hash, the bytes are synced and
@@ -452,8 +452,9 @@ OneDrive has another content than the one it was opened as:
   another content again: `ESTALE`, remembered again. Stated the asked one: it lands, and the read
   gets its range. A file OneDrive does not have, and an answer that says no size, are failures of
   that one asking and are not remembered.
-- **A range** cannot tell: Graph's answer to a range names no version, so another content is
-  told only when OneDrive no longer has the file ([F297](../limitations/F297.md)).
+- **A range** carries metadata checked before and after its body, and is held against the
+  opened content and the first range's version. A changed cTag/eTag or supplied hash is `ESTALE`.
+  Individual ranges have no whole-file hash proof ([F297](../limitations/F297.md)).
 
 ### 5.6 The transfer pool, a throttle, a pause
 
@@ -545,7 +546,8 @@ matched by a mark across places ([F298](../limitations/F298.md)).
 
 ### 7.2 The cases
 
-A file's content is compared by its size, its time in whole seconds, and its cTag mark where the
+A file's content is compared by its size, its time (nanoseconds for changed-here rows, whole
+seconds for hashed rows), and its cTag mark where the
 row has a cTag (`compare_content`).
 
 | The row says, at that place | The disk has there | Finding |
@@ -578,13 +580,15 @@ not the folder, is held for them.
 
 ### 7.4 A lost store
 
-A store that is lost, or of another layout, is made again ([D36](../limitations/D36.md);
-[sync.md](sync.md) §9). The check then finds every entry with no row. An entry marked with an item
-id that no other entry carries is bound to that id; a whole copy with a cTag mark gets that cTag as
-its content, with no hash, and is taken as clean once the full listing, which the folder's start
-asks for, brings OneDrive's version and the plan compares the two; any other file is content
-changed here. An unmarked entry is a new item. What was unsent and left nothing on disk — a
-removal, a move — is gone.
+A missing store is made again from a full listing and the backing directory. Unsupported or
+corrupt stores are preserved in quarantine first; readable pins and exceptions are reinserted
+before listing, pending removals/moves exported for manual recovery, and a count/path shown as
+trouble. Newer schemas refuse to start; supported predecessors migrate from a durable snapshot
+([store.md](store.md), [D36](../limitations/D36.md)).
+
+An entry marked with an item id that no other entry carries is bound to that id. Every recovered
+file is changed locally, even a whole copy with a cTag mark: the planner hashes it before agreement.
+An unmarked entry is a new item. Missing backing copies never manufacture cloud deletions.
 
 ## 8. The mount's end
 
@@ -663,8 +667,8 @@ mark says ([desktop.md](desktop.md)).
 - **No folder while no daemon runs.** The folder is the backing directory then, without write bits,
   and a program that held a file open gets an error ([F296](../limitations/F296.md)). Only the user
   who runs the daemon reaches the folder, root included ([F301](../limitations/F301.md)).
-- **A range is not checked against the content.** A content OneDrive replaced is read as the one
-  opened until a listing's step or a download tells otherwise ([F297](../limitations/F297.md)); a
+- **Ranges have no independent whole-file hash.** Their metadata version is checked before
+  and after the response, and changes fail the read ([F297](../limitations/F297.md)); a
   file without a hash is downloaded unverified ([F34](../limitations/F34.md)).
 - **Programs that read to look download.** A file read whole, or past the threshold, is downloaded;
   Dolphin reads some files to find their type or draw a preview ([K1](../limitations/K1.md)).
@@ -673,8 +677,8 @@ mark says ([desktop.md](desktop.md)).
 - **Hand changes while no daemon runs** are a new item and an item shown again, never a move or a
   removal in OneDrive; an edit that keeps the size and the time in whole seconds is not seen
   ([F298](../limitations/F298.md)).
-- **A lost store** costs a full listing and every unsent change that left nothing on disk
-  ([D36](../limitations/D36.md)).
+- **A lost store** costs a full listing and local hashing. A quarantine restores readable pins
+  and exports pending namespace changes for manual recovery ([D36](../limitations/D36.md)).
 - **An unfinished download does not outlive the daemon**: its file has no name, so a large file
   whose download broke is downloaded from its start after a restart.
 - **A row the start-up check held** stays held for as long as that mount is up, also when a
@@ -692,3 +696,39 @@ It owns caller identification and app budgets; the downloader owns backing-files
 reservations. Guard refusals are `EACCES`, before network I/O and without a tree change.
 Reads that cannot leave the disk reserve stay as ranges, or answer `ENOSPC` when a verified
 whole download is required. Explicit hydrate and pin do not enter the app guard.
+
+### Verified downloads and resident replacements
+
+A remote whole download without quickXorHash fails closed with EIO. A cTag alone is not
+hash verification: such bytes are never marked as a clean, evictable copy or exposed for an
+editing open. This is deliberately stricter than accepting a hashless download after a
+metadata recheck. A supplied hash remains usable when Graph omits the cTag. Local test sources
+that say no remote version make no remote-verification claim.
+
+Range reads buffer only the requested range, check its metadata before and after the body,
+and keep the first cTag/eTag and optional download response ETag for each opened content
+generation. A reconciled generation does not inherit an earlier generation's range identity. A version change returns
+ESTALE, including same-size edits; unfinished staging is never served to another reader.
+
+Resident pinned files use `ReplaceContent`; resident files with readers use the same path.
+The old version remains named while the replacement downloads, verifies and syncs, through
+the existing downloader, guard and space reserve. Under one `SetAside` record, staging is
+linked under the item's aside name, then exchanged atomically with the visible inode using
+`RENAME_EXCHANGE`. Both directories are synced before a transaction checks all planned
+versions and writes the remote content as local, synced and on disk. A changed row undoes the
+exchange; the old aside is discarded only after commit. The verified stage waits for readers (including mmap lifetimes) to close;
+the final job rechecks under the reader gate. Reader waits run outside the folder lease
+and cancel when sync stops; the final mutation holds the lease and revalidates the row. New opens invalidate the previous kernel page
+cache. Cloud-only metadata changes also wait for old readers and mappings to close. This avoids mixing old and new backing inodes through one FUSE inode's shared cache.
+The wait retains the stage without redownloading it and holds no network transfer slot. A crash before the exchange leaves the old file; a crash after it leaves a
+complete verified replacement and the old aside. The existing startup check reconciles the
+standing record and content marks before aside cleanup. No new record format or schema is
+needed. The replacement record is synced before the exchange, and the committed row is synced before
+the old aside is discarded. A failed row sync retains both copies, reports an error and asks
+for take-down without undoing the committed row. The old file and replacement occupy space simultaneously; ENOSPC keeps the old file.
+
+Free-up also requires the local place to equal the synced place, no unsent generation or
+step-memory hold, and no request or place mutation on record. The store repeats these checks
+in the eviction transaction. Recovery uncertainty and published policy holds protect copies
+through the mount's protection predicate. A cloud-only rename followed by a remote deletion
+stays visible as a conflict for resolution.

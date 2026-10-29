@@ -272,7 +272,7 @@ pub(crate) fn count_unsent_of_closed_store(tree_db: &std::path::Path) -> Result<
         // nothing.
         konedrive_tree::OldStoreDecision::Use | konedrive_tree::OldStoreDecision::Migrate => konedrive_tree::TreeStore::open_read_only(tree_db)?.read_items(|items| items.count_unsent()),
         // No store, or one a sync would rebuild empty.
-        konedrive_tree::OldStoreDecision::Make | konedrive_tree::OldStoreDecision::Rebuild => Ok(UnsentTotal::default()),
+        konedrive_tree::OldStoreDecision::Make | konedrive_tree::OldStoreDecision::Quarantine | konedrive_tree::OldStoreDecision::RefuseNewer => Ok(UnsentTotal::default()),
     }
 }
 

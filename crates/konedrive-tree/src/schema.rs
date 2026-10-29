@@ -1,7 +1,6 @@
-//! The store's schema: its version, what a new store is created with, and
-//! when a store is rebuilt ([`old_store`]): one of the version before, where the
-//! change between the two only adds or makes an index anew, is brought to this one in
-//! place, and one of any other version is rebuilt.
+//! The store's versioned schema. Supported predecessors migrate sequentially after a
+//! durable snapshot. Unsupported or damaged stores are quarantined; newer schemas are
+//! refused without opening the original files for writing.
 
 use std::path::Path;
 
@@ -14,19 +13,13 @@ use crate::{meta, TreeError, TreeStore};
 
 /// What becomes of a store an older version of the daemon left.
 mod old_store;
+mod quarantine;
 
 pub use old_store::{decide_old_store, find_stored_version, list_old_store_upload_sessions, OldStoreDecision, RebuildLoss, StoreOrigin, StoredVersion};
 
-/// The schema this daemon reads and writes, kept in `meta` as
-/// `schema_version`. A store of the version before, where the change between the two
-/// only adds or makes an index anew, is brought to this one in place; a store of any
-/// other version — an earlier one, or a newer daemon's — is rebuilt from a full listing
-/// ([`decide_old_store`]).
-///
-/// A change of what a table holds, a column, an index, a trigger or a
-/// stored word is a new version and a new step: nothing is added to a store
-/// outside one.
-pub const SCHEMA_VERSION: &str = "31";
+/// The shipped schema. Every change from version 32 onward keeps a sequential
+/// migration step, committing its new version in the same transaction.
+pub const SCHEMA_VERSION: &str = "32";
 
 /// The index of the files a thumbnail is made for, which version 31 made in place of
 /// `items_image_or_video`, as the schema of a new store makes it and as the step from
@@ -150,7 +143,7 @@ fn schema() -> String {
              kind TEXT NOT NULL,
              local_parent_id INTEGER, local_name, local_folded_name, {local_content},
              onedrive_parent_id INTEGER, onedrive_name, onedrive_folded_name, {onedrive_content},
-             onedrive_etag TEXT, onedrive_mime TEXT,
+             onedrive_etag TEXT, onedrive_mime TEXT, onedrive_folder_ctag TEXT,
              synced_parent_id INTEGER, synced_name, {synced_content},
              content_presence TEXT NOT NULL DEFAULT '{not_on_disk}',
              {content_before_write},
@@ -265,8 +258,8 @@ fn at_version(conn: &Connection, version: &str, work: impl FnOnce(&Connection) -
 }
 
 impl TreeStore {
-    /// Opens the store at `path`, creating it — and rebuilding it empty when it
-    /// is unreadable as a database or of another schema version than this daemon's
+    /// Opens the store at `path`, creating it and preserving any unusable predecessor
+    /// in quarantine; a newer schema is refused without writes
     /// ([`TreeStore::open_with_origin`], which also says which of these happened).
     /// Every other error — permission denied, disk I/O, brief lock
     /// contention that outlasts the busy timeout — is returned unchanged, and
@@ -304,7 +297,7 @@ impl TreeStore {
         let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.set_prepared_statement_cache_capacity(64);
-        Ok(Self { conn, path: None })
+        Ok(Self { conn, path: None, _file_lock: None })
     }
 
     /// A number that changes whenever another connection commits to the store: what a
@@ -333,9 +326,19 @@ impl TreeStore {
         }
         // The point queries run thousands of times.
         conn.set_prepared_statement_cache_capacity(64);
-        Ok(Self { conn, path: None })
+        Ok(Self { conn, path: None, _file_lock: None })
     }
 }
 
 #[cfg(test)]
 mod tests;
+
+/// The SQLite WAL filename, preserving non-UTF-8 directory names.
+pub(crate) fn wal_path(path: &Path) -> std::path::PathBuf {
+    quarantine::beside(path, "-wal")
+}
+
+/// Make the database or WAL's newly created directory entry durable.
+pub(crate) fn sync_store_parent(path: &Path) -> std::io::Result<()> {
+    quarantine::sync_parent(path)
+}

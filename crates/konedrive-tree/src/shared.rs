@@ -239,14 +239,12 @@ impl Store {
     /// disk (an fsync of a directory). Nothing for a store in memory, or one with no log on
     /// disk: nothing waits in it.
     pub fn sync_write_ahead_log(&self) -> std::io::Result<()> {
-        let Some(path) = &self.path else { return Ok(()) };
-        let mut log = path.clone().into_os_string();
-        log.push("-wal");
-        match std::fs::File::open(&log) {
-            Ok(log) => log.sync_all(),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error),
-        }
+        // Serialize with commits and checkpoints: the WAL cannot disappear between
+        // choosing what to sync and the sync itself.
+        self.call_blocking(|store| store.sync_write_ahead_log()).map_err(|error| match error {
+            TreeError::Io(error) => error,
+            error => std::io::Error::other(error),
+        })
     }
 
     /// How many handles of this store there are, this one among them: what a test asks to
@@ -256,4 +254,21 @@ impl Store {
         std::sync::Arc::strong_count(&self.owner)
     }
 
+}
+
+impl TreeStore {
+    /// Sync the committed WAL on its owning thread. If a checkpoint has removed it,
+    /// the committed state is in the main database instead. Sync the directory too,
+    /// so a newly created WAL name survives a power loss.
+    pub fn sync_write_ahead_log(&self) -> Result<(), TreeError> {
+        let Some(path) = &self.path else { return Ok(()) };
+        let log = crate::schema::wal_path(path);
+        match std::fs::File::open(log) {
+            Ok(log) => log.sync_all()?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => std::fs::File::open(path)?.sync_all()?,
+            Err(error) => return Err(error.into()),
+        }
+        crate::schema::sync_store_parent(path)?;
+        Ok(())
+    }
 }

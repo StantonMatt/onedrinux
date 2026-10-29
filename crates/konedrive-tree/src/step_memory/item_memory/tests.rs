@@ -27,6 +27,7 @@ fn row(local: Option<ItemVersion>, is_bound: bool, is_synced: bool) -> Item {
         local,
         onedrive: None,
         onedrive_etag: None,
+        onedrive_folder_ctag: None,
         onedrive_mime: None,
         synced_place: is_synced.then(|| place("report")),
         synced_content: None,

@@ -17,6 +17,7 @@ holds between them, and why.
 |---|---|
 | This page | The overview: the processes, a read and a write from start to finish, the invariants everything else serves, the words |
 | [sync.md](sync.md) | The item and its three versions, who writes what, the listing, the sync plan, a step and what it remembers, the plan's task, a folder's start and stop, how the model is tested |
+| [store.md](store.md) | Store admission, quarantine, migrations, snapshots and durability |
 | [mount.md](mount.md) | The mount and the backing directory: what each request of the kernel does, reading a file that is not on disk, downloads, freeing up space, the start-up check, the mount's end |
 | [download-guard.md](download-guard.md) | Caller identities, background refusals, app budgets, disk reserves and the UI bus contract |
 | [writes.md](writes.md) | Uploads: the access mode, what a program's change does, the requests to OneDrive, conflicts, what holds sending back (pausing, the automatic hold, throttling), what the bus shows of what waits, the test account |

@@ -11,7 +11,7 @@ access mode is in [writes.md](writes.md) §2; the D-Bus API, the window and the 
 
 - Several personal Microsoft accounts, each with its own folder, Places entry, history, conflicts
   and list of what can't be shown in the folder. Work and school accounts are not supported.
-- Every account is read-only until the user switches it to read-write (§10).
+- New accounts are two-way by default, with write consent in their first sign-in (§8.2). Existing accounts keep their mode; a missing mode still means read-only.
 - The window shows one account at a time, chosen in a switcher at the top of its sidebar; the tray
   has an icon for each, or one for them all ([desktop.md](desktop.md) §4, §5).
 - A Microsoft account is connected once. A sign-in of an account as another Microsoft account than
@@ -29,7 +29,7 @@ access mode is in [writes.md](writes.md) §2; the D-Bus API, the window and the 
 | Id | 12 random lowercase hexadecimal characters, none of another account's. It names the account's D-Bus object, its state directory and its Places entry; nobody types it |
 | Label | The name people see and type. Set to the account's email when it is added (§8.2), and renamed at will. Trimmed; 1 to 40 characters; no `/`, no control character; not 12 hexadecimal digits in any case, so that a label is never taken for an id; unique among the labels whatever the case. Nothing on disk is named after it |
 | Drive | The Graph drive id of the Microsoft account: the account's identity (§6). Recorded at the first sign-in or the first `GET /me/drive`, then never changed |
-| Mode | `read-only`, the default, or `read-write` (§10) |
+| Mode | `read-write` for new accounts by default, or `read-only`; existing missing modes remain read-only (§10) |
 | Origin | `added`, or `migrated` for the account a version-1 configuration became (§9). A missing or unknown value reads as `migrated` |
 | Folder | At most one registered folder (§7) |
 
@@ -116,12 +116,14 @@ account leaves what the earlier ones did. The counts in the answer are summed.
 
 ```toml
 config_version = 2
+new_account_mode = "read-write" # applies only when adding an account
 client_id = ""                  # empty: konedrive's own application registration (§8.1)
 
 [[accounts]]
 id = "3f9a1c0e5b7d"
 label = "ann@outlook.com"
-mode = "read-only"
+mode = "read-write"
+write_paths = ["Trial"]         # optional: writes only in this subtree; [] denies all
 origin = "added"
 drive_id = "D1A2B3C4"
 login_hint = "ann@outlook.com"
@@ -316,10 +318,11 @@ account's drive, recorded in `config.toml`, and its sync started, which mounts i
   bring-up fails is down and says why in `LastError`; it is tried again at the next start, and by
   `Folder.Refresh`.
 - **`Folder.Unregister`** (Forget) stops the sync, takes the mount off, gives the backing directory
-  its write bits back, removes the store, and takes off the Baloo exclusion this daemon added. The
+  its write bits back, quarantines the store, and takes off the Baloo exclusion this daemon added. The
   folder is a plain directory again, with the files that were downloaded and the user's own. It is
   never refused for unsent changes: a client warns first with `UploadQueue.UnsentCount`, and those
-  files stay only on this computer.
+  files stay only on this computer. Pending namespace intentions remain in the preserved store;
+  the next registration exports them without replay ([store.md](store.md)).
 
 ## 8. Adding and removing
 
@@ -334,10 +337,15 @@ canonical GUID form only, and is refused while any account is signing in or sign
 
 An account is added only by signing in. `Accounts.SignIn() → (u sign_in, s url)` starts a sign-in
 for a new account and answers its number and the URL to open; the window's **Sign In…** and
-**Add Another OneDrive…** and `konedrivectl account add` call it.
+**Add Another OneDrive…** call it. `konedrivectl account add` calls
+`Accounts.Add(s mode) → (u sign_in, s url)`: empty uses the daemon-wide `new_account_mode`
+(`read-write` when absent), and `read-only` or `read-write` selects explicitly; another value
+is `InvalidArgs`. `account add --read-only` selects read-only. Both methods share cancellation
+and `SignInFinished`. The choice is captured before the browser opens and stored in the account;
+changing the daemon default later never changes existing accounts.
 
 The sign-in belongs to no account (`daemon/manager/sign_in.rs`). The manager runs it: the loopback
-listener, the authorization URL (read-only scopes, Microsoft's account picker), the wait for the
+listener, the authorization URL (the selected mode's scopes, Microsoft's account picker), the wait for the
 browser (five minutes), the exchange, and the question of which drive and email this is. The steps
 of the attempt are the ones an account's own sign-in runs, in one piece of code
 (`account/attempt.rs`). Until all of that has succeeded and the drive is known not to be another
@@ -406,11 +414,13 @@ build can also add a signed-out account under a chosen label, with no folder
    (and the version-1 item, while `legacy_token` is set) and the cached profile and quota are
    deleted;
 3. the account is taken out of `config.toml`;
-4. `accounts/<id>/` is deleted with what is left in it;
+4. `accounts/<id>/` is archived beside the original as `<id>.removed-<timestamp>`, preserving
+   its live/quarantined databases and pending-change exports; the parent directory is synced;
 5. the account's objects are taken off the bus and it leaves both lists.
 
 It is never refused for unsent changes: the caller warns first, with `UploadQueue.UnsentCount`.
-What stays: what the folder holds on this computer, as a Forget leaves it. A path that names no
+What stays: what the folder holds on this computer, as a Forget leaves it, and the archived state.
+A failed archive sync is returned as an error; retained state is never deleted. A path that names no
 account is refused `NoAccount`, and any removal `Failed` while `config.toml` cannot be read.
 
 A removal that fails at step 2 (the token cannot be deleted) or step 3 (`config.toml` cannot be
@@ -454,7 +464,7 @@ There is no way back but `config.toml.v1`, by hand.
 ## 10. The mode
 
 Every account has a mode, `read-only` or `read-write`, stored in `config.toml`; a new account is
-read-only. What the mode changes in the folder, the switch to read-only that waits for the unsent
+read-write by default. A missing or unknown mode on an existing account still reads as read-only. What the mode changes in the folder, the switch to read-only that waits for the unsent
 changes, and the folder's side of the switch are in [writes.md](writes.md) §2. The
 account's side (`account/mode.rs`, `account/state.rs`):
 
@@ -465,7 +475,8 @@ account's side (`account/mode.rs`, `account/state.rs`):
   `LastError` says why.
 - **The scope.** Read-only asks for `Files.Read User.Read offline_access`, read-write for
   `Files.ReadWrite User.Read offline_access`. A refresh asks by the mode the account runs in; the
-  sign-in that adds an account asks read-only. Microsoft may answer a read-only request with a token
+  sign-in that adds an account asks for the selected mode, so default two-way needs one browser
+  visit. Microsoft may answer a read-only request with a token
   that can write; it is used to read only (F66).
 - **To read-write**, `Account.SetMode("read-write", false)` answers a sign-in URL — empty when the
   account runs read-write already — whose sign-in asks for `Files.ReadWrite`, pinned to the
@@ -478,6 +489,38 @@ account's side (`account/mode.rs`, `account/state.rs`):
   is dropped.
 - **The mode is the user's choice.** Any signed-in account can be switched to read-write, whatever
   its drive. `write_test_drive_ids` only limits a development build's `TokenExport.ReadWrite`.
+
+### 10.1 Trial write scope
+
+`write_paths` is optional per account, independent of mode and OAuth consent. Absent allows
+writes throughout the drive; an empty array allows none. Each entry is a nonempty relative
+subtree with exact spelling, compared by path components. Absolute paths, empty components,
+`.` and `..`, NUL and backslashes are refused by `Account.SetWriteScope(as paths)` with
+`InvalidArgs`. Invalid paths loaded from a hand-edited configuration deny all writes.
+`Account.ClearWriteScope()` removes the restriction. `WriteScopeEnabled` distinguishes an
+empty restriction from no restriction; `WritePaths` returns the paths (empty in either case).
+Both properties emit changes after the setting is saved atomically in `config.toml`.
+
+The mount returns `EROFS` outside these subtrees, including both ends of a rename, writes
+through a handle opened before restriction, state-changing attributes and unsupported link
+and xattr requests. Read hydration, pins and free-up remain available everywhere. Admission
+is checked again on the write-operation thread, after any hydration wait. The sender separately
+checks both planned and current local places and cloud sources, plus cloud destinations,
+walking cloud parents rather than local parents. Cloud paths come from the store's latest listing
+at admission. Pending moves cannot bring an outside cloud item into scope. Resumed upload
+sessions are checked at their original cloud place, and upload retry cleanup checks the returned
+cloud parent and name before adoption or deletion. A refused step keeps its local version and
+retries with backoff, so widening the scope permits a later try.
+A scope change applies at admission; operations already admitted may finish. Set the scope before
+beginning a trial, while there are no outgoing changes in flight.
+
+Cleanup deletes without a resolvable in-scope cloud path are left to a listing. Abandoned
+upload sessions have opaque URLs without a path, so cancellation waits while a restriction is
+set; they can expire normally. No store schema changes are needed.
+
+CLI: `konedrivectl --account ACCOUNT account write-scope show`, `set Trial Documents/Trial`,
+or `clear`. A hand edit takes effect when the configuration is next loaded; use D-Bus or the
+CLI for an immediate change on a running mount.
 
 ## 11. The clients
 

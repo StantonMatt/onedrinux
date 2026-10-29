@@ -13,6 +13,12 @@ use tokio::sync::RwLock;
 #[derive(Clone)]
 pub(crate) struct Lease(Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Held> + Send>> + Send + Sync>);
 
+impl std::fmt::Debug for Lease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Lease")
+    }
+}
+
 /// The lease while it is held: let go of when dropped, on whatever thread that is.
 pub(crate) struct Held(#[allow(dead_code)] Box<dyn Send>);
 

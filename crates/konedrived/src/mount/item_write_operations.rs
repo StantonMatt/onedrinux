@@ -75,6 +75,7 @@ use crate::sync_parts::sync_plan_wake::{SyncPlanWake, WakeCause};
 
 /// A file's content: open for writing, truncate, the time set, the last close.
 mod content_write;
+mod write_scope;
 /// Make: mkdir, mknod, create.
 mod make;
 /// Remove: unlink, rmdir.
@@ -105,7 +106,7 @@ pub(super) fn decide_store_errno(error: &TreeError) -> Errno {
             RowRefusalReason::NoDirectory => Errno::ENOENT,
             RowRefusalReason::AnotherRule => Errno::EIO,
         },
-        TreeError::Sql(_) | TreeError::Io(_) | TreeError::Schema(_) => Errno::EIO,
+        TreeError::Sql(_) | TreeError::Io(_) | TreeError::Schema(_) | TreeError::NewerSchema(_) => Errno::EIO,
     }
 }
 
@@ -281,7 +282,11 @@ impl ItemWriteOperations {
     /// Writes `record` to the store, in a job and a transaction of its own: what an
     /// operation is about to do to the disk's names, before it begins its place change.
     fn write_place_change_record(&self, record: PlaceChangeRecord) -> Result<PlaceChangeRecordId, Errno> {
-        self.run_store_job("the record of a change of the backing directory could not be written", move |store| store.item_store().record_place_change(&record))
+        self.run_store_job("the record of a change of the backing directory could not be written", move |store| {
+            let id = store.item_store().record_place_change(&record)?;
+            store.sync_write_ahead_log()?;
+            Ok(id)
+        })
     }
 
     /// Takes `record` by itself: its change left the disk as it was. A failure is logged:
@@ -327,6 +332,11 @@ impl ItemWriteOperations {
     fn write_row_or_undo<T: Send + 'static>(&self, change: &PlaceChange<'_>, undo: PlaceUndo, record: PlaceChangeRecordId, write: impl FnOnce(&mut TreeStore) -> Result<T, TreeError> + Send + 'static) -> Result<(T, PlaceUndo), Errno> {
         let errno = match self.run_store_job("the row of a change of the backing directory could not be written, and the change is taken back", write) {
             Ok(written) => {
+                if let Err(error) = self.store.sync_write_ahead_log() {
+                    tracing::error!("a committed place change could not be synced: {error}; its set-aside bytes are retained");
+                    self.mount_take_down.ask(TakeDownCause::BackingFileBehindRow { path: find_undone_path(&undo) });
+                    return Err(Errno::EIO);
+                }
                 self.wake_plan();
                 #[cfg(test)]
                 self.reach(tests::OperationPoint::RowWritten);

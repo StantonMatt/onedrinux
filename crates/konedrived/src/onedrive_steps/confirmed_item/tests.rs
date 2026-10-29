@@ -32,6 +32,7 @@ pub(in crate::onedrive_steps) fn versions(onedrive_etag: Option<&str>, synced_co
         local: Some(ItemVersion { place: Some(ItemPlace { parent_local_item_id: LocalItemId::ROOT, name: "a".into() }), content: None }),
         onedrive: None,
         onedrive_etag: onedrive_etag.map(str::to_owned),
+        onedrive_folder_ctag: None,
         synced_place: None,
         synced_content,
         content_presence: ContentPresence::NotOnDisk,

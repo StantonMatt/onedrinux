@@ -38,8 +38,8 @@ async fn a_new_item_whose_row_is_gone_is_removed_in_onedrive() {
     folder.fixture.remove_here(directory.local_item_id);
 
     assert_eq!(folder.made_items.follow_up_new_item(&file_versions, &made_file).await, RowsChangedFollowUp::MadeItemRemoved(made_file.item.clone()));
-    assert_eq!(folder.made_items.follow_up_new_item(&directory_versions, &made_directory).await, RowsChangedFollowUp::MadeItemRemoved(made_directory.item.clone()));
-    assert_eq!(folder.graph.with(|cloud| cloud.paths()), Vec::<String>::new());
+    assert_eq!(folder.made_items.follow_up_new_item(&directory_versions, &made_directory).await, RowsChangedFollowUp::MadeItemLeft(made_directory.item.clone()));
+    assert_eq!(folder.graph.with(|cloud| cloud.paths()), ["new"], "a directory with no original folder cTag is kept");
     // The file's removal is guarded by the eTag of the answer; a directory's has no guard.
     assert_eq!(folder.graph.with(|cloud| cloud.guards.clone()), [("me/drive/items/MADE".to_owned(), made_file.etag.clone())]);
 }
@@ -70,5 +70,21 @@ async fn a_made_item_that_cannot_be_removed_is_left_and_said() {
     folder.graph.with(|cloud| cloud.edit("MADE", b"another's"));
 
     assert_eq!(folder.made_items.follow_up_new_item(&versions, &made).await, RowsChangedFollowUp::MadeItemLeft(made.item.clone()));
+    assert_eq!(folder.graph.with(|cloud| cloud.paths()), ["a.txt"]);
+}
+
+#[tokio::test]
+async fn write_scope_leaves_unresolvable_cleanup_items_in_onedrive() {
+    use crate::config::{WriteScope, WriteScopeSource};
+    let fixture = ItemFixture::new();
+    let file = fixture.make_own_file("a.txt", b"a");
+    let versions = fixture.versions_of(file.local_item_id);
+    let mut folder = StepsFolder::start(fixture).await;
+    folder.graph.with(|cloud| cloud.add_file("MADE", "R", "a.txt", b"a"));
+    let made = confirmed(&folder, "a.txt");
+    folder.fixture.remove_here(file.local_item_id);
+    folder.made_items = folder.made_items.with_write_scope(WriteScopeSource::new(WriteScope::denied));
+    assert_eq!(folder.made_items.follow_up_new_item(&versions, &made).await, RowsChangedFollowUp::MadeItemLeft(made.item.clone()));
+    assert_eq!(folder.count("DELETE", "items/"), 0);
     assert_eq!(folder.graph.with(|cloud| cloud.paths()), ["a.txt"]);
 }

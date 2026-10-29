@@ -700,6 +700,10 @@ fn prepare(scene: &mut Scene, operation: Operation) {
         SavedOverABoundFile | ABoundFileSavedOverIt => {
             write_listing_of_changes(store, &[listed_file("O", "D", "other", (3, "h-O"), "e-O")]);
             scene.other = Some(show(store, "O"));
+            // A save that exchanges cloud bindings needs the source bytes resident.
+            // The refusal with cloud-only bytes is tested separately in bindings/tests.
+            let source = if operation == SavedOverABoundFile { id } else { scene.other.unwrap() };
+            store.item_store().set_content_presence(source, crate::ContentPresence::OnDisk).unwrap();
         }
         SavedOverANewFile | ANewFileSavedOverIt | ExchangedPlaces | MergedWithTheMismatchedItemAndSavedOver => scene.other = Some(make_file(store, directory, "other")),
         Merged | BoundAndMerged | CommitMergeItems | CommitSendNewItemAndMerged | MergedAndGaveUpBinding | ListedAnotherItemAtItsName => {

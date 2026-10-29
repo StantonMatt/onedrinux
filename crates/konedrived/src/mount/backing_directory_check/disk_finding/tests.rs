@@ -244,3 +244,11 @@ fn the_ctag_mark_is_not_asked_of_a_content_changed_here() {
     assert_eq!(compare_content_of_one_name(&changed, &on_disk(3, 100, 0, Some("c-0"))), Same);
     assert_eq!(compare_content_of_one_name(&changed, &on_disk(5, 100, 0, Some("c-0"))), Different);
 }
+
+#[test]
+fn changed_here_content_compares_nanoseconds_but_hashed_content_uses_whole_seconds() {
+    let changed = ContentVersion::ChangedHere { size: 3, mtime: 100, mtime_nsec: 42, change_count: 2 };
+    assert_eq!(compare_content_of_one_name(&changed, &on_disk(3, 100, 43, Some("stale"))), Different);
+    assert_eq!(compare_content_of_one_name(&changed, &on_disk(3, 100, 42, Some("stale"))), Same);
+    assert_eq!(compare_content_of_one_name(&hashed(3, 100, Some("c")), &on_disk(3, 100, 43, Some("c"))), Same);
+}

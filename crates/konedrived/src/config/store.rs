@@ -280,13 +280,14 @@ impl ConfigStore {
         })
     }
 
-    /// A read-only account with no folder and no drive yet, after every
+    /// An account in the daemon's new-account mode with no folder or drive, after every
     /// other, under a fresh id.
     pub fn add_account(&self, label: &str) -> Result<AccountConfig, ConfigError> {
         self.update(|config| {
             let label = check_label(label, config, None).map_err(ConfigError::InvalidLabel)?;
             let id = AccountId::fresh(config.accounts.iter().map(|a| &a.id));
-            let account = AccountConfig::new(id, label, Origin::Added);
+            let mut account = AccountConfig::new(id, label, Origin::Added);
+            account.mode = config.new_account_mode;
             config.accounts.push(account.clone());
             Ok(account)
         })

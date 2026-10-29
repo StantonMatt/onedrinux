@@ -333,6 +333,14 @@ pub(crate) async fn start_folder_sync(input: FolderStartInput) -> Result<Started
     };
     let refuse = |refusal: StartRefusal| RefusedStart { refusal, rebuild_loss, kept: None };
     attach_activity_log(&input, &store).await;
+    match store.call(|store| store.recovery_notice()).await {
+        Ok(notice) => input.state.update(|state| state.store_recovery = notice),
+        Err(error) => {
+            let_go_of_store(&input.report, store).await;
+            return Err(refuse(StartRefusal::Store(format!("the store recovery notice cannot be read: {error}"))));
+        }
+    }
+
 
     let store_drive = match store.call(|store| store.drive_id()).await {
         Ok(store_drive) => store_drive.and_then(DriveId::new),
@@ -363,6 +371,7 @@ pub(crate) async fn start_folder_sync(input: FolderStartInput) -> Result<Started
         free_space_reserve: { let running = Arc::clone(&input.running); Arc::new(move || crate::sync_plan_task::disk_space::count_reserve_bytes(running.settings().free_space_reserve_gb)) },
         tree_lock: Arc::clone(&input.tree_lock),
         ignore: Arc::clone(&input.ignore),
+        write_scope: input.drive_record.as_ref().map(|record| record.store.write_scope(&record.account)).unwrap_or_default(),
         sync_plan_wake: Arc::clone(&sync_plan_wake),
         running_steps: Arc::clone(&running_steps),
         published_plan: Arc::clone(&published_plan),
@@ -495,6 +504,11 @@ async fn start_sync_over_parts(input: &FolderStartInput, parts: KeptFolderParts,
     }
     let onedrive_space = Arc::new(OneDriveSpace::new(input.quota.clone()));
     read_quota_before_first_plan(&input.drive, &onedrive_space, &parts.store, (input.clock)()).await;
+    // All fallible start stages succeeded. Start the snapshot's seven-day clock only
+    // now, immediately before spawning tasks (which cannot refuse the start).
+    if let Err(error) = parts.store.call(|store| store.successful_start()).await {
+        return Err((StartRefusal::Store(format!("the migration snapshot cannot be retained: {error}")), parts));
+    }
     let tasks = start_sync_tasks(input, &parts.store, &parts.mount, &parts.sync_plan_wake, &parts.running_steps, &parts.published_plan, &sending_holds, &onedrive_space, &parts.drive_id);
     let KeptFolderParts { store, mount, sync_plan_wake, running_steps, published_plan, drive_id } = parts;
     Ok(StartedFolder { store, mount, tasks, sync_plan_wake, running_steps, published_plan, onedrive_space, drive_id, store_origin })
@@ -644,12 +658,13 @@ async fn read_quota_before_first_plan(drive: &DriveClient, space: &OneDriveSpace
 fn start_sync_tasks(input: &FolderStartInput, store: &Store, mount: &Arc<ItemMount>, sync_plan_wake: &Arc<SyncPlanWake>, running_steps: &Arc<RunningSteps>, published_plan: &Arc<PublishedPlan>, sending_holds: &Arc<crate::sync_parts::sending_holds::SendingHolds>, onedrive_space: &Arc<OneDriveSpace>, drive_id: &DriveId) -> SyncTasks {
     let stop = CancellationToken::new();
     let graph = GraphAccess { drive: input.drive.clone(), drive_id: drive_id.clone(), store: store.clone(), clock: Arc::clone(&input.clock) };
+    let write_scope = input.drive_record.as_ref().map(|record| record.store.write_scope(&record.account)).unwrap_or_default();
     let lost_answers = LostAnswers::new(graph.clone(), Arc::clone(&input.tree_lock));
-    let session_cancellations = SessionCancellations::new(graph.clone(), lost_answers.clone(), Arc::clone(running_steps));
-    let made_items = MadeItems::new(graph.clone());
+    let session_cancellations = SessionCancellations::new(graph.clone(), lost_answers.clone(), Arc::clone(running_steps)).with_write_scope(write_scope.clone());
+    let made_items = MadeItems::new(graph.clone()).with_write_scope(write_scope.clone());
     let name_holders = NameHolders::new(graph.clone(), session_cancellations.clone());
     let content_upload = ContentUpload::new(graph.clone(), lost_answers.clone(), Arc::clone(sending_holds), Arc::clone(onedrive_space), Arc::clone(running_steps), input.limits.clone());
-    let onedrive_steps = Arc::new(OneDriveSteps::new(graph, Arc::clone(&input.tree_lock), Arc::clone(mount.item_content_files()), content_upload, name_holders, lost_answers, made_items, Arc::clone(running_steps), Arc::clone(onedrive_space)));
+    let onedrive_steps = Arc::new(OneDriveSteps::new(graph, Arc::clone(&input.tree_lock), Arc::clone(mount.item_content_files()), content_upload, name_holders, lost_answers, made_items, Arc::clone(running_steps), Arc::clone(onedrive_space)).with_write_scope(write_scope));
     let row_steps = Arc::new(RowSteps::new(store.clone(), Arc::clone(&input.tree_lock), Arc::clone(mount.item_content_files()), Arc::clone(&input.ignore), Arc::clone(running_steps)));
     let folder_steps = make_folder_steps(mount.folder_step_parts());
     let step_runners = StepRunners::of_runners(Arc::clone(&folder_steps), onedrive_steps, row_steps, input.lease.clone(), stop.clone());

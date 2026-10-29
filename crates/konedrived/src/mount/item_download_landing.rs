@@ -39,6 +39,7 @@
 //!
 //! **Tested without the rest**, over the fixture (`item_fixture`):
 // test: a_landed_file_is_named_marked_with_id_state_and_ctag_and_then_on_disk_in_its_row
+// test: a_pinned_file_rewritten_with_the_same_bytes_accepts_a_remote_replacement
 // test: the_directory_of_a_landed_file_is_synced_before_the_row_is_written
 // test: a_landing_whose_row_has_another_content_by_now_removes_what_it_named
 // test: a_landing_at_the_place_the_row_has_now_follows_a_rename_made_meanwhile
@@ -53,6 +54,16 @@
 // test: a_landing_whose_undo_fails_keeps_its_record_and_asks_for_the_mounts_take_down
 // test: a_landing_after_the_file_was_opened_for_writing_links_nothing
 // test: a_landing_while_a_listing_changed_the_content_does_not_say_the_old_content_is_the_new
+
+// test: a_replacement_swaps_only_a_complete_file_and_existing_readers_keep_the_old_inode
+// test: a_replacement_does_not_exchange_files_when_its_record_cannot_be_synced
+// test: a_replacement_keeps_the_old_copy_when_its_committed_row_cannot_be_synced
+// test: a_local_edit_cancels_a_pending_replacement
+// test: a_listing_that_crosses_a_replacement_commit_restores_the_old_inode
+// test: a_crash_after_replacement_exchange_leaves_a_complete_version_for_recovery
+
+// test: a_replacement_waits_for_registered_readers_before_touching_names_or_rows
+// test: a_local_edit_cancels_the_staged_wait_even_while_an_old_reader_stays_open
 
 use std::fs::File;
 use std::path::PathBuf;
@@ -74,6 +85,8 @@ pub(super) enum LandingCondition {
     /// The plan's `FolderStep::DownloadContent`: every version it was planned from
     /// (`ItemStore::commit_download_content`).
     VersionsUnchanged { item: ItemVersions },
+    /// A resident copy is exchanged only if the local and remote generations stayed put.
+    ReplaceVersions { item: ItemVersions },
 }
 
 impl LandingCondition {
@@ -81,7 +94,7 @@ impl LandingCondition {
     pub(super) fn item(&self) -> LocalItemId {
         match self {
             LandingCondition::ContentUnchanged { item, .. } => *item,
-            LandingCondition::VersionsUnchanged { item } => item.local_item_id,
+            LandingCondition::VersionsUnchanged { item } | LandingCondition::ReplaceVersions { item } => item.local_item_id,
         }
     }
 }
@@ -130,14 +143,23 @@ pub(super) fn decide_landing(condition: &LandingCondition, row: Option<&Item>) -
     let (Some(place), Some(content)) = (&local.place, &local.content) else { return LandingDecision::RowsChanged };
     let is_asked_row = match condition {
         LandingCondition::ContentUnchanged { downloaded, .. } => content == downloaded,
-        LandingCondition::VersionsUnchanged { item } => item.are_those_of(row),
+        LandingCondition::VersionsUnchanged { item } | LandingCondition::ReplaceVersions { item } => item.are_those_of(row),
     };
+    if let LandingCondition::ReplaceVersions { .. } = condition {
+        return if is_asked_row && row.content_presence == ContentPresence::OnDisk
+            && row.content_before_write.is_none() && row.local_content_matches_synced() {
+            match row.onedrive.as_ref().and_then(|v| v.content.clone()) {
+                Some(downloaded) => LandingDecision::Link { place: place.clone(), onedrive_item_id: onedrive_item.item_id.clone(), downloaded },
+                None => LandingDecision::RowsChanged,
+            }
+        } else { LandingDecision::RowsChanged };
+    }
     match (is_asked_row, row.content_presence, condition) {
         (false, _, _) => LandingDecision::RowsChanged,
         (true, ContentPresence::NotOnDisk, _) => LandingDecision::Link { place: place.clone(), onedrive_item_id: onedrive_item.item_id.clone(), downloaded: content.clone() },
         (true, ContentPresence::OnDisk, LandingCondition::ContentUnchanged { .. }) => LandingDecision::AlreadyOnDisk { place: place.clone() },
         // A step planned from a copy on disk is no download: its commit refuses it.
-        (true, ContentPresence::OnDisk, LandingCondition::VersionsUnchanged { .. }) => LandingDecision::RowsChanged,
+        (true, ContentPresence::OnDisk, LandingCondition::VersionsUnchanged { .. } | LandingCondition::ReplaceVersions { .. }) => LandingDecision::RowsChanged,
     }
 }
 
@@ -148,12 +170,14 @@ struct LinkedFile {
     path: PathBuf,
     record: PlaceChangeRecordId,
     undo: PlaceUndo,
+    replacing: bool,
 }
 
 /// The landing of one mount's downloads.
 pub(crate) struct ItemDownloadLanding {
     place_changes: Arc<PlaceChanges>,
     store: Store,
+    item_handles: Arc<super::item_handles::ItemHandles>,
     /// Told when the landing of the plan's download begins to commit: from then on a
     /// stop leaves that step alone.
     running_steps: Arc<RunningSteps>,
@@ -172,15 +196,34 @@ fn to_errno(error: &std::io::Error) -> i32 {
 impl ItemDownloadLanding {
     /// Made by the mount's build, with the folder's running steps and the mount's
     /// take-down.
-    pub fn new(place_changes: Arc<PlaceChanges>, store: Store, running_steps: Arc<RunningSteps>, mount_take_down: Arc<MountTakeDown>) -> Self {
-        Self {
+    pub fn new(place_changes: Arc<PlaceChanges>, store: Store, running_steps: Arc<RunningSteps>, mount_take_down: Arc<MountTakeDown>, item_handles: Arc<super::item_handles::ItemHandles>) -> Result<Self, TreeError> {
+        let changed = Arc::downgrade(&item_handles);
+        store.observe_items(move |_, _| {
+            if let Some(changed) = changed.upgrade() { changed.versions_changed(); }
+            Ok(())
+        })?;
+        Ok(Self {
             place_changes,
             store,
+            item_handles,
             running_steps,
             mount_take_down,
             #[cfg(test)]
             before_commit: std::sync::Mutex::new(None),
-        }
+        })
+    }
+
+    pub(super) async fn wait_for_readers(&self, condition: &LandingCondition) -> bool {
+        if let LandingCondition::ReplaceVersions { item } = condition {
+            let (store, versions, id) = (self.store.clone(), item.clone(), item.local_item_id);
+            self.item_handles.wait_for_no_readers(id, move || {
+                let (store, versions) = (store.clone(), versions.clone());
+                async move {
+                    store.read_items(move |reader| Ok(reader.find_item(id)?.is_some_and(|row| versions.are_those_of(&row))))
+                        .await.unwrap_or(false)
+                }
+            }).await
+        } else { true }
     }
 
     /// Lands the unnamed file `file`, whole, checked and synced, as the copy of the item
@@ -203,11 +246,22 @@ impl ItemDownloadLanding {
     /// `ItemDownloader` alone.
     #[cfg(test)]
     pub(super) fn land(&self, file: &File, condition: &LandingCondition) -> ItemLandingOutcome {
-        self.land_tracked(file, condition, None, None)
+        self.try_land_tracked(file, condition, None, None).unwrap_or(ItemLandingOutcome::Failed { errno: libc::EBUSY })
     }
 
-    pub(super) fn land_tracked(&self, file: &File, condition: &LandingCondition, attribution: Option<&crate::download_guard::DownloadTicket>, downloads: Option<&crate::download_guard::AccountDownloads>) -> ItemLandingOutcome {
-        if let LandingCondition::VersionsUnchanged { item } = condition {
+    /// None means only that a reader registered before this job. Disk errnos stay
+    /// ordinary failures, including EBUSY; they must not enter the admission retry.
+    pub(super) fn try_land_tracked(&self, file: &File, condition: &LandingCondition, attribution: Option<&crate::download_guard::DownloadTicket>, downloads: Option<&crate::download_guard::AccountDownloads>) -> Option<ItemLandingOutcome> {
+        let _readers = matches!(condition, LandingCondition::ReplaceVersions { .. })
+            .then(|| crate::panic::lock(&self.item_handles.reader_gate));
+        if _readers.is_some() && self.item_handles.is_open_for_reading(condition.item()) {
+            return None;
+        }
+        Some(self.land_ready(file, condition, attribution, downloads))
+    }
+
+    fn land_ready(&self, file: &File, condition: &LandingCondition, attribution: Option<&crate::download_guard::DownloadTicket>, downloads: Option<&crate::download_guard::AccountDownloads>) -> ItemLandingOutcome {
+        if let LandingCondition::VersionsUnchanged { item } | LandingCondition::ReplaceVersions { item } = condition {
             if !self.running_steps.begin_commit(item.local_item_id) {
                 return ItemLandingOutcome::StepStopped;
             }
@@ -238,6 +292,7 @@ impl ItemDownloadLanding {
             tracing::warn!("the landing of item {} could not read or record: {error}", condition.item());
             ItemLandingOutcome::Failed { errno: libc::EIO }
         };
+        let replacing = matches!(condition, LandingCondition::ReplaceVersions { .. });
         let (item, judged) = (condition.item(), condition.clone());
         // One job: the row, its path, and the record of what is about to be linked.
         let read = self.store.call_blocking(move |store| {
@@ -245,9 +300,14 @@ impl ItemDownloadLanding {
             let decision = decide_landing(&judged, row.as_ref());
             let Some((path, marks)) = store.item_store().reader().find_path_with_marks(item)? else { return Ok((LandingDecision::RowsChanged, PathBuf::new(), DirectoryMarks::new(), None)) };
             let record = match &decision {
-                LandingDecision::Link { place, downloaded, .. } => Some(store.item_store().record_place_change(&PlaceChangeRecord::LinkFile { item, place: place.clone(), content: downloaded.clone() })?),
+                LandingDecision::Link { place, downloaded, .. } => Some(store.item_store().record_place_change(&if replacing {
+                    PlaceChangeRecord::SetAside { item, place: place.clone(), aside_name: crate::folder::disk::make_aside_entry_name(item) }
+                } else { PlaceChangeRecord::LinkFile { item, place: place.clone(), content: downloaded.clone() } })?),
                 LandingDecision::AlreadyOnDisk { .. } | LandingDecision::RowsChanged => None,
             };
+            if replacing && record.is_some() {
+                store.sync_write_ahead_log()?;
+            }
             Ok((decision, path, marks, record))
         });
         let (decision, path, marks, record) = read.map_err(fail)?;
@@ -259,15 +319,17 @@ impl ItemDownloadLanding {
         let change = self.place_changes.begin();
         let marked = konedrive_fs::placeholder::set_mtime(file, to_content_time(&downloaded)).and_then(|()| write_whole_copy_marks(file, onedrive_item_id.as_str(), &downloaded));
         let linked = match marked {
+            Ok(()) if replacing => change.replace_file(file, &path, item),
             Ok(()) => change.link_file(file, &path, &marks),
             Err(error) => Err(PlaceRefusal::Disk { errno: to_errno(&error), path: path.clone() }),
         };
         match linked {
-            Ok(undo) => Ok((change, LinkedFile { place, path, record, undo })),
+            Ok(undo) => Ok((change, LinkedFile { place, path, record, undo, replacing })),
             Err(refusal) => {
                 // Nothing was linked: the record says a change that was not made.
                 drop(change);
-                self.forget_record(item, record);
+                if !matches!(refusal, PlaceRefusal::NotPutBack { .. }) { self.forget_record(item, record); }
+                if matches!(refusal, PlaceRefusal::NotPutBack { .. }) { self.mount_take_down.ask(TakeDownCause::UndoFailed { path: path.clone() }); }
                 Err(match refusal {
                     PlaceRefusal::PlaceHeld { path } => ItemLandingOutcome::PlaceHeld { path },
                     // A link sets nothing aside: nothing is left to put back.
@@ -285,21 +347,33 @@ impl ItemDownloadLanding {
     /// taken by itself; an undo that fails leaves the record standing and asks for the
     /// mount's take-down. `change` ends with this call.
     fn commit_linked(&self, change: &PlaceChange<'_>, linked: LinkedFile, condition: &LandingCondition) -> ItemLandingOutcome {
-        let LinkedFile { place, path, record, undo } = linked;
+        let LinkedFile { place, path, record, undo, replacing } = linked;
         let (item, committed_as) = (condition.item(), condition.clone());
         let committed = self.store.call_blocking(move |store| match &committed_as {
             LandingCondition::ContentUnchanged { item, downloaded } => store.item_store().commit_landed_content(*item, downloaded, Some(record)),
             LandingCondition::VersionsUnchanged { item } => store.item_store().commit_download_content(item, Some(record)),
+            LandingCondition::ReplaceVersions { item } => store.item_store().commit_replace_content(item, Some(record)),
         });
         let refused = match committed {
-            Ok(StepCommitOutcome::Written) => return ItemLandingOutcome::Landed { place, path },
+            Ok(StepCommitOutcome::Written) => {
+                if replacing {
+                    if let Err(error) = self.store.sync_write_ahead_log() {
+                        tracing::error!("a committed replacement could not be synced: {error}; its old copy is retained");
+                        self.mount_take_down.ask(TakeDownCause::BackingFileBehindRow { path });
+                        return ItemLandingOutcome::Failed { errno: libc::EIO };
+                    }
+                    self.place_changes.discard(undo);
+                }
+                return ItemLandingOutcome::Landed { place, path };
+            },
             Ok(StepCommitOutcome::RowsChanged) => ItemLandingOutcome::RowsChanged,
             Err(error) => {
                 tracing::warn!("the landing of item {item} could not be committed: {error}");
                 ItemLandingOutcome::Failed { errno: libc::EIO }
             }
         };
-        match change.undo(undo) {
+        let undone = if replacing { change.undo_replacement(undo) } else { change.undo(undo) };
+        match undone {
             Ok(()) => {
                 self.forget_record(item, record);
                 refused

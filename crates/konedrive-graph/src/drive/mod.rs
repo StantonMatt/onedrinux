@@ -61,6 +61,8 @@ pub enum DeltaNext {
 /// `docs/design/decisions.md` §3.14).
 pub struct Download {
     pub served_from: u64,
+    /// The download endpoint's version, when supplied.
+    pub etag: Option<String>,
     pub stream: Box<dyn AsyncRead + Send + Unpin>,
 }
 
@@ -88,6 +90,7 @@ const UPLOAD_REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 
 #[derive(Clone)]
 pub struct DriveClient {
+    application_id: Option<String>,
     /// Metadata calls: a total timeout, because an answer is small.
     api: reqwest::Client,
     /// Content: no total timeout — a large file takes minutes — but a read
@@ -164,10 +167,21 @@ impl DriveClient {
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
         let pool = TransferPool::new(crate::pool::DEFAULT_CEILING);
-        Ok(Self { api, content, upload, base, tokens, retry: RetryPolicy::default(), pool })
+        Ok(Self { application_id: None, api, content, upload, base, tokens, retry: RetryPolicy::default(), pool })
     }
 
     /// This client reports into `pool`, the account's.
+    /// The OAuth application that owns writes made through this client. Unknown means
+    /// no untracked empty file may be claimed as ours.
+    pub fn with_application_id(mut self, id: String) -> Self {
+        self.application_id = Some(id);
+        self
+    }
+
+    pub fn application_id(&self) -> Option<&str> {
+        self.application_id.as_deref()
+    }
+
     pub fn with_pool(mut self, pool: Arc<TransferPool>) -> Self {
         self.pool = pool;
         self
@@ -217,6 +231,25 @@ impl DriveClient {
         self.get_json(self.item_url(id, None)?).await
     }
 
+    /// Metadata and Graph's response clock, for the durable window written before a
+    /// session opens. Missing or invalid Date never falls back to the machine's clock.
+    pub async fn item_with_date(&self, id: &str) -> Result<(DriveItem, Option<i64>), DriveError> {
+        let url = self.item_url(id, None)?;
+        let response = self.send(Auth::Account, Throttle::Wait, || self.api.get(url.clone())).await?;
+        let status = Status::of(&response);
+        if !status.is_success() {
+            if response.status().as_u16() == 404 { return Err(DriveError::NotFound); }
+            let code = graph_error(response).await.code;
+            return Err(refused(format!("Graph returned {status}"), status, &code));
+        }
+        let date = response.headers().get(header::DATE).and_then(|date| date.to_str().ok())
+            .and_then(|date| httpdate::parse_http_date(date).ok())
+            .and_then(|date| date.duration_since(std::time::UNIX_EPOCH).ok())
+            .and_then(|date| i64::try_from(date.as_secs()).ok());
+        let item = response.json().await.map_err(|e| DriveError::Transient(format!("unreadable metadata: {}", e.without_url()).into()))?;
+        Ok((item, date))
+    }
+
     /// The drive's root folder: what the account's folder itself shows.
     pub async fn root_item(&self) -> Result<DriveItem, DriveError> {
         self.get_json(self.route("me/drive/root")?).await
@@ -256,7 +289,7 @@ impl DriveClient {
         let url = Url::parse(url)
             .map_err(|e| DriveError::Failed(format!("a download URL from Graph cannot be parsed: {e}").into()))?;
         if end.is_some_and(|end| end <= from) {
-            return Ok(Download { served_from: from, stream: Box::new(tokio::io::empty()) });
+            return Ok(Download { served_from: from, etag: None, stream: Box::new(tokio::io::empty()) });
         }
         // `Range` names the last byte wanted, not the first one past it.
         let range = match end {
@@ -280,12 +313,13 @@ impl DriveClient {
                 None => stream,
             }
         };
+        let etag = response.headers().get(header::ETAG).and_then(|v| v.to_str().ok()).map(str::to_owned);
         let status = Status::of(&response);
         match status.code() {
             206 => {
                 let start = content_range_start(response.headers())
                     .ok_or_else(|| DriveError::Failed("a partial answer without a readable Content-Range".into()))?;
-                Ok(Download { served_from: start, stream: bounded(self.body(response), start) })
+                Ok(Download { served_from: start, etag, stream: bounded(self.body(response), start) })
             }
             200 => {
                 let mut stream = self.body(response);
@@ -302,11 +336,11 @@ impl DriveClient {
                         ));
                     }
                 }
-                Ok(Download { served_from: from, stream: bounded(stream, from) })
+                Ok(Download { served_from: from, etag, stream: bounded(stream, from) })
             }
             _ => match classify(status, "") {
                 // Asked from the end of the file or past it: nothing to serve.
-                Kind::RangeNotSatisfiable => Ok(Download { served_from: from, stream: Box::new(tokio::io::empty()) }),
+                Kind::RangeNotSatisfiable => Ok(Download { served_from: from, etag: None, stream: Box::new(tokio::io::empty()) }),
                 Kind::Unauthorized | Kind::Forbidden | Kind::NotFound | Kind::Gone => Err(DriveError::UrlExpired),
                 _ => Err(refused(format!("the download returned {status}"), status, "")),
             },

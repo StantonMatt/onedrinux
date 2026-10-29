@@ -442,7 +442,8 @@ fn decide_removed_in_onedrive(case: &ItemCase<'_>, place: PlaceChange, content: 
         (ItemKind::File, _, ContentChange::Changed | ContentChange::NotKnownWithoutHash, _) | (ItemKind::File, PlaceChange::Moved, ContentChange::Same, ContentPresence::OnDisk) => {
             row_step(RowStep::GiveUpBinding { item: case.versions() })
         }
-        (ItemKind::File, PlaceChange::Same, ContentChange::Same, _) | (ItemKind::File, PlaceChange::Moved, ContentChange::Same, ContentPresence::NotOnDisk) => remove_item_here(case),
+        (ItemKind::File, PlaceChange::Same, ContentChange::Same, _) => remove_item_here(case),
+        (ItemKind::File, PlaceChange::Moved, ContentChange::Same, ContentPresence::NotOnDisk) => ItemDecision::Wait(WaitReason::User(Reason::Refused(Some("The file was moved here and removed in OneDrive; its local name is kept for resolution".into())))),
     }
 }
 
@@ -737,7 +738,11 @@ pub(crate) fn decide_content(case: &ItemCase<'_>, here: ContentChange, in_onedri
     match (here, in_onedrive, case.onedrive_content_origin) {
         (ContentChange::Same, ContentChange::Same, _) if local == item.synced_content.as_ref() && is_same_content_but_for_time(onedrive, item.synced_content.as_ref()) => ItemDecision::NothingToDo,
         (ContentChange::Same, ContentChange::Same, _) => row_step(RowStep::AgreeOnContent { item: case.versions() }),
-        (ContentChange::Same, ContentChange::Changed | ContentChange::NotKnownWithoutHash, OneDriveContentOrigin::OneDrive) => folder_step(FolderStep::TakeOneDriveContent { item: case.versions() }),
+        (ContentChange::Same, ContentChange::Changed | ContentChange::NotKnownWithoutHash, OneDriveContentOrigin::OneDrive) => {
+            if case.is_pinned && case.item.content_presence == ContentPresence::OnDisk {
+                folder_step(FolderStep::ReplaceContent { item: case.versions() })
+            } else { folder_step(FolderStep::TakeOneDriveContent { item: case.versions() }) }
+        },
         // What an upload of this folder left in OneDrive, and the content here is the one agreed on (the user put it back after the upload): the row is not unsent, so nothing of a sending can be kept for it.
         (ContentChange::Same, ContentChange::Changed | ContentChange::NotKnownWithoutHash, OneDriveContentOrigin::OwnUpload) if item.unsent_since.is_none() => match find_agreed_content_here(item) {
             AgreedContentHere::CleanCopy => row_step(RowStep::HashLocalContent { item: case.versions() }),

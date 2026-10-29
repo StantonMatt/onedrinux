@@ -78,6 +78,8 @@ pub enum TreeError {
     Io(#[from] std::io::Error),
     #[error("the tree store has schema version {0:?}; this daemon knows {SCHEMA_VERSION}")]
     Schema(Option<String>),
+    #[error("the tree store has newer schema {0}; this build knows {SCHEMA_VERSION}. Install the newer build, or stop the daemon and use konedrivectl store reset to quarantine the store")]
+    NewerSchema(String),
     /// The store refused a change because it would break a rule of its rows: the refused
     /// change wrote nothing, and neither SQLite nor the disk failed. What the same
     /// transaction wrote before it is still in that transaction: a caller that has one open
@@ -135,6 +137,8 @@ pub struct TreeStore {
     conn: Connection,
     /// Where it is on disk; `None` in memory.
     path: Option<PathBuf>,
+    /// Exclusive ownership, also taken by the offline reset command.
+    _file_lock: Option<std::fs::File>,
 }
 
 impl TreeStore {

@@ -553,9 +553,11 @@ fn move_item(tx: &Transaction<'_>, item: LocalItemId, place: &ItemPlace, is_name
 /// - *A file that is not in OneDrive over a file that is*: a program saved the file by a
 ///   rename. The replacing file takes over the binding: OneDrive sees the replaced file
 ///   with new content.
-/// - *An item of OneDrive over an item of OneDrive*, files or directories: each keeps its
-///   binding. The replacing one is moved in OneDrive, and the replaced one is removed
-///   there: its row stays as one the folder does not show, with what was agreed on.
+/// - *Two files of OneDrive*: exchange bindings and their cloud and synced versions.
+///   The replacing inode uploads into the original destination; the hidden row removes
+///   the old temporary item conditionally. The destination keeps its version history.
+/// - *Two directories of OneDrive*: each keeps its binding; the replacing directory is
+///   moved there and the replaced directory is removed conditionally.
 /// - *A directory that is not in OneDrive over a directory that is*: the replacing one is
 ///   a new directory at that name, and the replaced one is removed in OneDrive as above. A
 ///   directory takes no binding over.
@@ -581,8 +583,12 @@ fn save_over(tx: &Transaction<'_>, replacing: LocalItemId, replaced: LocalItemId
             remove_local_version(tx, replaced_item)?;
             bindings::take_over_binding(tx, replacing, replaced)?;
         }
-        // Removed here, to be removed in OneDrive; the replacing item is its own.
-        (_, Some(_), Some(_)) | (ItemKind::Directory, None, Some(_)) => remove_local_version(tx, replaced_item)?,
+        (ItemKind::File, Some(_), Some(_)) => {
+            remove_local_version(tx, replaced_item)?;
+            bindings::exchange_bindings(tx, replacing, replaced)?;
+        }
+        // Directories retain their own identities.
+        (ItemKind::Directory, _, Some(_)) => remove_local_version(tx, replaced_item)?,
     }
     set_local_place(tx, replacing, &place, is_name_ignored)
 }

@@ -664,3 +664,19 @@ fn directory_and_failed_file_attributes_use_the_incremental_index() {
     fixture.land_copy(key.item, b"hello");
     assert_eq!(find_xattr(&fixture, &lookup, ROOT, XATTR_STATE).unwrap(), "hydrated");
 }
+
+#[test]
+fn a_resident_remote_update_is_shown_pending_until_the_replacement_commits() {
+    let fixture = crate::mount::item_fixture::ItemFixture::new();
+    let row = fixture.show_onedrive_file("pinned.txt", b"old");
+    fixture.land_copy(row.local_item_id, b"old");
+    let row = fixture.list_onedrive_file("pinned.txt", b"new");
+    assert_eq!(decide_sync_mark(&row, false, false, None, false), Some(SyncMark::Pending));
+    let mut same_content = row.clone();
+    same_content.onedrive.as_mut().unwrap().content = same_content.local.as_ref().unwrap().content.clone();
+    if let Some(ContentVersion::Hashed { mtime, mtime_nsec, .. }) = same_content.onedrive.as_mut().unwrap().content.as_mut() {
+        *mtime += 10; *mtime_nsec = 123;
+    }
+    assert_eq!(decide_sync_mark(&same_content, false, false, None, false), None, "mtime precision alone is no pending content replacement");
+
+}

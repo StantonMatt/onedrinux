@@ -86,7 +86,7 @@ know `konedrive-graph`); `konedrive-dbus`; `konedrive-text` (uses `konedrive-rea
 | The development build's tests | `cargo test -p konedrived -p konedrivectl --features konedrived/dev-tools,konedrivectl/dev-tools` | The token export and the signed-out account (`dbus/token_export.rs`, `dbus/dev_tools.rs`, `konedrivectl dev`) |
 | The window | `cmake -S app -B build/app -DBUILD_TESTING=ON && cmake --build build/app && ctest --test-dir build/app --output-on-failure` | `app/tests/` |
 | The Dolphin plugins | `cmake -S dolphin -B build/dolphin -DBUILD_TESTING=ON && cmake --build build/dolphin && ctest --test-dir build/dolphin --output-on-failure` | `dolphin/tests/` |
-| The VM suite | `tests/fuse-probe/run.sh [<group>…]`; `ONLY="<scenario>"` for one scenario | The daemon's service and `konedrivectl` over a sync folder that is mounted for real, on ext4 in a virtme-ng VM, over the fake OneDrive: nothing is mounted on the host. Groups: `service`, `mounted_folder`, `file_writes`, `file_reads`, `download_guard`, `daemon_restarts`, `cli`; by name only, `kio_trash` |
+| The VM suite | `tests/fuse-probe/run.sh [<group>…]`; `ONLY="<scenario>"` for one scenario | The daemon's service and `konedrivectl` over a sync folder that is mounted for real, on ext4 in a virtme-ng VM, over the fake OneDrive: nothing is mounted on the host. Groups: `service`, `mounted_folder`, `file_writes`, `file_reads`, `download_guard`, `daemon_restarts`, `cli`; by name only, `kio_trash`, `crash_consistency` |
 | The test account | `konedrive-write-test` (`tests/write-account`) | Writes to OneDrive itself, through the guards; rare, never the user's real account |
 | The structure | `scripts/check-structure.sh` | The files over the advised sizes (listed only), tests outside source files, the daemon's layer order, locks, the tests a module names |
 
@@ -222,11 +222,11 @@ Where a download gets its bytes from, and the download of a whole file.
   program that reads.
 - `source/download.rs` — a download in one stream: written in place, in order, and checked.
 - `source/parts.rs` — a large pinned download in parallel parts.
-- `source/guards.rs` — what every download checks: the source's answer, the breaks tried
+- `source/guards.rs` — fail-closed remote hash verification and what every download checks: the source's answer, the breaks tried
   again, the checkpoint a download continues from, the hash at the end. `[tests]`
 - `source/target.rs` — the file a download writes, and its blocking sections. `[tests]`
-- `graph_source.rs` — the content source of a sync folder: Graph, with the download address
-  remembered between range reads. `[tests]`
+- `graph_source.rs` — fresh Graph metadata around every range, first-range version and endpoint
+  ETag retention, and whole-download metadata. `[tests]`
 - `tracked.rs` — `Tracked`: a content source that reports what it fetches to `Transfers`.
   `[tests]`
 
@@ -384,7 +384,7 @@ A file that is not on disk:
   are counted against the app's admission budget.
 - `item_download_states.rs` — `ItemDownloadStates`: the state of each file's download, by the
   item and the content. `[tests]`
-- `item_download_landing.rs` — the landing: the last step of every download, the file given
+- `item_download_landing.rs` — conditional landings and atomic resident replacements on one existing place-change record; the landing: the last step of every download, the file given
   its name and then the row saying on disk. `[tests]`
 - `item_free_up.rs` — free up space: the row first, then the downloaded copy goes; app reclamation also requires the attributed content and no open reader. `[tests]`
 
@@ -430,7 +430,7 @@ The runner of the plan's steps towards OneDrive.
 
 - `mod.rs` — `OneDriveSteps`: one function per case of `OneDriveStep`, each one request to
   Graph, the answer turned into what its commit takes, and the commit. `[tests]`
-- `content_upload.rs` — a file's content sent: an empty file by one request, any other through
+- `content_upload.rs` — exact sent-byte and final local-generation checks, metadata fallback and holds for hashless completions; a file's content sent: an empty file by one request, any other through
   an upload session, in fragments, gone on with after a stop or a crash. `[tests]`
 - `confirmed_item.rs` — Graph's answer to a step as the commit takes it, and what a request is
   guarded with. `[tests]`
@@ -651,6 +651,7 @@ what is decided and what is said, with nothing read from the daemon.
 - `sync/explain.rs` — what they share: a path made absolute, a refusal explained, the check
   that a folder does not need attention.
 - `dev.rs` — `dev`, only in a development build.
+- `store.rs` — offline store reset under configuration/store locks; no account or bus connection.
 - `version.rs` — `--version`: this build's, and the running daemon's.
 
 ### `crates/konedrivectl/src/text/`
@@ -684,6 +685,7 @@ Integration tests: the compiled binary against a daemon on a private bus.
 - `status.rs` — `status`.
 - `mode_cli.rs` — `account mode`, and the token export's `--read-write`.
 - `version_cli.rs` — `--version`.
+- `store_reset.rs` — offline preservation of newer stores and pins; daemon/store-lock refusal without a session bus.
 - `sync_cli/main.rs` — the test binary `sync_cli`: its harness.
 - `sync_cli/registration.rs` — what `sync register` refuses, and a path that does not exist.
 - `sync_cli/status.rs` — `sync status`, skipped items.
@@ -744,9 +746,10 @@ per item), `step_memory` and the tables beside it, `place_change_records`, `pins
   row gives a file (`FileSyncState`); `Placement` and `SkipReason`; `DriveId`; and a listed
   item as Graph's words give it (`Row`, `Change`). `[tests]`
 - `schema.rs` — the schema's version, what a new store is created with, and when a store is
-  rebuilt. `[tests]`
-- `schema/old_store.rs` — `decide_old_store`: what becomes of a store of another version (it
-  is rebuilt, never migrated), and what a rebuild loses. `[tests]`
+  admitted, migrated or quarantined. `[tests]`
+- `schema/old_store.rs` — store admission, sequential migrations, snapshots and newer-schema refusal. `[tests]`
+- `schema/quarantine.rs` — durable resumable quarantine, read-only-original inspection, pin carryover and pending-change exports.
+- `schema/old_store/tests/safety.rs` — quarantine retention/restart, newer-schema non-mutation, migrations, snapshots, pins and exports.
 - `item_changes/tests.rs` — change-feed transaction rollback and observer tests.
 - `item_changes.rs` — transaction-safe TEMP-trigger feed for the mount's derived state;
   items, pin roots and step memory, consumed after writer jobs without changing the schema.
@@ -773,7 +776,7 @@ The rows:
   the mount, the bus): an item by id or by place, its path, what is not shown, counts.
   `[tests]`
 - `item_store/plan_readers.rs` — the bounded readers a plan is made from. `[tests]`
-- `item_store/bindings.rs` — when one item takes another's place: `take_over_binding`,
+- `item_store/bindings.rs` — when one item takes another's place: `take_over_binding`, `exchange_bindings`,
   `give_up_binding`, `merge_items`. `[tests]`
 - `item_store/local_content.rs` — what the mount writes of a file's local content: its time,
   its presence on disk with a change, the content before a write. `[tests]`
@@ -1149,7 +1152,7 @@ suite".
 
 ### `tests/fuse-probe/`
 
-- `Cargo.toml`, `Cargo.lock` — the crate and its three programs.
+- `Cargo.toml`, `Cargo.lock` — the VM probe crate and its programs.
 - `run.sh` — builds the programs, makes the guest's disk, boots the VM and runs `guest.sh` in
   it; fails when a scenario fails that `expected-to-fail.txt` does not name.
 - `guest.sh` — inside the VM: an ext4 disk, and the groups run as an ordinary user. The group
@@ -1165,6 +1168,9 @@ suite".
 - `download_guard.sh` — the group `download_guard`: app-download reclamation and its keep/open skip rules, bulk and background refusals, explicit actions,
   low-space ranges, already-open handles and mmap.
 - `daemon_restarts.sh` — the group `daemon_restarts`: stops and kills in the middle of work.
+- `crash_consistency.sh` — by-name-only group: two boots on one disk with guest SysRq power loss, edit/rename/missing-copy recovery and a mid-migration cut.
+- `store_durability.py` — focused 10,000-create/1,000-rewrite/delete harness comparing SQLite NORMAL and FULL.
+- `src/bin/store-probe.rs` — offline store assertions and real migration entry for the power-loss guest.
 - `kio_trash.sh` — the group `kio_trash`, by name only: what KIO does when a file of the folder
   is moved to the trash (`tests/kio/trash_probe.cpp`).
 - `expected-to-fail.txt` — the scenarios expected to fail, with the reason of each.
@@ -1193,6 +1199,12 @@ The program `konedrive-write-test`, a member of the workspace.
 - `src/checks.rs` — what the run checks against OneDrive itself.
 - `src/checks/notifications.rs` — the change notifications.
 - `src/checks/placeholders.rs` — an upload session's placeholder.
+- `src/checks/remote/tests.rs` — mocked descendant create/edit/remove service check.
+- `src/checks/remote.rs` — folder cTags, conditional deletes and application ownership.
+- `src/token_file.rs` — the explicit owner-only token file reader.
+- `src/bin/metadata-probe.rs` — a read-only metadata presence sample.
+- `src/bin/metadata-probe/tests.rs` — bounded sampling and metadata-only wire requests.
+- `README.md` — the two account tools and their safety boundaries.
 - `src/tests.rs` — tests: each guard shown to refuse, against wiremock.
 
 ## `tests/stress` and `tests/kio`: tools run by hand
@@ -1267,3 +1279,23 @@ What `docs/kio-behavior.md` was measured with.
   that earlier mechanism; kept as a record of the kernel. Its `README.md` is the index.
 - `docs/design/download-guard.md` — caller policy, admission windows, space and the UI bus handoff.
 - `docs/code-map.md` — this file.
+
+Remote namespace regression tests: `crates/konedrived/src/onedrive_steps/tests/remote.rs`
+checks folder conditions and atomic saves crossing upload requests, without a mount or account.
+
+### Write defaults and trial scope
+
+- `crates/konedrived/src/config/write_scope.rs` — relative subtree validation and live account
+  scope sources; `config/write_scope/tests.rs` checks validation, configuration round trips,
+  existing mode defaults and updates.
+- `crates/konedrived/src/mount/item_write_operations/write_scope.rs` — common scope admission
+  used by kernel dispatch; tests in `mount/item_kernel_requests/tests/write_scope.rs`.
+- `crates/konedrived/src/onedrive_steps/write_scope.rs` — local and remote path admission for
+  every outgoing step, resumed sessions and cleanup references; tests in `onedrive_steps/tests.rs`
+  and `onedrive_steps/content_upload/tests.rs`. Scope-only checks also protect upload retry
+  cleanup and name holders, without changing their normal hash or ownership decisions.
+- `crates/konedrived/tests/sign_in.rs` — default and explicit mode selection at the first sign-in,
+  one code exchange, and the account's write-scope D-Bus contract.
+- `tests/fuse-probe/file_writes.sh` — `write_scope_allows_only_the_trial_subtree`, real kernel
+  refusal of outside mutations and successful inside writes; run with the `file_writes` group.
+  The VM suite builds debug by default (`FUSE_PROBE_PROFILE=release` for a release build).

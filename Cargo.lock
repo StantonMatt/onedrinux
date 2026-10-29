@@ -1111,6 +1111,7 @@ dependencies = [
  "base64",
  "futures-util",
  "getrandom 0.2.17",
+ "httpdate",
  "reqwest",
  "serde",
  "serde_json",

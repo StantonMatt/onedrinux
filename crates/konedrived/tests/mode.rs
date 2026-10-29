@@ -152,6 +152,8 @@ async fn signed_in_with(allowed: &[&str], code: &str, wide: bool) -> Setup {
         .config()
         .update(|config| {
             config.write_test_drive_ids = allowed;
+            // These tests exercise the existing read-only account upgrade path.
+            config.new_account_mode = Mode::ReadOnly;
             Ok::<_, ConfigError>(())
         })
         .unwrap();

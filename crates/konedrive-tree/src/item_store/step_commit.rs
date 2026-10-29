@@ -268,6 +268,21 @@ impl ItemStore<'_> {
         self.write(|tx| forget_place_change_record_when_written(tx, record, commit_remove_item(tx, item)?))
     }
 
+    /// Commit a verified replacement without a cloud-only interval. The caller has
+    /// synced and exchanged the file under one place-change record already.
+    pub fn commit_replace_content(&mut self, item: &ItemVersions, record: Option<PlaceChangeRecordId>) -> Result<StepCommitOutcome, TreeError> {
+        self.write(|tx| {
+            let Some((mut row, content)) = find_planned_file_on_both_sides(tx, item)? else { return Ok(StepCommitOutcome::RowsChanged) };
+            if row.content_presence != ContentPresence::OnDisk || row.content_before_write.is_some()
+                || !row.local_content_matches_synced() {
+                return Ok(StepCommitOutcome::RowsChanged);
+            }
+            row.content_presence = ContentPresence::OnDisk;
+            write_onedrive_content_as_local(tx, row, content)?;
+            forget_place_change_record_when_written(tx, record, StepCommitOutcome::Written)
+        })
+    }
+
     /// The commit of [`FolderStep::DownloadContent`](crate::FolderStep::DownloadContent):
     /// the whole content of the file is on disk.
     /// `record` is the record of the step's change of the backing directory's names, when

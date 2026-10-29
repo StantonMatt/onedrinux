@@ -1,51 +1,15 @@
-//! What becomes of a store that an older version of the daemon left: the one place where
-//! it is decided.
+//! Store admission: use this schema, migrate a supported predecessor, quarantine an
+//! unsupported or damaged store, and refuse a newer build's schema without writing it.
 //!
-//! **State owned:** none. [`decide_old_store`] is a pure function of what the file says of
-//! itself; [`TreeStore::open_with_origin`] performs its answer, and `TreeStore::open` is
-//! that call with the origin left out.
-//!
-//! **Answers for:** `docs/design/decisions.md` §3.10: a store of any other version than
-//! this build's is rebuilt, as one that was lost is, but for the version just before,
-//! which is brought to this build's in place where the change between the two only adds or
-//! makes an index anew — a rebuild loses the pins and the activity log, which an added
-//! column or an index made from the rows is no reason for.
-//! The cases, by what the file says of itself:
-//!
-//! - *this build's version*: used as it is.
-//! - *no file, or a database with no table*: the schema is made.
-//! - *the version before* (`MIGRATED_VERSION`): migrated in place, in one
-//!   transaction with the new version's number; what it held is all there.
-//! - *any other version* — an older one (a folder of a version that kept placeholders
-//!   is refused before that, which is not this decision), a newer daemon's — *no
-//!   version, not a database*: rebuilt. What a rebuild loses is counted before the file goes
-//!   ([`RebuildLoss`]): the pins (kept in the store alone), the activity log, the
-//!   conflicts on record, what was unsent and is not on disk, and the open upload
-//!   sessions. What is on disk is found again by the check at start.
-//!
-//! The upload sessions the old tables hold are not this module's to cancel: the folder's
-//! start cancels the ones it can read before the tables go
-//! (`sync_tasks::start_order::cancel_upload_sessions_of_old_store`), so that their empty
-//! files do not hold names in OneDrive. Here they are only counted.
-//!
-//! **The migration step**: version 31 makes the index of the files a thumbnail is made for
-//! anew, `items_thumbnail_type` in place of `items_image_or_video`, and adds the column
-//! `is_written` of `thumbnail_marks`, to a store of version 30; a store of any older
-//! version is rebuilt.
-//!
-//! **Tested without the rest:**
+//! A quarantine retains the database and WAL, restores readable pins before listing,
+//! and exports unsent namespace changes for manual recovery. Migrations are sequential
+//! transactions that also commit the version, after a durable VACUUM INTO snapshot.
 // test: a_store_of_todays_version_is_used
-// test: a_store_of_an_older_version_is_rebuilt_and_never_migrated
+// test: an_unsupported_older_store_is_quarantined_and_never_deleted
 // test: a_store_of_the_version_before_is_migrated_in_place_and_keeps_what_it_held
-// test: a_store_of_an_unknown_version_is_rebuilt
-// test: a_file_that_is_no_database_is_rebuilt
+// test: a_file_that_is_no_database_is_preserved_in_quarantine
 // test: a_store_that_cannot_be_read_for_another_reason_is_left_alone
 // test: where_there_is_no_store_one_is_made
-// test: a_rebuild_counts_what_it_loses_before_the_file_goes
-// test: the_version_a_stores_file_says_is_read_without_changing_the_file
-// test: a_stores_file_that_cannot_be_opened_is_an_error_and_no_version
-// test: the_upload_sessions_of_a_store_of_an_older_version_are_listed_from_both_tables
-// test: no_upload_session_is_listed_where_none_is_to_cancel
 
 use std::path::Path;
 
@@ -55,7 +19,7 @@ use super::{at_version, thumbnail_type_index, SCHEMA_VERSION};
 use crate::item_store::IS_WRITTEN_COLUMN;
 use crate::{meta, TreeError};
 
-/// The version before this build's: the one a store is brought from in place ([`migrate`]).
+/// The oldest retained migration predecessor ([`migrate`]).
 const MIGRATED_VERSION: &str = "30";
 
 /// What the file at the store's path says of itself, before anything is changed.
@@ -93,14 +57,13 @@ pub enum OldStoreDecision {
     Use,
     /// No store: the schema is made.
     Make,
-    /// The version before this build's, which this build's differs from only by what it
-    /// adds and by an index made anew: the store is brought to this build's in place
-    /// ([`migrate`]) and then used, with everything it held.
+    /// A supported predecessor: snapshot, then migrate in sequential transactions.
     Migrate,
-    /// The file is removed and the store made empty; the folder's start then goes the way
-    /// of a store that was lost (`docs/design/mount.md` §7.4). What that loses is [`RebuildLoss`], counted
-    /// by `TreeStore::open_with_origin` before the file goes.
-    Rebuild,
+    /// Preserve the file and sidecars, restore readable pins, export pending moves and
+    /// removals, and build a fresh store from a full listing and backing bytes.
+    Quarantine,
+    /// A newer build owns this schema; no write to its files is permitted.
+    RefuseNewer,
 }
 
 /// How the store the folder's start was given came to be: what the start does next depends
@@ -122,20 +85,65 @@ pub fn decide_old_store(stored: &StoredVersion) -> OldStoreDecision {
     match stored {
         StoredVersion::NoStore => OldStoreDecision::Make,
         StoredVersion::Version(version) if version == SCHEMA_VERSION => OldStoreDecision::Use,
-        StoredVersion::Version(version) if version == MIGRATED_VERSION => OldStoreDecision::Migrate,
-        StoredVersion::Version(_) | StoredVersion::NoVersion | StoredVersion::NotADatabase => OldStoreDecision::Rebuild,
+        StoredVersion::Version(version) if matches!(version.as_str(), "30" | "31") => {
+            OldStoreDecision::Migrate
+        }
+        StoredVersion::Version(version)
+            if version
+                .parse::<u64>()
+                .is_ok_and(|v| v > SCHEMA_VERSION.parse::<u64>().unwrap())
+                || (!version.is_empty()
+                    && version.bytes().all(|c| c.is_ascii_digit())
+                    && version.parse::<u64>().is_err()) =>
+        {
+            OldStoreDecision::RefuseNewer
+        }
+        StoredVersion::Version(_) | StoredVersion::NoVersion | StoredVersion::NotADatabase => {
+            OldStoreDecision::Quarantine
+        }
     }
 }
 
-/// Brings the store behind `conn`, which is of [`MIGRATED_VERSION`], to this build's version:
-/// the index of the files a thumbnail is made for holds the documents too
-/// (`items_thumbnail_type`, made from the rows, in place of `items_image_or_video`), and the
-/// column `is_written` of `thumbnail_marks`, every mark taken for one of a thumbnail
-/// written. One transaction with the version's number: a crash or an error leaves the
-/// store at the version it had.
+/// Runs the retained 30 to 31 and 31 to 32 steps in order. Each step and its version
+/// commit in one transaction; a crash leaves the last committed version intact.
 fn migrate(conn: &Connection) -> Result<(), TreeError> {
-    let step = format!("DROP INDEX items_image_or_video; {} ALTER TABLE thumbnail_marks ADD COLUMN {IS_WRITTEN_COLUMN};", thumbnail_type_index());
-    at_version(conn, SCHEMA_VERSION, |tx| Ok(tx.execute_batch(&step)?))
+    // Every shipped step stays in this chain. Each step and its version commit together.
+    if meta::get(conn, meta::SCHEMA_VERSION)?.as_deref() == Some(MIGRATED_VERSION) {
+        let step = format!("DROP INDEX items_image_or_video; {} ALTER TABLE thumbnail_marks ADD COLUMN {IS_WRITTEN_COLUMN};", thumbnail_type_index());
+        at_version(conn, "31", |tx| Ok(tx.execute_batch(&step)?))?;
+    }
+    if meta::get(conn, meta::SCHEMA_VERSION)?.as_deref() == Some("31") {
+        at_version(conn, "32", |tx| {
+            // Earlier opening windows used the machine clock. They cannot prove
+            // ownership against Graph's timestamps; leave any unknown holder alone.
+            tx.execute_batch("ALTER TABLE items ADD COLUMN onedrive_folder_ctag TEXT;
+                              DELETE FROM upload_session_openings;")?;
+            #[cfg(feature = "fault-injection")]
+            if let Some(marker) = std::env::var_os("KONEDRIVE_TEST_MIGRATION_PAUSE") {
+                super::quarantine::write_durable(Path::new(&marker), b"migration-before-commit")?;
+                // The VM cuts power here. This feature is absent from shipped builds.
+                loop {
+                    std::thread::park();
+                }
+            }
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+/// quick_check failures are findings; disk/permission/lock errors remain errors.
+fn checked_version(conn: &Connection) -> Result<StoredVersion, TreeError> {
+    let stored = read_stored_version(conn)?;
+    if matches!(stored, StoredVersion::NotADatabase) {
+        return Ok(stored);
+    }
+    match conn.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0)) {
+        Ok(result) if result == "ok" => Ok(stored),
+        Ok(_) => Ok(StoredVersion::NotADatabase),
+        Err(error) if is_no_database(&error) => Ok(StoredVersion::NotADatabase),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Whether SQLite says of the file that it is no database, or is corrupt.
@@ -144,7 +152,12 @@ fn is_no_database(error: &rusqlite::Error) -> bool {
 }
 
 fn has_table(conn: &Connection, table: &str) -> rusqlite::Result<bool> {
-    conn.query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1", [table], |row| row.get::<_, i64>(0)).map(|count| count > 0)
+    conn.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        [table],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|count| count > 0)
 }
 
 /// What the file at the store's path says of itself. Reads `sqlite_master` and `meta`;
@@ -152,15 +165,27 @@ fn has_table(conn: &Connection, table: &str) -> rusqlite::Result<bool> {
 /// store is then left alone.
 pub(super) fn read_stored_version(conn: &Connection) -> Result<StoredVersion, TreeError> {
     let read = || -> rusqlite::Result<StoredVersion> {
-        let tables: i64 = conn.query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table'", [], |row| row.get(0))?;
+        let tables: i64 = conn.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table'",
+            [],
+            |row| row.get(0),
+        )?;
         if tables == 0 {
             return Ok(StoredVersion::NoStore);
         }
         if !has_table(conn, "meta")? {
             return Ok(StoredVersion::NoVersion);
         }
-        let version: Option<Option<String>> = conn.query_row("SELECT value FROM meta WHERE key = ?1", [meta::SCHEMA_VERSION], |row| row.get(0)).optional()?;
-        Ok(version.flatten().map_or(StoredVersion::NoVersion, StoredVersion::Version))
+        let version: Option<Option<String>> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                [meta::SCHEMA_VERSION],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(version
+            .flatten()
+            .map_or(StoredVersion::NoVersion, StoredVersion::Version))
     };
     match read() {
         Ok(stored) => Ok(stored),
@@ -170,7 +195,7 @@ pub(super) fn read_stored_version(conn: &Connection) -> Result<StoredVersion, Tr
 }
 
 /// What a rebuild of the store behind `conn` would lose, counted before the file goes.
-/// Called by `TreeStore::open_with_origin` when the decision is `Rebuild`, for
+/// Called by `TreeStore::open_with_origin` when the decision is `Quarantine`, for
 /// [`StoreOrigin::MadeEmpty`]. A table the store does not have holds nothing; a store it
 /// cannot count in — no database, or tables of another shape — answers nothing.
 pub(super) fn count_rebuild_loss(conn: &Connection) -> Option<RebuildLoss> {
@@ -178,11 +203,17 @@ pub(super) fn count_rebuild_loss(conn: &Connection) -> Option<RebuildLoss> {
         if !has_table(conn, table)? {
             return Ok(0);
         }
-        conn.query_row(&format!("SELECT count(*) FROM {table} {rows}"), [], |row| row.get::<_, i64>(0)).map(|count| count.max(0) as u64)
+        conn.query_row(&format!("SELECT count(*) FROM {table} {rows}"), [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map(|count| count.max(0) as u64)
     };
     let count_all = || -> rusqlite::Result<RebuildLoss> {
         // A removal has nothing on disk; a move of what has no local object neither.
-        let unsent_in_outbox = count("outbox", "WHERE kind = 'delete' OR (kind = 'move' AND handle IS NULL)")?;
+        let unsent_in_outbox = count(
+            "outbox",
+            "WHERE kind = 'delete' OR (kind = 'move' AND handle IS NULL)",
+        )?;
         let unsent_in_items = count(
             "items",
             "WHERE unsent_since IS NOT NULL AND onedrive_item_id IS NOT NULL
@@ -195,7 +226,8 @@ pub(super) fn count_rebuild_loss(conn: &Connection) -> Option<RebuildLoss> {
             activity_events: count("activity", "")?,
             conflicts: count("conflicts", "")?,
             unsent_changes_not_on_disk: unsent_in_outbox + unsent_in_items,
-            open_upload_sessions: count("upload_sessions", "")? + count("step_memory", "WHERE session_address IS NOT NULL")?,
+            open_upload_sessions: count("upload_sessions", "")?
+                + count("step_memory", "WHERE session_address IS NOT NULL")?,
         })
     };
     count_all().ok()
@@ -211,18 +243,11 @@ pub(super) fn count_rebuild_loss(conn: &Connection) -> Option<RebuildLoss> {
 /// of what is unsent in a folder that keeps no open store
 /// (`sync_tasks::stop_order::count_unsent_of_closed_store`).
 pub fn find_stored_version(path: &Path) -> Result<StoredVersion, TreeError> {
-    use rusqlite::OpenFlags;
     if !path.try_exists()? {
         return Ok(StoredVersion::NoStore);
     }
-    match Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX) {
-        Ok(conn) => {
-            conn.busy_timeout(std::time::Duration::from_secs(5))?;
-            read_stored_version(&conn)
-        }
-        Err(error) if is_no_database(&error) => Ok(StoredVersion::NotADatabase),
-        Err(error) => Err(error.into()),
-    }
+    let inspection = super::quarantine::Inspection::open(path)?;
+    read_stored_version(&inspection.conn)
 }
 
 /// The addresses of the upload sessions that the store at `path` holds, when it is a
@@ -236,20 +261,15 @@ pub fn find_stored_version(path: &Path) -> Result<StoredVersion, TreeError> {
 ///
 /// Blocking. Called by the folder's start
 /// (`sync_tasks::start_order::cancel_upload_sessions_of_old_store`) BEFORE
-/// [`TreeStore::open_with_origin`](crate::TreeStore::open_with_origin) removes such a
+/// [`TreeStore::open_with_origin`](crate::TreeStore::open_with_origin) quarantines such a
 /// store, which only counts them (`docs/design/sync.md` §9.2, stage 0).
 pub fn list_old_store_upload_sessions(path: &Path) -> Result<Vec<String>, TreeError> {
-    use rusqlite::OpenFlags;
     if !path.try_exists()? {
         return Ok(Vec::new());
     }
-    let conn = match Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX) {
-        Ok(conn) => conn,
-        Err(error) if is_no_database(&error) => return Ok(Vec::new()),
-        Err(error) => return Err(error.into()),
-    };
-    conn.busy_timeout(std::time::Duration::from_secs(5))?;
-    if decide_old_store(&read_stored_version(&conn)?) != OldStoreDecision::Rebuild {
+    let inspection = super::quarantine::Inspection::open(path)?;
+    let conn = &inspection.conn;
+    if decide_old_store(&read_stored_version(conn)?) != OldStoreDecision::Quarantine {
         return Ok(Vec::new());
     }
     let list = |table: &str, column: &str, rows: &str| -> rusqlite::Result<Vec<String>> {
@@ -257,12 +277,18 @@ pub fn list_old_store_upload_sessions(path: &Path) -> Result<Vec<String>, TreeEr
             return Ok(Vec::new());
         }
         let mut statement = conn.prepare(&format!("SELECT {column} FROM {table} {rows}"))?;
-        let addresses = statement.query_map([], |row| row.get::<_, String>(0))?.collect();
+        let addresses = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect();
         addresses
     };
     let list_all = || -> rusqlite::Result<Vec<String>> {
         let mut addresses = list("upload_sessions", "url", "WHERE url IS NOT NULL")?;
-        addresses.extend(list("step_memory", "session_address", "WHERE session_address IS NOT NULL")?);
+        addresses.extend(list(
+            "step_memory",
+            "session_address",
+            "WHERE session_address IS NOT NULL",
+        )?);
         Ok(addresses)
     };
     // Tables of a shape that cannot be read hold nothing that can be cancelled.
@@ -270,58 +296,153 @@ pub fn list_old_store_upload_sessions(path: &Path) -> Result<Vec<String>, TreeEr
 }
 
 impl crate::TreeStore {
-    /// Opens the store at `path` and says how it came to be: used as it is (also one of
-    /// the version before, migrated in place first), made where there was none, or
-    /// rebuilt empty where the one there cannot be used
-    /// ([`decide_old_store`]), with what the rebuild lost counted before its file went.
-    /// Every other error — permission denied, disk I/O, a lock that outlasts the busy
-    /// timeout — is returned unchanged and nothing on disk is touched: a failure that
-    /// passes is not corruption, and must never cost the user their store.
-    ///
-    /// Called by the folder's start (`sync_tasks::start_order`), which runs the check
-    /// at start and asks for a full listing by the answer; and by `TreeStore::open`.
+    /// Opens a store without deleting its predecessor. Non-corruption errors leave it
+    /// alone; a newer schema is refused and its files are never opened for writing.
     pub fn open_with_origin(path: &Path) -> Result<(Self, StoreOrigin), TreeError> {
-        if let Some(dir) = path.parent() {
+        use super::quarantine::{self, Inspection};
+        if let Some(dir) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir)?;
         }
-        if !path.try_exists()? {
-            return Ok((Self::open_file(path)?, StoreOrigin::MadeEmpty { loss: None }));
-        }
-        // The file is there, so opening it makes none; nothing is written through this
-        // connection, which is closed before the store is opened or its file removed.
-        let conn = Connection::open(path)?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        let stored = read_stored_version(&conn)?;
-        match decide_old_store(&stored) {
-            OldStoreDecision::Use => {
-                drop(conn);
-                Ok((Self::open_file(path)?, StoreOrigin::Kept))
-            }
-            OldStoreDecision::Make => {
-                drop(conn);
-                Ok((Self::open_file(path)?, StoreOrigin::MadeEmpty { loss: None }))
-            }
-            OldStoreDecision::Migrate => {
-                migrate(&conn)?;
-                drop(conn);
-                tracing::info!("{} was of version {MIGRATED_VERSION} and is of version {SCHEMA_VERSION} now; what it held is kept", path.display());
-                Ok((Self::open_file(path)?, StoreOrigin::Kept))
-            }
-            OldStoreDecision::Rebuild => {
-                let loss = count_rebuild_loss(&conn);
-                drop(conn);
-                tracing::warn!("{} cannot be used ({stored:?}; this daemon knows version {SCHEMA_VERSION}); it is rebuilt from a full listing, and loses {loss:?}", path.display());
-                for suffix in ["", "-wal", "-shm"] {
-                    match std::fs::remove_file(format!("{}{suffix}", path.display())) {
-                        Ok(()) => {}
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                        Err(error) => return Err(error.into()),
-                    }
+        let lock = quarantine::wait_for_store(path)?;
+        let pending = quarantine::finish_renames(path)?;
+        let (mut store, origin) = if let Some(old) = pending {
+            let mut store = Self::open_file(path)?;
+            let loss = quarantine::carry_over(path, &old, &mut store)?;
+            quarantine::complete(path)?;
+            (store, StoreOrigin::MadeEmpty { loss })
+        } else if !path.try_exists()? {
+            let store = Self::open_file(path)?;
+            quarantine::sync_parent(path)?;
+            (store, StoreOrigin::MadeEmpty { loss: None })
+        } else {
+            let inspection = Inspection::open(path)?;
+            // Refuse newer versions even if quick_check would find damage. A downgrade
+            // must not reinterpret corruption in a layout it does not understand.
+            let version = read_stored_version(&inspection.conn)?;
+            if decide_old_store(&version) == OldStoreDecision::RefuseNewer {
+                if let StoredVersion::Version(version) = version {
+                    return Err(TreeError::NewerSchema(version));
                 }
-                Ok((Self::open_file(path)?, StoreOrigin::MadeEmpty { loss }))
+            }
+            let stored = checked_version(&inspection.conn)?;
+            match decide_old_store(&stored) {
+                OldStoreDecision::Use => {
+                    drop(inspection);
+                    (Self::open_file(path)?, StoreOrigin::Kept)
+                }
+                OldStoreDecision::Make => {
+                    drop(inspection);
+                    (
+                        Self::open_file(path)?,
+                        StoreOrigin::MadeEmpty { loss: None },
+                    )
+                }
+                OldStoreDecision::Migrate => {
+                    make_snapshot(path, &inspection.conn, &stored)?;
+                    drop(inspection);
+                    let conn = Connection::open(path)?;
+                    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+                    conn.pragma_update(None, "synchronous", "FULL")?;
+                    migrate(&conn)?;
+                    drop(conn);
+                    (Self::open_file(path)?, StoreOrigin::Kept)
+                }
+                OldStoreDecision::Quarantine => {
+                    drop(inspection);
+                    let old = quarantine::begin(path, &stored)?;
+                    let mut store = Self::open_file(path)?;
+                    let loss = quarantine::carry_over(path, &old, &mut store)?;
+                    quarantine::complete(path)?;
+                    tracing::warn!("{} quarantined at {}; readable pins restored; pending namespace changes exported", path.display(), old.display());
+                    (store, StoreOrigin::MadeEmpty { loss })
+                }
+                OldStoreDecision::RefuseNewer => unreachable!(),
+            }
+        };
+        store._file_lock = Some(lock);
+        Ok((store, origin))
+    }
+
+    /// Called after a successful folder start. Snapshots survive that start plus seven
+    /// days. The first successful start stamps them; later starts may prune them.
+    pub fn successful_start(&self) -> Result<(), TreeError> {
+        use super::quarantine::{beside, sync_parent, write_durable};
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
+        let prefix = format!(
+            "{}.pre-",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        );
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        for entry in std::fs::read_dir(super::quarantine::parent(path))? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(version) = name.strip_prefix(&prefix) else {
+                continue;
+            };
+            let numeric =
+                |value: &str| !value.is_empty() && value.bytes().all(|c| c.is_ascii_digit());
+            if !numeric(version)
+                && !version
+                    .split_once('-')
+                    .is_some_and(|(v, stamp)| numeric(v) && super::quarantine::is_timestamp(stamp))
+            {
+                continue;
+            }
+            let stamp = beside(&entry.path(), ".successful-start");
+            match std::fs::read_to_string(&stamp) {
+                Ok(stamp_text)
+                    if stamp_text
+                        .trim()
+                        .parse::<u64>()
+                        .is_ok_and(|then| now.saturating_sub(then) >= 7 * 86400) =>
+                {
+                    std::fs::remove_file(entry.path())?;
+                    std::fs::remove_file(stamp)?;
+                    sync_parent(path)?;
+                }
+                Ok(_) => (),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    write_durable(&stamp, now.to_string().as_bytes())?
+                }
+                Err(error) => return Err(error.into()),
             }
         }
+        Ok(())
     }
+}
+
+fn make_snapshot(path: &Path, conn: &Connection, stored: &StoredVersion) -> Result<(), TreeError> {
+    use super::quarantine::{beside, sync_parent};
+    let StoredVersion::Version(version) = stored else {
+        unreachable!()
+    };
+    let first = beside(path, &format!(".pre-{version}"));
+    // A retry may follow real work by the older build. Preserve the previous snapshot
+    // and snapshot the current WAL too, instead of silently using stale recovery bytes.
+    let snapshot = if first.try_exists()? {
+        beside(
+            path,
+            &format!(".pre-{version}-{}", super::quarantine::timestamp()),
+        )
+    } else {
+        first
+    };
+    // VACUUM reads the committed WAL too; a file copy of the main database would not.
+    let temporary = tempfile::Builder::new()
+        .prefix(".store-snapshot-")
+        .tempdir_in(super::quarantine::parent(path))?;
+    let output = temporary.path().join("snapshot");
+    conn.execute("VACUUM INTO ?1", [output.to_string_lossy().as_ref()])?;
+    std::fs::File::open(&output)?.sync_all()?;
+    std::fs::rename(output, snapshot)?;
+    sync_parent(path)?;
+    Ok(())
 }
 
 #[cfg(test)]

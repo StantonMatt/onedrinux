@@ -26,6 +26,8 @@
 // test: a_reader_that_was_not_on_disk_goes_on_from_the_backing_file_once_it_landed
 // test: a_directory_read_in_parts_reads_the_items_it_listed_first
 
+// test: a_pending_replacement_is_woken_only_after_its_last_reader_closes
+
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::sync::{Arc, Mutex};
@@ -97,7 +99,8 @@ pub(crate) struct ItemHandles {
     handles: Mutex<Handles>,
     /// Serializes read-open registration with app-download free-up. Never held while
     /// waiting for a write-operation job: that thread takes this gate to free a copy.
-    pub(super) reader_gate: Mutex<()>,
+    pub(crate) reader_gate: Mutex<()>,
+    readers_changed: tokio::sync::Notify,
 }
 
 impl ItemHandles {
@@ -156,7 +159,7 @@ impl ItemHandles {
 
     /// An open reader keeps its copy for the entire handle lifetime, including a
     /// remote handle whose download has just landed.
-    pub(super) fn is_open_for_reading(&self, item: LocalItemId) -> bool {
+    pub(crate) fn is_open_for_reading(&self, item: LocalItemId) -> bool {
         crate::panic::lock(&self.handles).by_fh.values().any(|handle| matches!(handle,
             OpenItemHandle::File(OpenItemFile::ReadingNotOnDisk { item: read, .. } | OpenItemFile::ReadingBackingFile { item: read, .. }) if *read == item))
     }
@@ -179,12 +182,34 @@ impl ItemHandles {
         }
     }
 
+    /// Wait without a tree lock for resident readers (including mmap lifetimes) to
+    /// close. The landing checks once more under `reader_gate` before exchanging files.
+    pub(crate) async fn wait_for_no_readers<F, Check>(&self, item: LocalItemId, current: F) -> bool
+    where F: Fn() -> Check, Check: std::future::Future<Output = bool> {
+        loop {
+            let changed = self.readers_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if !current().await { return false; }
+            if !self.is_open_for_reading(item) { return true; }
+            changed.await;
+        }
+    }
+
+    /// Wake staged replacements after a committed row change, including a local edit
+    /// or truncate. Their predicate checks the exact planned generations again.
+    pub(super) fn versions_changed(&self) {
+        self.readers_changed.notify_waiters();
+    }
+
     /// Closes the reader `fh` holds. Called by release, on the mount's thread.
     pub(super) fn close_reader(&self, fh: Fh) {
         let mut handles = crate::panic::lock(&self.handles);
         if matches!(handles.by_fh.get(&fh), Some(OpenItemHandle::File(OpenItemFile::ReadingNotOnDisk { .. } | OpenItemFile::ReadingBackingFile { .. }))) {
             handles.by_fh.remove(&fh);
         }
+        drop(handles);
+        self.readers_changed.notify_waiters();
     }
 
     /// The writer `fh` holds, and what its close will leave: `StillOpenElsewhere` while

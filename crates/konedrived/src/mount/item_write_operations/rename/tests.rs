@@ -247,11 +247,12 @@ fn a_file_not_on_disk_is_renamed_with_no_disk_change() {
     assert_eq!(operations.id("renamed.txt"), remote);
     // Over another file that is not on disk: the rows alone again.
     let other = operations.fixture.show_onedrive_file("other.txt", b"also in OneDrive").local_item_id;
-    assert_eq!(operations.rename("renamed.txt", "other.txt"), Ok(()));
+    assert_eq!(operations.rename("renamed.txt", "other.txt"), Err(Errno::EAGAIN));
     assert!(!reached.load(std::sync::atomic::Ordering::SeqCst), "no name changed on disk: no record");
-    assert_eq!(operations.id("other.txt"), remote);
-    // Both are items of OneDrive: each keeps its binding, and the displaced one is a removal to send.
-    assert!(operations.fixture.find_item(other).is_some_and(|row| row.local.is_none() && row.onedrive_item.is_some()));
+    assert_eq!(operations.id("renamed.txt"), remote);
+    assert_eq!(operations.id("other.txt"), other);
+    // A cloud-only source must be hydrated before its binding can be exchanged.
+    assert!(operations.fixture.find_item(other).is_some_and(|row| row.local.is_some()));
     assert!(std::fs::read_dir(operations.fixture.folder()).unwrap().next().is_none(), "nothing is on disk");
     operations.fixture.assert_rows_and_disk_agree();
 }
@@ -482,4 +483,23 @@ fn a_directory_with_a_file_open_for_writing_in_it_is_renamed_and_the_close_is_wr
     assert_eq!((row.local.as_ref().unwrap().content.as_ref().unwrap().size(), row.content_before_write.clone(), row.file_sync_state()), (32, None, Some(FileSyncState::ModifiedHere)));
     assert_eq!(operations.list_records(), []);
     operations.fixture.assert_rows_and_disk_agree();
+}
+
+#[test]
+fn a_bound_temporary_saved_over_a_bound_file_marks_the_original_cloud_id() {
+    let operations = OperationsFixture::new();
+    let original = operations.fixture.show_onedrive_file("original.txt", b"original").local_item_id;
+    let temporary = operations.fixture.show_onedrive_file("temporary.txt", b"saved").local_item_id;
+    operations.fixture.land_copy(original, b"original");
+    operations.fixture.land_copy(temporary, b"saved");
+    let handle = std::fs::File::open(operations.fixture.disk_path("temporary.txt")).unwrap();
+    assert_eq!(operations.rename("temporary.txt", "original.txt"), Ok(()));
+    let row = operations.fixture.find_item_at("original.txt").unwrap();
+    assert_eq!(row.local_item_id, temporary);
+    assert_eq!(row.onedrive_item, Some(ItemFixture::onedrive_reference_of("original.txt")));
+    assert_eq!(operations.fixture.read_disk_marks("original.txt").onedrive_item_id.as_deref(), Some("original.txt"));
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    (&handle).read_to_end(&mut bytes).unwrap();
+    assert_eq!(bytes, b"saved", "the open descriptor still names the replacing inode");
 }

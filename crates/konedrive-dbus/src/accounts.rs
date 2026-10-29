@@ -44,6 +44,8 @@ pub trait Accounts {
     /// and nothing ended, when `config.toml` cannot be read, no client ID can be had or
     /// the listener cannot be bound.
     fn sign_in(&self) -> zbus::Result<(u32, String)>;
+    /// Adds an account in read-only or read-write mode; empty uses the daemon default.
+    fn add(&self, mode: &str) -> zbus::Result<(u32, String)>;
     /// Cancels the sign-in `sign_in`: `true` when this call ended it, and `cancelled`
     /// follows. `false` for a number that is not under way, which includes a sign-in whose
     /// account is being made at that moment: its own `SignInFinished` says how it ended.
@@ -150,6 +152,14 @@ pub trait Account {
     fn id(&self) -> zbus::Result<String>;
     #[zbus(property)]
     fn label(&self) -> zbus::Result<String>;
+    /// Restricts writes to these relative subtrees. An empty list refuses every write.
+    fn set_write_scope(&self, paths: &[&str]) -> zbus::Result<()>;
+    /// Removes the restriction; read-only mode still applies.
+    fn clear_write_scope(&self) -> zbus::Result<()>;
+    #[zbus(property)]
+    fn write_paths(&self) -> zbus::Result<Vec<String>>;
+    #[zbus(property)]
+    fn write_scope_enabled(&self) -> zbus::Result<bool>;
     /// The mode the account runs in: `read-only` or `read-write`.
     #[zbus(property)]
     fn mode(&self) -> zbus::Result<String>;
@@ -509,7 +519,7 @@ pub trait TokenExport {
     gen_blocking = false
 )]
 pub trait DevTools {
-    /// Adds a signed-out, read-only account with no folder under `label`, which never has
+    /// Adds a signed-out account in the daemon default mode with no folder under `label`, which never has
     /// to sign in; its object path. Refused `InvalidArgs` for a label that breaks the rules.
     fn add_account(&self, label: &str) -> zbus::Result<OwnedObjectPath>;
 }

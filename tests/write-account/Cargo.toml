@@ -3,6 +3,7 @@
 # wiremock. How to run it: docs/design/writes.md, "Running against the test account".
 [package]
 name = "konedrive-write-test"
+default-run = "konedrive-write-test"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

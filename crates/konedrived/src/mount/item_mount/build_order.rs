@@ -5,7 +5,7 @@
 //!    write bits of everything in it given back (`BackingDirectory::restore_write_bits`):
 //!    the check at start renames entries and writes marks, and the parts make and remove
 //!    what is in it (a build that fails after this takes them off again);
-//!    `UploadRules::new(ignore)`; the time the mount starts at, asked of the setup's
+//!    `UploadRules::new(ignore).with_write_scope(write_scope)`; the time the mount starts at, asked of the setup's
 //!    clock;
 //! 2. `AccessModeSwitch::new(ReadOnly)`; `MountTakeDown::new(switch, report)`;
 //!    `WriteOperationThread::start(tree_lock)`; `PlaceChanges::new` with that thread's
@@ -82,10 +82,10 @@ pub(in crate::mount) fn build(setup: ItemMountSetup, runtime: tokio::runtime::Ha
 
 /// Steps 1 to 7 over a backing directory that is open and has its write bits.
 fn build_over(backing_directory: Arc<BackingDirectory>, setup: ItemMountSetup, runtime: tokio::runtime::Handle) -> Result<(ItemMount, ItemKernelRequests), ItemMountError> {
-    let ItemMountSetup { root, store_path, store, drive_id, source, report, pool, split_download_share, download_after, download_guard, free_space_reserve, tree_lock, ignore, sync_plan_wake, running_steps, published_plan, take_down_report, clock } = setup;
+    let ItemMountSetup { root, store_path, store, drive_id, source, report, pool, split_download_share, download_after, download_guard, free_space_reserve, tree_lock, ignore, write_scope, sync_plan_wake, running_steps, published_plan, take_down_report, clock } = setup;
     let folder = root.path;
     let mount_started_at = clock();
-    let upload_rules = Arc::new(UploadRules::new(ignore));
+    let upload_rules = Arc::new(UploadRules::new(ignore).with_write_scope(write_scope));
 
     let access_mode_switch = Arc::new(AccessModeSwitch::new(AccessMode::ReadOnly));
     let mount_take_down = Arc::new(MountTakeDown::new(Arc::clone(&access_mode_switch), take_down_report));
@@ -107,7 +107,7 @@ fn build_over(backing_directory: Arc<BackingDirectory>, setup: ItemMountSetup, r
     let inotify_bridge = Arc::new(ItemInotifyBridge::new(folder.clone()));
     let range_readers = Arc::new(RangeReaders::new(Arc::clone(&pool), runtime.clone()));
     let range_fetcher = Arc::new(ItemRangeFetcher::new(range_readers, Arc::clone(&source), report.throttle_wait.clone()));
-    let download_landing = Arc::new(ItemDownloadLanding::new(Arc::clone(&place_changes), store.clone(), Arc::clone(&running_steps), Arc::clone(&mount_take_down)));
+    let download_landing = Arc::new(ItemDownloadLanding::new(Arc::clone(&place_changes), store.clone(), Arc::clone(&running_steps), Arc::clone(&mount_take_down), Arc::clone(&item_handles))?);
     let downloader = Arc::new(ItemDownloader::new(
         Arc::clone(&backing_directory),
         Arc::clone(&download_states),
@@ -123,7 +123,14 @@ fn build_over(backing_directory: Arc<BackingDirectory>, setup: ItemMountSetup, r
     ).with_read_reserve(Arc::clone(&download_guard.disks), free_space_reserve)
         .with_app_downloads(download_guard.downloads.account(&store_path)));
 
-    let free_up = Arc::new(ItemFreeUp::new(Arc::clone(&place_changes), store.clone(), Arc::clone(&item_handles), Arc::clone(&download_states), Arc::clone(&running_steps), Arc::clone(&inotify_bridge)));
+    // An unread part can contain a unique copy. Preserve all copies until a clean
+    // restart; published policy and recovery holds also protect otherwise clean rows.
+    let uncertain = start_check_findings.has_unread_part || start_check_findings.unresolved_path_count > 0;
+    let free_up_plan = Arc::clone(&published_plan);
+    let free_up = Arc::new(ItemFreeUp::new(Arc::clone(&place_changes), store.clone(), Arc::clone(&item_handles), Arc::clone(&download_states), Arc::clone(&running_steps), Arc::clone(&inotify_bridge))
+        .with_protection(Arc::new(move |item| uncertain || matches!(free_up_plan.find_answer(item),
+            Some(crate::sync_parts::published_plan::ItemAnswer::Waiting(_)
+                | crate::sync_parts::published_plan::ItemAnswer::Fault(_))))));
     let item_content_files = Arc::new(ItemContentFiles::new(Arc::clone(&place_changes), store_path, Arc::clone(&item_handles)));
     let directory_states = super::super::directory_states::DirectoryStates::build(
         &store, Arc::clone(&download_states), Arc::clone(&running_steps), Arc::clone(&published_plan), Arc::clone(&inotify_bridge),

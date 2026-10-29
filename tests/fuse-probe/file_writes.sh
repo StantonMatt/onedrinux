@@ -246,6 +246,44 @@ save_by_rename_from_a_name_that_is_not_ignored_is_one_update() {
     check_one_update_of report.txt A 'the second draft'
 }
 
+# The temporary has finished uploading before the save. The original cloud item and
+# its history must survive; only the temporary cloud item goes to the bin.
+uploaded_temporary_saved_over_a_cloud_file_keeps_the_original_id() {
+    begin_folder
+    seed_file A R report.txt 'the first draft'
+    register_folder
+    user "printf 'the second draft' > temporary.txt"
+    check_onedrive_holds temporary.txt 'the second draft'
+    check_sent
+    local temporary
+    temporary=$(onedrive id temporary.txt)
+    user "mv temporary.txt report.txt"
+    check_onedrive_holds report.txt 'the second draft'
+    check_within 30 "the temporary cloud file was removed" onedrive_lacks temporary.txt
+    check_sent
+    check "the original cloud identity survived" "$(onedrive id report.txt)" A
+    check "only the temporary went to the bin" "$(onedrive bin)" "$temporary"
+    check "no DELETE targeted the original" "$(onedrive count DELETE items/A)" 0
+    check_folder_holds report.txt 'the second draft'
+    check_state report.txt hydrated
+}
+
+cloud_only_source_over_a_cloud_file_waits_for_hydration() {
+    begin_folder
+    seed_file A R report.txt 'original'
+    seed_file T R temporary.txt 'replacement'
+    register_folder
+    check "a cloud-only binding exchange is refused" "$(errno_of "os.rename('temporary.txt', 'report.txt')")" EAGAIN
+    check "both cloud identities stay" "$(onedrive id report.txt) $(onedrive id temporary.txt)" "A T"
+    check "nothing was deleted" "$(onedrive bin)" ""
+    download temporary.txt
+    user "mv temporary.txt report.txt"
+    check_onedrive_holds report.txt 'replacement'
+    check_within 30 "the temporary cloud file was removed after hydration" onedrive_lacks temporary.txt
+    check "the original cloud identity survived" "$(onedrive id report.txt)" A
+    check_sent
+}
+
 # -- a truncation
 
 truncated_downloaded_file_is_uploaded_shorter() {
@@ -659,6 +697,24 @@ pinned_directory_keeps_what_is_in_it_downloaded() {
     check_folder_holds docs/made.txt 'made in the pinned directory'
 }
 
+free_up_keeps_pending_renames() {
+    begin_folder
+    seed_file A R a.txt 'the resident copy'
+    register_folder
+    download a.txt
+    onedrive outage on > /dev/null
+    user "mv a.txt renamed.txt"
+    wait_for 10 upload_queue_has_rows
+    check_holds "a pending rename refuses dehydrate" "$(daemon dehydrate "$F/renamed.txt")" "refused"
+    check_holds "free-up leaves a pending rename" "$(daemon free-up-space)" "files: 0"
+    check_state renamed.txt hydrated
+    check_folder_holds renamed.txt 'the resident copy'
+    onedrive outage off > /dev/null
+    daemon refresh > /dev/null
+    check_within 30 "the rename is eventually sent" onedrive_has renamed.txt
+    check_sent
+}
+
 free_up_keeps_unsent_changes() {
     begin_folder
     seed_folder D R docs
@@ -822,11 +878,56 @@ round_trip_leaves_onedrive_and_the_folder_alike() {
     check "the cycle changed nothing in the folder" "$(user "find . -mindepth 1 -printf '%p %s %T@\n' | sort")" "$snapshot"
 }
 
+# Trial writes work inside the allowlist. Outside mutations fail before hydration or
+# sending, including both ends of renames and unsupported namespace/xattr operations.
+write_scope_allows_only_the_trial_subtree() {
+    begin_folder
+    seed_folder T R Trial
+    seed_folder O R Outside
+    seed_folder E O empty
+    seed_file A O a.txt 'unchanged outside'
+    seed_file I T inside.txt 'inside'
+    register_folder
+    check "scope saved" "$(daemon write-scope set Trial)" saved
+    local changes
+    changes=$(onedrive changes)
+    check "create outside" "$(errno_of "os.close(os.open('Outside/new', os.O_CREAT | os.O_WRONLY, 0o644))")" EROFS
+    check "mkdir outside" "$(errno_of "os.mkdir('Outside/newdir')")" EROFS
+    check "write-open outside" "$(errno_of "os.close(os.open('Outside/a.txt', os.O_WRONLY))")" EROFS
+    check "overwrite outside" "$(errno_of "os.close(os.open('Outside/a.txt', os.O_WRONLY | os.O_TRUNC))")" EROFS
+    check "truncate outside" "$(errno_of "os.truncate('Outside/a.txt', 0)")" EROFS
+    check "time outside" "$(errno_of "os.utime('Outside/a.txt', (1, 1))")" EROFS
+    check "mode outside" "$(errno_of "os.chmod('Outside/a.txt', 0o755)")" EROFS
+    check "unlink outside" "$(errno_of "os.unlink('Outside/a.txt')")" EROFS
+    check "rmdir outside" "$(errno_of "os.rmdir('Outside/empty')")" EROFS
+    check "rename source outside" "$(errno_of "os.rename('Outside/a.txt', 'Trial/in.txt')")" EROFS
+    check "rename destination outside" "$(errno_of "os.rename('Trial/inside.txt', 'Outside/in.txt')")" EROFS
+    check "symlink outside" "$(errno_of "os.symlink('a.txt', 'Outside/link')")" EROFS
+    check "link source outside" "$(errno_of "os.link('Outside/a.txt', 'Trial/link')")" EROFS
+    check "link destination outside" "$(errno_of "os.link('Trial/inside.txt', 'Outside/link')")" EROFS
+    check "setxattr outside" "$(errno_of "os.setxattr('Outside/a.txt', 'user.test', b'x')")" EROFS
+    check "removexattr outside" "$(errno_of "os.removexattr('Outside/a.txt', 'user.test')")" EROFS
+    check "no outside write was sent" "$(onedrive changes)" "$changes"
+    check "outside file was not hydrated" "$(state_of Outside/a.txt)" online-only
+    user "mkdir Trial/newdir && printf 'allowed' > Trial/newdir/new.txt && printf 'edited' > Trial/inside.txt"
+    check_onedrive_holds Trial/newdir/new.txt allowed
+    check_onedrive_holds Trial/inside.txt edited
+    check_sent
+    download Outside/a.txt
+    daemon free-up "$F/Outside/a.txt" > /dev/null
+    check_state Outside/a.txt online-only
+    check "scope cleared" "$(daemon write-scope clear)" saved
+    user "printf 'after trial' > Outside/after.txt"
+    check_onedrive_holds Outside/after.txt 'after trial'
+    check_sent
+}
+
 # The group: every scenario of writing at the level of files.
 file_writes() {
     echo "==== writing at the level of files ===="
     ip link set lo up
     for name in \
+        write_scope_allows_only_the_trial_subtree \
         new_file_arrives_in_onedrive \
         new_directory_with_files_arrives_in_onedrive \
         edit_of_downloaded_file_is_uploaded \
@@ -841,6 +942,8 @@ file_writes() {
         save_by_rename_over_downloaded_file_is_one_update \
         save_by_rename_over_file_that_is_not_downloaded_is_one_update \
         save_by_rename_from_a_name_that_is_not_ignored_is_one_update \
+        uploaded_temporary_saved_over_a_cloud_file_keeps_the_original_id \
+        cloud_only_source_over_a_cloud_file_waits_for_hydration \
         truncated_downloaded_file_is_uploaded_shorter \
         truncated_file_that_is_not_downloaded_keeps_its_start \
         file_truncated_to_nothing_is_uploaded_empty \
@@ -860,6 +963,7 @@ file_writes() {
         pinned_file_stays_downloaded \
         pinned_directory_keeps_what_is_in_it_downloaded \
         free_up_keeps_unsent_changes \
+        free_up_keeps_pending_renames \
         daemon_killed_with_unsent_changes_sends_them_once_started_again \
         file_that_is_not_downloaded_moved_into_new_directory_is_read_there \
         tree_moved_in_from_outside_is_uploaded \

@@ -532,3 +532,121 @@ async fn a_content_the_row_no_longer_has_is_not_sent() {
     assert_eq!(outcome, StepOutcome::NotRun(StepObstacle::ContentChanged));
     assert_eq!(folder.graph.with(|cloud| cloud.log.len()), 0);
 }
+
+#[tokio::test]
+async fn write_scope_refuses_a_resumed_upload_whose_original_target_is_outside() {
+    use crate::config::{WriteScope, WriteScopeSource};
+    let content = two_fragments();
+    let (mut folder, step) = folder_with_a_new_file(&content).await;
+    let item = step.item().local_item_id;
+    run_stopped_after_the_first_fragment(&folder, &step).await;
+    folder.fixture.move_here(item, "renamed.txt");
+    folder.steps = folder.steps.with_write_scope(WriteScopeSource::new(|| WriteScope::parse(Some(&["renamed.txt".into()])).unwrap()));
+    let before = folder.count("PUT", "upload/");
+    let renamed = OneDriveStep::SendNewFile { item: folder.fixture.versions_of(item), parent: StepsFolder::root(), name: "renamed.txt".into() };
+    assert!(matches!(folder.run(renamed).await, StepOutcome::Refused(StepRefusal::Transient { .. })));
+    assert_eq!(folder.count("PUT", "upload/"), before);
+    assert!(folder.memory(item).upload_session.is_some());
+}
+
+#[tokio::test]
+async fn write_scope_keeps_an_earlier_upload_left_outside_the_allowlist() {
+    use crate::config::{WriteScope, WriteScopeSource};
+    use konedrive_tree::MismatchedItem;
+    let (mut folder, step) = folder_with_a_new_file(&bytes(1000)).await;
+    let item = step.item().local_item_id;
+    folder.graph.with(|cloud| cloud.add_file("LEFT", "R", "outside.txt", b"other content"));
+    let left = MismatchedItem::of_answer(ItemFixture::onedrive_reference_of("LEFT"), Some("c-LEFT"), Some("e-LEFT"));
+    folder.fixture.write_rows(move |store| store.step_memory().remember_mismatched_item(item, &left).map(|_| ()));
+    folder.steps = folder.steps.with_write_scope(WriteScopeSource::new(|| WriteScope::parse(Some(&["a.txt".into()])).unwrap()));
+    assert!(matches!(folder.run(step).await, StepOutcome::Refused(StepRefusal::Transient { .. })));
+    assert_eq!(folder.count("DELETE", "items/LEFT"), 0);
+    assert_eq!(folder.count("POST", "createUploadSession"), 0);
+    assert!(folder.memory(item).mismatched_item.is_some());
+    assert_eq!(folder.cloud_paths(), ["outside.txt"]);
+}
+
+fn content_answer(id: &str, size: usize, hash: Option<String>) -> serde_json::Value {
+    json!({"id":id, "name":"a.txt", "eTag":"e-confirmed", "cTag":"c-confirmed", "size":size,
+        "parentReference":{"id":"R", "driveId":"d1"}, "file":{"hashes":{"quickXorHash":hash}},
+        "fileSystemInfo":{"lastModifiedDateTime":"2024-05-01T10:00:00Z"}})
+}
+
+#[tokio::test]
+async fn a_hashless_upload_is_read_back_before_commit_and_held_if_still_unverifiable() {
+    for verifiable in [true, false] {
+        let content = bytes(1000);
+        let (folder, step) = folder_with_a_changed_file(&content).await;
+        let id = step.item().local_item_id;
+        let cloud_id = step.item().onedrive_item.as_ref().unwrap().item_id.as_str().to_owned();
+        let missing = content_answer(&cloud_id, content.len(), None);
+        let fresh = content_answer(&cloud_id, content.len(), verifiable.then(|| crate::fake_onedrive::qx(&content)));
+        folder.graph.with(|cloud| {
+            cloud.script("PUT", "upload/", ResponseTemplate::new(200).set_body_json(missing), 1);
+            cloud.script("GET", &format!("items/{cloud_id}"), ResponseTemplate::new(200).set_body_json(fresh), 1);
+        });
+        let outcome = folder.run(step.clone()).await;
+        let row = folder.fixture.find_item(id).unwrap();
+        assert_eq!(folder.count("GET", &format!("items/{cloud_id}")), 1);
+        if verifiable {
+            assert!(matches!(outcome, StepOutcome::Written { .. }), "{outcome:?}");
+            assert!(row.unsent_since.is_none());
+        } else {
+            assert!(matches!(outcome, StepOutcome::Refused(StepRefusal::Transient { .. })), "{outcome:?}");
+            assert!(row.unsent_since.is_some());
+            assert!(folder.memory(id).upload_session.is_some(), "the completed session is kept, never blindly restarted");
+            assert_eq!(folder.memory(id).upload_session.as_ref().unwrap().next_offset, content.len() as u64);
+            let puts = folder.count("PUT", "upload/");
+            let retry = folder.run(step).await;
+            assert!(matches!(retry, StepOutcome::Refused(StepRefusal::Transient { .. })), "{retry:?}");
+            assert_eq!(folder.count("PUT", "upload/"), puts, "a completed but unverifiable upload retries metadata only");
+
+            assert_eq!(folder.fixture.read_disk_file("a.txt"), Some(content));
+            assert_eq!(folder.count("DELETE", "items/"), 0, "unverifiable is no proof of corrupt remote content");
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_file_changed_after_its_last_fragment_is_never_marked_synced() {
+    use wiremock::{Mock, matchers::{method, path_regex}};
+    let content = bytes(1000);
+    let (folder, step) = folder_with_a_changed_file(&content).await;
+    let id = step.item().local_item_id;
+    let cloud_id = step.item().onedrive_item.as_ref().unwrap().item_id.as_str().to_owned();
+    let path = folder.fixture.disk_path("a.txt");
+    let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+    let response = content_answer(&cloud_id, content.len(), Some(crate::fake_onedrive::qx(&content)));
+    // The request already owns the final fragment. Edit the inode before the response,
+    // preserving size AND timestamp so that a stat-only recheck cannot catch it.
+    Mock::given(method("PUT")).and(path_regex("/upload/"))
+        .respond_with(move |_: &wiremock::Request| {
+            std::fs::write(&path, vec![b'x'; 1000]).unwrap();
+            std::fs::File::options().write(true).open(&path).unwrap().set_times(std::fs::FileTimes::new().set_modified(mtime)).unwrap();
+            ResponseTemplate::new(200).set_body_json(response.clone())
+        }).mount(&folder.graph.server).await;
+    assert_eq!(folder.run(step).await, StepOutcome::NotRun(StepObstacle::ContentChanged));
+    let row = folder.fixture.find_item(id).unwrap();
+    assert!(row.unsent_since.is_some());
+    assert_ne!(row.local.as_ref().unwrap().content, row.synced_content);
+    assert_eq!(folder.fixture.read_disk_file("a.txt"), Some(vec![b'x'; 1000]));
+}
+
+#[tokio::test]
+async fn an_acknowledged_upload_with_unreadable_metadata_keeps_its_completion_marker() {
+    let content = bytes(1000);
+    let (folder, step) = folder_with_a_changed_file(&content).await;
+    let id = step.item().local_item_id;
+    let cloud_id = step.item().onedrive_item.as_ref().unwrap().item_id.as_str().to_owned();
+    folder.graph.with(|cloud| {
+        cloud.script("PUT", "upload/", ResponseTemplate::new(200).set_body_json(json!({"id":cloud_id})), 1);
+        cloud.script("GET", &format!("items/{cloud_id}"), ResponseTemplate::new(200).set_body_json(content_answer(&cloud_id, 1000, None)), 1);
+    });
+    let outcome = folder.run(step.clone()).await;
+    assert!(matches!(outcome, StepOutcome::Refused(StepRefusal::Transient { .. })), "{outcome:?}");
+    assert_eq!(folder.memory(id).upload_session.unwrap().next_offset, 1000);
+    let puts = folder.count("PUT", "upload/");
+    assert!(matches!(folder.run(step).await, StepOutcome::Refused(StepRefusal::Transient { .. })));
+    assert_eq!(folder.count("PUT", "upload/"), puts, "the acknowledged upload is never restarted");
+    assert_eq!(folder.fixture.read_disk_file("a.txt"), Some(content));
+}

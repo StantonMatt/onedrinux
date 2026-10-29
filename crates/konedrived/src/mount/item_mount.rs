@@ -93,6 +93,7 @@ pub(crate) struct ItemMountSetup {
     pub(crate) tree_lock: Arc<tokio::sync::Mutex<()>>,
     /// The account's ignore list: what is never uploaded.
     pub(crate) ignore: SharedIgnore,
+    pub(crate) write_scope: crate::config::WriteScopeSource,
     /// Woken after every row a write operation writes.
     pub(crate) sync_plan_wake: Arc<SyncPlanWake>,
     /// Read for the sync mark and by `make`.

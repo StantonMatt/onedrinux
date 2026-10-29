@@ -39,9 +39,9 @@ fn a_store_of_todays_version_is_used() {
 }
 
 #[test]
-fn a_store_of_an_older_version_is_rebuilt_and_never_migrated() {
+fn an_unsupported_older_store_is_quarantined_and_never_deleted() {
     for version in ["8", "14", "15", "17", "19", "29"] {
-        assert_eq!(decide_old_store(&StoredVersion::Version(version.to_owned())), OldStoreDecision::Rebuild, "version {version}");
+        assert_eq!(decide_old_store(&StoredVersion::Version(version.to_owned())), OldStoreDecision::Quarantine, "version {version}");
 
         let dir = tempfile::tempdir().unwrap();
         let path = store_path(&dir);
@@ -51,7 +51,11 @@ fn a_store_of_an_older_version_is_rebuilt_and_never_migrated() {
         set_stored_version(&path, version);
         assert_eq!(stored_version(&path), StoredVersion::Version(version.to_owned()));
 
+        let original_bytes = std::fs::read(&path).unwrap();
         let (mut store, origin) = TreeStore::open_with_origin(&path).unwrap();
+        let preserved = std::fs::read_dir(dir.path()).unwrap().map(|entry| entry.unwrap().path()).find(|entry| entry.file_name().unwrap().to_string_lossy().ends_with('Z')).unwrap();
+        assert_eq!(std::fs::read(&preserved).unwrap(), original_bytes, "the original is renamed, not removed");
+        assert_eq!(find_stored_version(&preserved).unwrap(), StoredVersion::Version(version.into()));
         assert_eq!(origin, StoreOrigin::MadeEmpty { loss: Some(RebuildLoss::default()) }, "version {version}");
         assert_eq!(store.item_store().find_item(file).unwrap(), None, "nothing of the old store is carried over");
         assert_eq!(store.delta_link().unwrap(), None, "the first listing is a full one");
@@ -80,7 +84,8 @@ fn a_store_of_the_version_before_is_migrated_in_place_and_keeps_what_it_held() {
         .execute_batch(
             "DROP INDEX items_thumbnail_type;
              CREATE INDEX items_image_or_video ON items(local_item_id) WHERE (onedrive_mime LIKE 'image/%' OR onedrive_mime LIKE 'video/%');
-             ALTER TABLE thumbnail_marks DROP COLUMN is_written;",
+             ALTER TABLE thumbnail_marks DROP COLUMN is_written;
+             ALTER TABLE items DROP COLUMN onedrive_folder_ctag;",
         )
         .unwrap();
     set_stored_version(&path, "30");
@@ -115,10 +120,10 @@ fn a_store_of_the_version_before_is_migrated_in_place_and_keeps_what_it_held() {
 }
 
 #[test]
-fn a_store_of_an_unknown_version_is_rebuilt() {
-    assert_eq!(decide_old_store(&StoredVersion::Version("99".to_owned())), OldStoreDecision::Rebuild, "a newer daemon's");
-    assert_eq!(decide_old_store(&StoredVersion::Version(String::new())), OldStoreDecision::Rebuild);
-    assert_eq!(decide_old_store(&StoredVersion::NoVersion), OldStoreDecision::Rebuild);
+fn missing_metadata_is_quarantined_and_newer_versions_are_refused() {
+    assert_eq!(decide_old_store(&StoredVersion::Version("99".to_owned())), OldStoreDecision::RefuseNewer, "a newer daemon's");
+    assert_eq!(decide_old_store(&StoredVersion::Version(String::new())), OldStoreDecision::Quarantine);
+    assert_eq!(decide_old_store(&StoredVersion::NoVersion), OldStoreDecision::Quarantine);
 
     // Tables and no `meta`: a build that died while it made them. And a `meta` with no version.
     let dir = tempfile::tempdir().unwrap();
@@ -134,8 +139,8 @@ fn a_store_of_an_unknown_version_is_rebuilt() {
 }
 
 #[test]
-fn a_file_that_is_no_database_is_rebuilt() {
-    assert_eq!(decide_old_store(&StoredVersion::NotADatabase), OldStoreDecision::Rebuild);
+fn a_file_that_is_no_database_is_preserved_in_quarantine() {
+    assert_eq!(decide_old_store(&StoredVersion::NotADatabase), OldStoreDecision::Quarantine);
 
     let dir = tempfile::tempdir().unwrap();
     let path = store_path(&dir);
@@ -144,6 +149,8 @@ fn a_file_that_is_no_database_is_rebuilt() {
     let (store, origin) = TreeStore::open_with_origin(&path).unwrap();
     assert_eq!(origin, StoreOrigin::MadeEmpty { loss: None }, "nothing can be counted in it");
     assert_eq!(store.meta("schema_version").unwrap().as_deref(), Some(SCHEMA_VERSION));
+    let preserved = std::fs::read_dir(dir.path()).unwrap().map(|entry| entry.unwrap().path()).find(|entry| entry.file_name().unwrap().to_string_lossy().ends_with('Z')).unwrap();
+    assert_eq!(std::fs::read(preserved).unwrap(), b"this is not sqlite at all, not even a little");
 }
 
 #[test]
@@ -183,7 +190,7 @@ fn where_there_is_no_store_one_is_made() {
 }
 
 #[test]
-fn a_rebuild_counts_what_it_loses_before_the_file_goes() {
+fn quarantine_reports_preserved_namespace_changes_before_replacement() {
     let dir = tempfile::tempdir().unwrap();
     let path = store_path(&dir);
     let mut store = store_in_file_with_listed_root(&path);
@@ -223,8 +230,9 @@ fn a_rebuild_counts_what_it_loses_before_the_file_goes() {
     assert_eq!(TreeStore::open_with_origin(&path).unwrap().1, StoreOrigin::Kept);
     set_stored_version(&path, "19");
     let (store, origin) = TreeStore::open_with_origin(&path).unwrap();
-    assert_eq!(origin, StoreOrigin::MadeEmpty { loss: Some(expected) });
-    assert_eq!(count_rebuild_loss(&store.conn), Some(RebuildLoss::default()), "and the store that was made holds none of it");
+    assert_eq!(origin, StoreOrigin::MadeEmpty { loss: Some(RebuildLoss { pins: 0, unsent_changes_not_on_disk: 6, ..expected }) });
+    assert_eq!(store.pins().unwrap().len(), 2, "pins are carried over by OneDrive id");
+    assert!(store.meta("quarantined_changes").unwrap().unwrap().contains("6 unsent"));
 
     // Tables of another shape: nothing is answered rather than a wrong count.
     let other = Connection::open_in_memory().unwrap();
@@ -314,3 +322,5 @@ fn no_upload_session_is_listed_where_none_is_to_cancel() {
     Connection::open(&bare).unwrap().execute_batch("CREATE TABLE upload_sessions (address TEXT);").unwrap();
     assert!(list_old_store_upload_sessions(&bare).unwrap().is_empty(), "a shape that cannot be read holds nothing to cancel");
 }
+
+mod safety;

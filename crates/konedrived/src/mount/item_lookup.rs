@@ -533,6 +533,7 @@ impl SyncMark {
 /// OWN name is ignored, and the plan is not given an item that is left here, so it has
 /// no answer to tell one below an ignored directory by.
 pub(super) fn decide_sync_mark(item: &Item, is_ignored: bool, has_running_step: bool, answer: Option<&ItemAnswer>, has_refusal_for_good: bool) -> Option<SyncMark> {
+    if has_pending_replacement(item) { return Some(SyncMark::Pending); }
     if item.local.is_none() || item.unsent_since.is_none() || is_ignored {
         return None;
     }
@@ -543,6 +544,15 @@ pub(super) fn decide_sync_mark(item: &Item, is_ignored: bool, has_running_step: 
         _ if decide_is_shown_blocked(answer, has_refusal_for_good) => Some(SyncMark::Blocked),
         Some(ItemAnswer::Planned(_) | ItemAnswer::Waiting(_) | ItemAnswer::Fault(_)) | None => Some(SyncMark::Pending),
     }
+}
+
+/// A resident old version that is waiting for a safe incoming replacement.
+pub(super) fn has_pending_replacement(item: &Item) -> bool {
+    let local = item.local.as_ref().and_then(|v| v.content.as_ref());
+    let remote = item.onedrive.as_ref().and_then(|v| v.content.as_ref());
+    item.kind == ItemKind::File && item.content_presence == konedrive_tree::ContentPresence::OnDisk
+        && local.is_some() && remote.is_some() && local == item.synced_content.as_ref()
+        && !konedrive_tree::is_same_content_but_for_time(local, remote)
 }
 
 #[cfg(test)]

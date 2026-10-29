@@ -35,7 +35,7 @@ lists their checksums (`sha256sum -c --ignore-missing SHA256SUMS`).
    new `~/OneDrive`. A folder with anything in it, or another account's, is refused, and the
    dialog asks again. If you close it, **Choose Folder…** on Status opens it again.
 
-The folder starts read-only; **Two-way sync** on OneDrive Settings turns on uploading (see
+New accounts start with two-way sync; existing accounts keep their mode (see
 "Uploading changes").
 
 Your OneDrive appears in that folder: every file with its real name and size, taking no space until
@@ -188,13 +188,29 @@ sent to OneDrive yet, the window says how many before it goes on: they stay only
 
 ## Uploading changes
 
-**Off until you turn it on.** Every account starts read-only: its files cannot be changed here
-(a program that tries is told the folder is read-only), so nothing can drift from OneDrive by
-accident.
+**New accounts are two-way by default.** Their first browser sign-in asks for permission to
+change files, so only one sign-in is needed. To add an account read-only, use
+`konedrivectl account add --read-only`. Existing accounts keep their mode. To switch an existing
+read-only account, use **Two-way sync** on OneDrive Settings or
+`konedrivectl account mode read-write`; that switch asks for write consent in the browser.
 
-Turn it on with **Two-way sync** on OneDrive Settings, or when you choose the folder. The browser
-opens once more, for permission to change your files. From then on, what you add, change, move or
-delete in the folder is added, changed, moved or deleted in your OneDrive.
+For a staged trial, limit writes before changing any files. On an existing read-only account,
+set this before `account mode read-write`, so pending changes outside the trial are held too:
+
+```sh
+konedrivectl --account ACCOUNT account write-scope set Trial
+konedrivectl --account ACCOUNT account write-scope show
+```
+
+Only `Trial` and everything below it can then be changed. Programs receive “Read-only file
+system” outside it; moving a file across the scope boundary is refused in either direction.
+Reading, downloading, keeping files on this device and freeing space still work everywhere.
+The sender also refuses pending changes outside the scope. Set this while no changes are being
+sent: operations already admitted may finish. To allow writes throughout the drive again:
+
+```sh
+konedrivectl --account ACCOUNT account write-scope clear
+```
 
 - **What goes up**: new files and folders, edits, renames, moves and deletes. A changed file goes
   up a couple of seconds after the last change, once no program has it open for writing. Status
@@ -344,6 +360,13 @@ whole OneDrive; the apps you allowed or blocked are kept for when it is on again
   folder; `config.toml.v1` is the single-account file it was migrated from, if any). Each
   account's state is in `~/.local/state/konedrive/accounts/<id>/`: `account.json` (cached name
   and quota) and `fuse.sqlite` (the items of the drive, the pins, the activity log and the
-  conflicts). That file can be lost without losing a file: it is made again from OneDrive and
-  the folder, but the pins and the activity log start empty. Each account's refresh token is in
+  conflicts). Keep that database: it also holds unsent moves, removals and pin exceptions.
+  Normal upgrades preserve its rows through a migration and snapshot. An unsupported older or
+  damaged store is quarantined; readable pins return and pending namespace changes are exported
+  for manual recovery, with their count and path in Status's error. The newest three quarantines
+  are kept. A downgrade that finds a newer schema stops with instructions: install the newer
+  build, or stop the service and use `konedrivectl store reset <store-path>`. Reset preserves the
+  old store; it never replays pending removals or moves. Disconnecting also preserves the store;
+  removing an account archives its state directory beside the original with `.removed-<timestamp>`.
+  Each account's refresh token is in
   KWallet, under `KOneDrive: <email>`, and never leaves it (see SECURITY.md).

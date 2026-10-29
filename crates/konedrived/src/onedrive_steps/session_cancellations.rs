@@ -17,6 +17,7 @@
 //!
 //! **Tested without the rest**, against the fixture's fake OneDrive:
 // test: a_session_to_cancel_is_cancelled_and_forgotten
+// test: write_scope_keeps_opaque_cleanup_sessions_without_sending
 // test: a_session_onedrive_no_longer_knows_is_forgotten
 // test: the_next_try_is_a_minute_after_the_first_failure_and_doubles_to_an_hour
 // test: an_item_an_upload_left_is_removed_while_it_is_unchanged_since_that_upload_and_forgotten
@@ -100,6 +101,7 @@ enum CleanedOutcome {
 #[derive(Clone)]
 pub(crate) struct SessionCancellations {
     graph: GraphAccess,
+    write_scope: crate::config::WriteScopeSource,
     /// What settles a request record that stands.
     lost_answers: LostAnswers,
     /// Asked whether the step of a record's item runs: its record is the step's then.
@@ -109,7 +111,12 @@ pub(crate) struct SessionCancellations {
 
 impl SessionCancellations {
     pub fn new(graph: GraphAccess, lost_answers: LostAnswers, running_steps: Arc<RunningSteps>) -> Self {
-        Self { graph, lost_answers, running_steps, tries: Arc::default() }
+        Self { graph, lost_answers, running_steps, tries: Arc::default(), write_scope: Default::default() }
+    }
+
+    pub(crate) fn with_write_scope(mut self, source: crate::config::WriteScopeSource) -> Self {
+        self.write_scope = source;
+        self
     }
 
     /// Whether the next try of `thing` is not due at `now`.
@@ -165,6 +172,9 @@ impl SessionCancellations {
 
     /// Cancels the session at `address` and forgets it when it is gone; what came of it.
     async fn cancel_one_session(&self, address: &UploadSessionAddress) -> CleanedOutcome {
+        // The cancellation table has only an opaque URL, no path to authorize. Let
+        // abandoned sessions expire while restricted rather than changing an unknown item.
+        if !self.write_scope.get().unrestricted() { return CleanedOutcome::Failed { retry_after: None }; }
         let cancelled = {
             let _slot = self.graph.drive.pool().acquire(Class::Metadata).await;
             self.graph.drive.cancel_upload(address.as_str()).await
@@ -236,6 +246,9 @@ impl SessionCancellations {
     /// Removes `left` in OneDrive while it is still what the upload left, and forgets it
     /// when it is removed, gone or another's by now; what came of it.
     async fn remove_one_mismatched_item(&self, left: &MismatchedItem) -> CleanedOutcome {
+        if !super::write_scope::allows_reference(&self.graph, &self.write_scope, &left.item).await {
+            return CleanedOutcome::Failed { retry_after: None };
+        }
         // The Graph client asks in the account's own drive: an item of another is not this client's to reach.
         if left.item.drive_id != self.graph.drive_id {
             tracing::warn!("an item an upload left is in another drive than the folder's: it is not removed");

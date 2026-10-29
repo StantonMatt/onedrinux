@@ -10,6 +10,8 @@ publish = false
 # in memory, `off_runtime` and the bench's `bench_sql`. Only tests turn it on (the
 # daemon's as a dev-dependency); nothing that ships is built with it.
 testing = []
+# Only the FUSE VM probe can pause an actual migration before commit.
+fault-injection = []
 
 [dependencies]
 icu_normalizer.workspace = true
@@ -20,7 +22,7 @@ serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+tempfile.workspace = true
 
 [dev-dependencies]
 libc.workspace = true
-tempfile.workspace = true

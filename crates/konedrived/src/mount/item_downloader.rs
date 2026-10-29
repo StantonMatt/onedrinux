@@ -134,6 +134,10 @@
 // test: the_plans_download_waits_the_wait_out
 // test: the_first_file_refused_during_a_wait_is_told_and_no_failure_is_recorded
 
+// test: a_failed_replacement_keeps_the_old_copy_until_a_verified_retry_lands
+// test: a_replacement_that_cannot_leave_the_disk_reserve_keeps_the_old_copy
+// test: hashless_remote_bytes_never_hydrate_a_write_open_as_clean
+
 use std::fs::File;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -217,7 +221,8 @@ pub(super) fn decide_content_asker(asker: &DownloadAsker) -> ContentAsker {
 /// version for the plan's pin, the content alone for anyone else. Pure.
 pub(super) fn decide_landing_condition(file: &ItemToDownload, asker: &DownloadAsker) -> LandingCondition {
     match asker {
-        DownloadAsker::PlanPin { planned_from } => LandingCondition::VersionsUnchanged { item: planned_from.clone() },
+        DownloadAsker::PlanPin { planned_from, .. } if planned_from.local.as_ref().and_then(|v| v.content.as_ref()) != Some(&file.content) => LandingCondition::ReplaceVersions { item: planned_from.clone() },
+        DownloadAsker::PlanPin { planned_from, .. } => LandingCondition::VersionsUnchanged { item: planned_from.clone() },
         DownloadAsker::Read | DownloadAsker::OpenForWriting | DownloadAsker::FilesInterface => LandingCondition::ContentUnchanged { item: file.item, downloaded: file.content.clone() },
     }
 }
@@ -637,6 +642,15 @@ impl ItemDownloader {
             Ok(Err(error)) => return Ok(fail(error)),
             Err(_) => return Ok(ItemLandingOutcome::Failed { errno: libc::EIO }),
         }
+        let condition = decide_landing_condition(file, asker);
+        if matches!(condition, LandingCondition::ReplaceVersions { .. }) {
+            // The transfer is complete. A long-lived reader must not occupy a network
+            // slot while the verified replacement waits for the kernel's old inode.
+            slot.succeeded();
+            drop(slot);
+            let landing_lease = match asker { DownloadAsker::PlanPin { landing_lease, .. } => landing_lease.as_ref(), _ => None };
+            return Ok(self.land_with_lease(&staged, condition, attribution.cloned(), landing_lease).await);
+        }
         let mut outcome = self.land(&staged, decide_landing_condition(file, asker), attribution.cloned()).await;
         if outcome == ItemLandingOutcome::StepStopped {
             // The plan's step was stopped and this download still runs: somebody else
@@ -653,9 +667,28 @@ impl ItemDownloader {
     /// thread of the runtime. A thread that is stopped drops the job: the folder is no
     /// longer served, and nothing lands.
     async fn land(&self, staged: &Arc<File>, condition: LandingCondition, attribution: Option<crate::download_guard::DownloadTicket>) -> ItemLandingOutcome {
-        let (landing, staged) = (Arc::clone(&self.download_landing), Arc::clone(staged));
-        let downloads = self.app_downloads.clone();
-        self.write_operation_thread.run_and_wait(move || landing.land_tracked(&staged, &condition, attribution.as_ref(), Some(&downloads))).await.unwrap_or(ItemLandingOutcome::Failed { errno: libc::EIO })
+        self.land_with_lease(staged, condition, attribution, None).await
+    }
+
+    async fn land_with_lease(&self, staged: &Arc<File>, condition: LandingCondition, attribution: Option<crate::download_guard::DownloadTicket>, lease: Option<&crate::sync_parts::lease::Lease>) -> ItemLandingOutcome {
+        loop {
+            if !self.download_landing.wait_for_readers(&condition).await { return ItemLandingOutcome::RowsChanged; }
+            // Readers may hold an old inode indefinitely. Lease only the final job,
+            // which checks the planned versions and reader gate again.
+            let held = match lease { Some(lease) => Some(lease.hold().await), None => None };
+            let (landing, staged, condition_for_job) = (Arc::clone(&self.download_landing), Arc::clone(staged), condition.clone());
+            let (downloads, attribution) = (self.app_downloads.clone(), attribution.clone());
+            let attempt = self.write_operation_thread.run_and_wait(move || { let _held = held; landing.try_land_tracked(&staged, &condition_for_job, attribution.as_ref(), Some(&downloads)) }).await;
+            match attempt {
+                Ok(None) => {
+                    // A reader registered between the wait and this job. Keep this very
+                    // staging file and wait again; never redownload it for that race.
+                    continue;
+                }
+                Ok(Some(outcome)) => return outcome,
+                Err(_) => return ItemLandingOutcome::Failed { errno: libc::EIO },
+            }
+        }
     }
 
     /// As [`download`](Self::download) for the plan's pin (`DownloadAsker::PlanPin {
@@ -666,8 +699,14 @@ impl ItemDownloader {
     /// plan's waiter heard ([`decide_joined_end`]); a download that was aborted, and one
     /// asked for after the stop — the mount stops — is `DownloadRefusal::Transient`.
     pub(crate) async fn download_and_land(self: &Arc<Self>, file: ItemToDownload, planned_from: ItemVersions) -> Result<ItemLandingOutcome, DownloadRefusal> {
+        self.download_and_land_with_lease(file, planned_from, None).await
+    }
+
+    /// A resident-reader replacement leases only its final mutation, after all old
+    /// readers have closed. The caller cancels the download when sync stops.
+    pub(crate) async fn download_and_land_with_lease(self: &Arc<Self>, file: ItemToDownload, planned_from: ItemVersions, landing_lease: Option<crate::sync_parts::lease::Lease>) -> Result<ItemLandingOutcome, DownloadRefusal> {
         let ((waiter, heard), (answer, answered)) = (oneshot::channel(), oneshot::channel());
-        self.start_or_join(file, DownloadAsker::PlanPin { planned_from }, Some(waiter), Some(answer), None);
+        self.start_or_join(file, DownloadAsker::PlanPin { planned_from, landing_lease }, Some(waiter), Some(answer), None);
         // The waiter is answered by the download's last act: awaited also where the typed
         // answer came, so that the download is over, and its key free, when this returns.
         let (answered, heard) = (answered.await, heard.await);

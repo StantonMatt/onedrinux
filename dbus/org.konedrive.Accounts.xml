@@ -24,6 +24,15 @@
          under way ends that one as "cancelled" first, and so does
          SetClientId; a SignIn or a SetClientId that is refused ends nothing.
          How a sign-in ends is said by SignInFinished. -->
+    <!-- Adds an account with mode read-only or read-write; empty uses new_account_mode
+         (read-write by default). InvalidArgs for any other mode. The first browser
+         sign-in asks for Files.ReadWrite when two-way is selected. Uses SignInFinished
+         and CancelSignIn just like SignIn, which uses the daemon default. -->
+    <method name="Add">
+      <arg name="mode" type="s" direction="in"/>
+      <arg name="sign_in" type="u" direction="out"/>
+      <arg name="url" type="s" direction="out"/>
+    </method>
     <method name="SignIn">
       <arg name="sign_in" type="u" direction="out"/>
       <arg name="url" type="s" direction="out"/>

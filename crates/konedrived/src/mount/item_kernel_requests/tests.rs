@@ -76,7 +76,7 @@ impl Requests {
             crate::status::report::Report::nowhere(),
             fixture.folder(),
         ));
-        let landing = Arc::new(ItemDownloadLanding::new(Arc::clone(&fixture.place_changes), fixture.store.clone(), Arc::clone(&fixture.running_steps), Arc::clone(&fixture.mount_take_down)));
+        let landing = Arc::new(ItemDownloadLanding::new(Arc::clone(&fixture.place_changes), fixture.store.clone(), Arc::clone(&fixture.running_steps), Arc::clone(&fixture.mount_take_down), Arc::clone(&fixture.item_handles)).expect("the replacement observer"));
         let downloader = Arc::new(ItemDownloader::new(
             Arc::clone(&fixture.backing_directory),
             Arc::clone(&fixture.download_states),
@@ -290,17 +290,11 @@ fn seconds_of(time: std::time::SystemTime) -> i64 {
 fn a_range_of_a_file_not_on_disk_per_case() {
     // At or past the end: nothing, whatever a download wrote.
     assert_eq!(decide_range_origin(10, ContentDownload::None, 10, 4), RangeOrigin::Nothing);
-    assert_eq!(decide_range_origin(10, ContentDownload::WrittenUpTo(10), 12, 4), RangeOrigin::Nothing);
     assert_eq!(decide_range_origin(0, ContentDownload::None, 0, 4), RangeOrigin::Nothing);
     assert_eq!(decide_range_origin(10, ContentDownload::AnotherContent, 10, 4), RangeOrigin::Nothing, "and nothing is asked of OneDrive for it");
     // The read ends at the content's end.
     assert_eq!(decide_range_origin(10, ContentDownload::None, 4, 100), RangeOrigin::OneDrive { from: 4, end: 10 });
     assert_eq!(decide_range_origin(10, ContentDownload::None, 0, 4), RangeOrigin::OneDrive { from: 0, end: 4 });
-    // A running download: only what it has surely written.
-    let size = 8 * WRITTEN_BEHIND;
-    assert_eq!(decide_range_origin(size, ContentDownload::WrittenUpTo(4096 + WRITTEN_BEHIND), 0, 4096), RangeOrigin::RunningDownload { from: 0, end: 4096 });
-    assert_eq!(decide_range_origin(size, ContentDownload::WrittenUpTo(4095 + WRITTEN_BEHIND), 0, 4096), RangeOrigin::OneDrive { from: 0, end: 4096 });
-    assert_eq!(decide_range_origin(size, ContentDownload::WrittenUpTo(0), 0, 4096), RangeOrigin::OneDrive { from: 0, end: 4096 }, "a download in parts says nothing of its file, and neither does one whose bytes failed the hash");
     // A content OneDrive stated another one for: no range before the whole download was asked for anew.
     assert_eq!(decide_range_origin(10, ContentDownload::AnotherContent, 4, 100), RangeOrigin::WholeDownload { from: 4, end: 10 });
 }
@@ -474,7 +468,7 @@ fn a_read_of_a_backing_file_is_answered_on_the_mounts_thread() {
     let file = mount.fixture.show_onedrive_file("a.txt", b"hello world").local_item_id;
     mount.fixture.land_copy(file, b"hello world");
     let opened = mount.open_to_read(file).unwrap();
-    assert!(opened.keeps_cache);
+    assert!(!opened.keeps_cache, "a new open must not inherit pages of a replaced backing inode");
     assert!(matches!(mount.decide_read(opened.fh, 6, 100), Ok(ReadAnswer::Bytes(bytes)) if bytes == b"world"), "the bytes, and fewer at the end");
     assert!(matches!(mount.decide_read(opened.fh, 11, 100), Ok(ReadAnswer::Bytes(bytes)) if bytes.is_empty()));
     assert!(mount.list_fetched_ranges().is_empty(), "nothing is asked of OneDrive");
@@ -1037,6 +1031,7 @@ fn a_part_of_a_directory_reading_hands_out_the_kept_listing_and_copies_nothing()
 /// a whole fetch is answered with `size` bytes of `b'b'` under a version of their own,
 /// `served` of which come before the stream waits for ever.
 struct AnotherContentSource {
+    version: Option<crate::content_source::source::Version>,
     size: u64,
     served: usize,
     /// How often it was asked.
@@ -1045,7 +1040,7 @@ struct AnotherContentSource {
 
 impl AnotherContentSource {
     fn new(size: usize, served: usize) -> Arc<Self> {
-        Arc::new(AnotherContentSource { size: size as u64, served, fetches: Default::default() })
+        Arc::new(AnotherContentSource { version: None, size: size as u64, served, fetches: Default::default() })
     }
 
     fn count_fetches(&self) -> usize {
@@ -1074,7 +1069,7 @@ impl tokio::io::AsyncRead for HeldStream {
 impl crate::content_source::source::ContentSource for AnotherContentSource {
     async fn fetch(&self, _item_id: &str, from: u64, _end: Option<u64>) -> Result<crate::content_source::source::Fetched, crate::content_source::source::SourceError> {
         self.fetches.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let version = crate::content_source::source::Version { ctag: "c-new".into(), quick_xor: Some([7; konedrive_graph::quickxor::LEN]) };
+        let version = self.version.clone().unwrap_or_else(|| crate::content_source::source::Version { ctag: "c-new".into(), quick_xor: Some([7; konedrive_graph::quickxor::LEN]) });
         Ok(crate::content_source::source::Fetched { served_from: from, size: Some(self.size), mtime: std::time::UNIX_EPOCH, version: Some(version), stream: Box::new(HeldStream { left: self.served }) })
     }
 }
@@ -1535,3 +1530,46 @@ fn download_guard_low_space_serves_ranges_without_a_whole_download() {
     assert!(fixture.read_disk_file("remote.txt").is_none());
     requests.answer_release(opened.fh);
 }
+
+#[test]
+fn fsync_does_not_acknowledge_a_wal_sync_failure() {
+    use std::os::unix::fs::PermissionsExt;
+    let mount = Requests::new();
+    let file = mount.fixture.make_own_file("sync.txt", b"aaa").local_item_id;
+    let fh = mount.open_to_write(file).unwrap().fh;
+    mount.write(fh, 0, b"bbb").unwrap();
+    let log = mount.fixture.store_path.with_file_name("tree.db-wal");
+    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let answer = mount.ask(move |requests| requests.answer_fsync(fh));
+    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(answer, Err(Errno::EACCES), "backing fsync succeeds but the store did not: no success reply");
+    mount.ask(move |requests| requests.answer_release(fh));
+}
+
+#[test]
+fn staged_bytes_are_never_served_before_the_final_hash_even_under_the_expected_version() {
+    let fixture = ItemFixture::new();
+    let row = fixture.show_onedrive_file("big.bin", &vec![b'a'; 3 << 20]);
+    let content = local_content(&row);
+    let (ctag, quick_xor) = match &content {
+        ContentVersion::Hashed { ctag, hash, .. } => (ctag.clone().unwrap(), konedrive_graph::quickxor::decode_base64(hash.as_ref().unwrap())),
+        _ => unreachable!(),
+    };
+    let source = Arc::new(AnotherContentSource { version: Some(crate::content_source::source::Version { ctag, quick_xor }), size: content.size(), served: 2 << 20, fetches: Default::default() });
+    let bridge = Arc::clone(&fixture.inotify_bridge);
+    let mount = Requests::downloading_from(fixture, bridge, source);
+    let item = row.local_item_id;
+    let fh = mount.open_to_read(item).unwrap().fh;
+    assert!(mount.read(fh, 0, DOWNLOAD_AFTER as u32).unwrap().iter().all(|b| *b == b'a'));
+    let key = DownloadKey { item, content };
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while mount.fixture.download_states.find_running_download(&key).is_none_or(|d| d.written_up_to < 2 << 20) {
+        assert!(Instant::now() < deadline, "the staged prefix was not written");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(matches!(mount.decide_read(fh, 0, 16), Ok(ReadAnswer::Range(_))), "a prefix carrying the expected cTag is still unverified");
+    assert_eq!(mount.read(fh, 0, 16).unwrap(), vec![b'a'; 16], "never the staged b bytes");
+    mount.fixture.download_states.stop();
+}
+
+mod write_scope;

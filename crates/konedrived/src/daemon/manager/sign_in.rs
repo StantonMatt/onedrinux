@@ -61,6 +61,11 @@ impl AccountManager {
     /// ([`finish_sign_in`](Self::finish_sign_in)), at a [`cancel_sign_in`](Self::cancel_sign_in),
     /// or at the next `SignIn` or `SetClientId`.
     pub(crate) async fn sign_in(self: &Arc<Self>, connection: &Connection) -> Result<(u32, String), ManagerError> {
+        self.sign_in_with_mode(None, connection).await
+    }
+
+    /// A new account with an explicit mode, or the daemon-wide default when absent.
+    pub(crate) async fn sign_in_with_mode(self: &Arc<Self>, mode: Option<Mode>, connection: &Connection) -> Result<(u32, String), ManagerError> {
         let _changing = self.changing.lock().await;
         // The account could not be written at the end: said before the browser is opened.
         self.config.check_writable().map_err(|e| ManagerError::Failed(e.to_string()))?;
@@ -70,8 +75,9 @@ impl AccountManager {
         }
         let http = attempt::http_client().map_err(|e| ManagerError::Failed(e.to_string()))?;
         let graph = attempt::graph(&self.options.endpoints).map_err(|e| ManagerError::Failed(e.to_string()))?;
-        // Read-only, with Microsoft's account picker: a new account is any account.
-        let oauth = attempt::oauth_client(http, self.options.endpoints.clone(), &client_id, Mode::ReadOnly);
+        // Microsoft's account picker: a new account is any account.
+        let mode = mode.unwrap_or(self.config.snapshot().new_account_mode);
+        let oauth = attempt::oauth_client(http, self.options.endpoints.clone(), &client_id, mode);
         let browser = Attempt::bind(oauth).await.map_err(|failure| ManagerError::Failed(failure.to_string()))?;
         let (url, asked) = (browser.picker_url(), browser.scope());
         // Nothing refuses this one from here on: the one under way gives way to it.
@@ -94,7 +100,7 @@ impl AccountManager {
                 Err(why) => (Err(why), None),
             };
             let Some(manager) = manager.upgrade() else { return };
-            manager.finish_sign_in(number, asked, signed_in, browser).await;
+            manager.finish_sign_in(number, mode, asked, signed_in, browser).await;
         });
         tracing::info!("signing a new account in (sign-in {number})");
         Ok((number, url))
@@ -139,7 +145,7 @@ impl AccountManager {
     /// Graph, and no other change of the accounts waits for it. What it finds may be old
     /// by the time the account is made; the guard is asked again in the write itself,
     /// which sees every drive recorded since.
-    async fn finish_sign_in(&self, number: u32, asked: &'static str, signed_in: Result<SignedIn, SignInFailure>, browser: Option<Answer>) {
+    async fn finish_sign_in(&self, number: u32, mode: Mode, asked: &'static str, signed_in: Result<SignedIn, SignInFailure>, browser: Option<Answer>) {
         let unsettled = match &signed_in {
             Ok(_) => self.siblings.settle().await,
             Err(_) => Vec::new(),
@@ -151,7 +157,7 @@ impl AccountManager {
             // Not reached: a wait that was cancelled is under way no longer.
             Err(SignInFailure::Cancelled) => (End { outcome: CANCELLED, message: String::new(), account: None }, String::new()),
             Err(why) => (End::failed(why.to_string()), why.to_string()),
-            Ok(signed_in) => match self.make_signed_in(&connection, &signed_in, asked, &unsettled).await {
+            Ok(signed_in) => match self.make_signed_in(&connection, &signed_in, mode, asked, &unsettled).await {
                 Ok(account) => {
                     let label = account.account.state().get().label;
                     tracing::info!("added the account {label:?} ({})", account.id);
@@ -196,11 +202,17 @@ impl AccountManager {
         &self,
         connection: &Connection,
         signed_in: &SignedIn,
+        mode: Mode,
         asked: &'static str,
         unsettled: &[AccountId],
     ) -> Result<Arc<Account>, Refused> {
         let identity = &signed_in.identity;
-        let entry = self.config.update(|config| claim_new(config, &identity.drive, identity.email.as_deref(), unsettled))?;
+        let entry = self.config.update(|config| {
+            let mut entry = claim_new(config, &identity.drive, identity.email.as_deref(), unsettled)?;
+            entry.mode = mode;
+            config.account_mut(&entry.id).expect("just added").mode = mode;
+            Ok::<_, Refused>(entry)
+        })?;
         let account = match self.build(&entry) {
             Ok(account) => account,
             Err(e) => {
@@ -210,7 +222,9 @@ impl AccountManager {
                     tracing::warn!("cannot take the account {:?} out of config.toml again: {e}", entry.label);
                 }
                 if let Some(paths) = self.paths.account(&entry.id) {
-                    remove_account_dir(&paths.dir);
+                    if let Err(error) = remove_account_dir(&paths.dir) {
+                        tracing::warn!("the failed account's state could not be archived: {error}");
+                    }
                 }
                 self.siblings.remove(&entry.id);
                 return Err(Refused::NotMade { detail: e.to_string() });
@@ -248,7 +262,9 @@ impl AccountManager {
         if let Err(e) = self.config.remove_account(&account.id) {
             tracing::warn!("cannot take the account {} out of config.toml again: {e}", account.id);
         }
-        remove_account_dir(&account.paths.dir);
+        if let Err(error) = remove_account_dir(&account.paths.dir) {
+            tracing::warn!("the failed account's state could not be archived: {error}");
+        }
         self.siblings.remove(&account.id);
     }
 

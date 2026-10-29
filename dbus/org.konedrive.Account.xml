@@ -47,6 +47,18 @@
       <arg name="force" type="b" direction="in"/>
       <arg name="sign_in_url" type="s" direction="out"/>
     </method>
+    <!-- Write scope: exact relative subtree paths, without empty components, dot,
+         dot-dot, absolute paths or backslashes. InvalidArgs for an invalid path.
+         Empty list refuses every mutation; ClearWriteScope removes the restriction.
+         Both ends of a rename must be allowed. EROFS outside scope at the mount;
+         the sender also checks local and remote paths before starting a step.
+         Already admitted operations may finish. Downloads, pins and free-up stay allowed. -->
+    <method name="SetWriteScope">
+      <arg name="paths" type="as" direction="in"/>
+    </method>
+    <method name="ClearWriteScope"/>
+    <property name="WritePaths" type="as" access="read"/>
+    <property name="WriteScopeEnabled" type="b" access="read"/>
     <!-- The last element of this object's path: 12 lowercase hex
          characters, no other account's (a removed account's may come
          again). -->

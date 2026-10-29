@@ -3,7 +3,7 @@
 
 use konedrive_tree::{ContentPresence, ContentVersion, ItemKind};
 
-use super::{changed_here, content, folder, found, reference, DiskFinding, Folder, MTIME};
+use super::{changed_here, content, folder, found, reference, DiskFinding, Folder};
 
 /// A backing directory as a daemon left it, and no row but the root's.
 fn tree_with_no_rows() -> Folder {
@@ -38,7 +38,7 @@ fn every_marked_entry_is_bound_to_the_id_of_its_mark_and_an_unmarked_one_is_new(
     // A whole copy is taken with the content its cTag mark tells, with no hash: the plan
     // compares it with what a listing brings. Nothing is agreed on yet.
     let a = f.row("docs/a.txt").unwrap();
-    assert_eq!(content(&a), Some(ContentVersion::Hashed { size: 3, mtime: MTIME, mtime_nsec: 0, hash: None, ctag: Some("c-A".to_owned()) }));
+    assert_eq!(content(&a), changed_here(3, 1));
     assert_eq!((a.content_presence, a.synced_place.clone(), a.synced_content.clone(), a.onedrive.clone()), (ContentPresence::OnDisk, None, None, None));
     assert_eq!(content(&f.row("top.txt").unwrap()), changed_here(3, 1));
     f.assert_settled();
@@ -164,4 +164,42 @@ fn an_entry_marked_with_an_id_a_row_the_folder_does_not_show_has_is_new() {
     assert_eq!(found(&f.check()), [(DiskFinding::Made, 1)]);
     assert_eq!((f.row("a.txt").unwrap().onedrive_item, f.mark_of("a.txt")), (None, None));
     assert_eq!(f.item(listed), before);
+}
+
+#[test]
+fn a_same_size_same_second_edit_with_a_stale_mark_is_hashed_after_store_recovery() {
+    let mut f = folder();
+    f.copy("a.txt", b"aaa", "A");
+    let listed = f.rebuild_store();
+    // The size, whole second and cTag all still match the cloud. The bytes do not.
+    f.write("a.txt", b"bbb");
+    f.mark_copy("a.txt", "A");
+    f.check();
+    f.write_listing(&listed);
+    let row = f.row("a.txt").unwrap();
+    assert!(matches!(content(&row), Some(ContentVersion::ChangedHere { .. })));
+    // The planner agrees on a recovered item's place before comparing its content.
+    // Advance only that namespace agreement; content must remain changed-here.
+    for _ in 0..3 {
+        let plan = f.plan();
+        for step in plan.steps {
+            if let konedrive_tree::SyncStep::Row(konedrive_tree::RowStep::AgreeOnPlace { item }) = step {
+                f.store.item_store().commit_agree_on_place(&item).unwrap();
+            }
+        }
+    }
+    let plan = f.plan();
+    assert!(plan.steps.iter().any(|step| matches!(step, konedrive_tree::SyncStep::Row(konedrive_tree::RowStep::HashLocalContent { .. }))), "recovered bytes must be hashed before content agreement: {plan:?}");
+    f.assert_plan_sends_no_removal_or_move("stale cTag after store recovery");
+}
+
+#[test]
+fn missing_backing_content_does_not_plan_a_cloud_removal() {
+    let mut f = folder();
+    f.copy("a.txt", b"aaa", "A");
+    std::fs::remove_file(f.disk("a.txt")).unwrap();
+    f.check();
+    f.assert_plan_sends_no_removal_or_move("missing backing bytes");
+    let rows = f.rows();
+    assert!(rows.iter().any(|row| row.onedrive_item.as_ref().is_some_and(|binding| binding.item_id.as_str() == "A")), "the cloud binding stays");
 }

@@ -123,7 +123,7 @@ impl SyncService {
             root::DriveOf::Foreign(_) => return Err(SyncError::ForeignFolder),
         }
         // A tree store left by a folder forgotten earlier describes another folder.
-        self.remove_tree_store().await;
+        self.remove_tree_store().await?;
         let root = root::register_root(path).await?;
         self.come_up(stopped, root, true).await;
         Ok(())

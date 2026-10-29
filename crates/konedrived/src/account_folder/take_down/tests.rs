@@ -252,3 +252,17 @@ fn a_report_for_a_mount_that_did_not_ask_takes_nothing_down() {
         tokio::task::spawn_blocking(move || drop((kept, mount))).await.unwrap();
     });
 }
+
+#[test]
+fn forgetting_a_store_quarantines_it_instead_of_unlinking_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("fuse.sqlite");
+    let store = konedrive_tree::TreeStore::open(&path).unwrap();
+    store.set_pin("KEPT", true).unwrap();
+    assert!(remove_tree_files(&path).is_err(), "an open store is not moved or unlinked");
+    drop(store);
+    remove_tree_files(&path).unwrap();
+    assert!(!path.exists());
+    assert!(directory.path().join("fuse.sqlite.quarantine-intent").exists());
+    assert_eq!(konedrive_tree::TreeStore::open(&path).unwrap().pins().unwrap(), ["KEPT"]);
+}

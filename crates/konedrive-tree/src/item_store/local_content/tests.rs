@@ -329,3 +329,18 @@ fn a_copy_that_was_changed_since_it_was_asked_about_is_not_freed() {
     assert_eq!(free(&mut store, directory, &listed_content("h1")), StepCommitOutcome::RowsChanged);
     assert_rules_hold(&mut store);
 }
+
+#[test]
+fn a_free_up_commit_refuses_a_pending_move_or_mutation_record() {
+    let (mut store, file) = store_with_shown_file(ContentPresence::OnDisk);
+    let before = row(&mut store, file);
+    let content = local_content(&before).unwrap();
+    store.item_store().apply(&LocalVersionChange::Moved { item: file, place: place(ROOT, "renamed"), is_name_ignored: false }).unwrap();
+    assert_eq!(store.item_store().commit_freed_content(file, &content).unwrap(), StepCommitOutcome::RowsChanged);
+    store.item_store().apply(&LocalVersionChange::Moved { item: file, place: place(ROOT, "f"), is_name_ignored: false }).unwrap();
+    let record = record_link(&mut store, file, &content);
+    assert!(!store.item_store().reader().can_free_content(file).unwrap());
+    assert_eq!(store.item_store().commit_freed_content(file, &content).unwrap(), StepCommitOutcome::RowsChanged);
+    store.item_store().forget_place_change_record(record).unwrap();
+    assert_eq!(store.item_store().commit_freed_content(file, &content).unwrap(), StepCommitOutcome::Written);
+}

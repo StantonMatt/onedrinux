@@ -7,7 +7,7 @@ use crate::mount::item_download_landing::ItemDownloadLanding;
 use crate::mount::item_fixture::{ContentRefusal, ItemFixture};
 
 fn make_files_interface(fixture: &ItemFixture) -> ItemFilesInterface {
-    let landing = Arc::new(ItemDownloadLanding::new(Arc::clone(&fixture.place_changes), fixture.store.clone(), Arc::clone(&fixture.running_steps), Arc::clone(&fixture.mount_take_down)));
+    let landing = Arc::new(ItemDownloadLanding::new(Arc::clone(&fixture.place_changes), fixture.store.clone(), Arc::clone(&fixture.running_steps), Arc::clone(&fixture.mount_take_down), Arc::clone(&fixture.item_handles)).expect("the replacement observer"));
     let downloader = Arc::new(ItemDownloader::new(
         Arc::clone(&fixture.backing_directory),
         Arc::clone(&fixture.download_states),

@@ -20,9 +20,11 @@ fn address(of: &str) -> UploadSessionAddress {
 
 /// A holder as Graph answers it: a file of `size` bytes made at `made_at`.
 fn holder(size: u64, hash: Option<&str>, made_at: Option<i64>) -> Value {
-    let mut value = json!({ "id": "H", "name": "Report.txt", "eTag": "e-h", "cTag": "c-h", "size": size, "parentReference": { "id": "R" }, "file": { "hashes": { "quickXorHash": hash } } });
+    let mut value = json!({ "id": "H", "name": "Report.txt", "eTag": "e-h", "cTag": "c-h", "size": size, "parentReference": { "id": "R" }, "file": { "hashes": { "quickXorHash": hash } }, "createdBy": { "application": { "id": crate::fake_onedrive::APPLICATION } } });
     if let Some(made_at) = made_at {
         value["createdDateTime"] = json!(format_graph_time(made_at));
+        value["lastModifiedDateTime"] = json!(format_graph_time(made_at));
+        value["createdBy"] = json!({ "application": { "id": crate::fake_onedrive::APPLICATION } });
     }
     value
 }
@@ -30,7 +32,7 @@ fn holder(size: u64, hash: Option<&str>, made_at: Option<i64>) -> Value {
 fn facts(holder: Option<Value>) -> NameHolderFacts {
     let holder = holder.map(drive_item);
     let holder_item = holder.as_ref().and_then(|holder| to_confirmed_item(holder, &konedrive_tree::DriveId::new("d1").expect("a drive id")).ok());
-    NameHolderFacts { holder, holder_item, is_holder_bound: false, sent_hash: Some("sent".to_owned()), empty_file_sessions: Vec::new(), opening_windows: Vec::new(), sessions_first_seen: Vec::new() }
+    NameHolderFacts { client_id: Some(crate::fake_onedrive::APPLICATION.to_owned()), holder, holder_item, is_holder_bound: false, sent_hash: Some("sent".to_owned()), empty_file_sessions: Vec::new(), opening_windows: Vec::new(), sessions_first_seen: Vec::new() }
 }
 
 fn continued(item: i64, of: &str, expires_at: Option<i64>) -> EmptyFileSession {
@@ -83,21 +85,21 @@ fn the_sessions_at_the_place_decide_before_the_holder_is_looked_at() {
 #[test]
 fn a_holder_with_no_session_of_this_folder_is_told_by_what_it_is() {
     let window = |first_at: i64, last_unknown_at: i64| vec![OpeningWindow { first_at, last_unknown_at }];
-    let slack = 5 * 60;
+    let slack = 60;
     let own_empty_file = || NameHolder::OwnEmptyFile(OneDriveItemReference { drive_id: konedrive_tree::DriveId::new("d1").expect("a drive id"), item_id: konedrive_tree::OneDriveItemId::new("H") });
     let another = || NameHolder::AnotherItem { holder_name: "Report.txt".into() };
     let empty_sent = Some(qx(b""));
     let cases: Vec<(NameHolderFacts, NameHolder)> = vec![
         // An empty file no listing told of, made within a window of an opening, the clock's slack on both sides: this folder's own.
         (NameHolderFacts { opening_windows: window(NOW - 50, NOW - 10), ..facts(Some(holder(0, None, Some(NOW - 30)))) }, own_empty_file()),
-        (NameHolderFacts { opening_windows: window(NOW, NOW), ..facts(Some(holder(0, None, Some(NOW - slack)))) }, own_empty_file()),
+        (NameHolderFacts { opening_windows: window(NOW, NOW), ..facts(Some(holder(0, None, Some(NOW - slack)))) }, NameHolder::UnknownEmptyFile),
         (NameHolderFacts { opening_windows: window(NOW, NOW), ..facts(Some(holder(0, None, Some(NOW + slack)))) }, own_empty_file()),
         // Outside every window, or its time not told: of nobody known, and waited for.
         (NameHolderFacts { opening_windows: window(NOW, NOW), ..facts(Some(holder(0, None, Some(NOW + slack + 1)))) }, NameHolder::UnknownEmptyFile),
         (NameHolderFacts { opening_windows: window(NOW, NOW), ..facts(Some(holder(0, None, None))) }, NameHolder::UnknownEmptyFile),
         (facts(Some(holder(0, None, Some(NOW)))), NameHolder::UnknownEmptyFile),
         // A step that sends an empty file adopts an empty file nobody explains, and never one an opening explains.
-        (NameHolderFacts { sent_hash: empty_sent.clone(), ..facts(Some(holder(0, None, Some(NOW)))) }, NameHolder::OwnEarlierUpload(facts(Some(holder(0, None, Some(NOW)))).holder_item.expect("readable"))),
+        (NameHolderFacts { sent_hash: empty_sent.clone(), ..facts(Some(holder(0, None, Some(NOW)))) }, NameHolder::UnknownEmptyFile),
         (NameHolderFacts { sent_hash: empty_sent.clone(), opening_windows: window(NOW, NOW), ..facts(Some(holder(0, None, Some(NOW)))) }, own_empty_file()),
         // The content sent, there already and no row bound to it: this step's own earlier upload.
         (facts(Some(holder(4, Some("sent"), None))), NameHolder::OwnEarlierUpload(facts(Some(holder(4, Some("sent"), None))).holder_item.expect("readable"))),
@@ -271,4 +273,47 @@ async fn the_holder_of_a_name_a_move_found_taken_is_answered_as_onedrive_spells_
     folder.refuse("GET", "R:/b.txt", 403, 1);
     let refused = folder.name_holders.find_holder_name(&root, OsStr::new("b.txt")).await;
     assert!(matches!(refused, Err(StepOutcome::Refused(StepRefusal::Transient { .. }))), "{refused:?}");
+}
+
+#[test]
+fn empty_name_holders_require_our_application_and_both_server_times() {
+    let own = holder(0, None, Some(NOW));
+    for change in 0..8 {
+        let mut candidate = own.clone();
+        match change {
+            0 => { candidate.as_object_mut().unwrap().remove("createdBy"); },
+            1 => candidate["createdBy"] = json!({"application": {"id": "foreign"}}),
+            2 => { candidate.as_object_mut().unwrap().remove("lastModifiedDateTime"); },
+            3 => candidate["lastModifiedDateTime"] = json!(format_graph_time(NOW + 61)),
+            4 => candidate["createdDateTime"] = json!(format_graph_time(NOW - 1)),
+            5 => candidate["lastModifiedDateTime"] = json!(format_graph_time(NOW - 1)),
+            6 => candidate["createdBy"] = json!({"user": {"id": "same-user"}}),
+            _ => {},
+        }
+        let facts = NameHolderFacts { opening_windows: vec![OpeningWindow { first_at: NOW, last_unknown_at: NOW }], ..facts(Some(candidate)) };
+        assert_eq!(matches!(decide(&facts), NameHolder::OwnEmptyFile(_)), change == 7, "case {change}");
+    }
+    // A completely different machine clock cannot widen a server-clock window.
+    let facts = NameHolderFacts { opening_windows: vec![OpeningWindow { first_at: NOW, last_unknown_at: NOW }], ..facts(Some(own)) };
+    assert!(matches!(decide_name_holder(&facts, &versions(None, None), NOW + 86_400), NameHolder::OwnEmptyFile(_)));
+}
+
+#[tokio::test]
+async fn a_foreign_or_unidentified_empty_holder_is_never_deleted() {
+    for application in [None, Some("foreign")] {
+        let (folder, item) = folder_with_a_new_file(b"content").await;
+        let id = item.local_item_id;
+        let now = crate::clock::unix_now();
+        folder.fixture.write_rows(move |store| store.step_memory().remember_upload_session_opening(id, &place(), now).map(|_| ()));
+        folder.graph.with(|cloud| {
+            cloud.open_elsewhere("R", "a.txt", 0);
+            cloud.applications.clear();
+            if let Some(application) = application {
+                for id in cloud.created.keys() { cloud.applications.insert(id.clone(), application.to_owned()); }
+            }
+        });
+        assert_eq!(find(&folder, &item, b"content").await, Ok(NameHolder::AnotherItem { holder_name: "a.txt".into() }));
+        assert_eq!(folder.count("DELETE", ""), 0);
+        assert_eq!(folder.graph.with(|cloud| cloud.placeholders()), ["a.txt"]);
+    }
 }

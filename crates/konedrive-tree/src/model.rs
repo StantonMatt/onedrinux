@@ -402,6 +402,8 @@ pub struct Item {
     pub onedrive: Option<ItemVersion>,
     /// The eTag OneDrive gave with that version: what a request to OneDrive is guarded with.
     pub onedrive_etag: Option<String>,
+    /// The folder cTag covers changes anywhere below it; never substituted by its eTag.
+    pub onedrive_folder_ctag: Option<String>,
     /// The MIME type OneDrive gives for the content of a file it has (`file.mimeType`), as a
     /// listing said it: what tells an image or a video, for a thumbnail. `None` for a
     /// directory, for an item OneDrive does not have, and until a listing said it.
@@ -476,6 +478,12 @@ pub enum FileSyncState {
 }
 
 impl Item {
+    /// Whether the planner considers the local bytes unchanged since agreement,
+    /// including a rewrite whose hash matches despite a different time or cTag.
+    pub fn local_content_matches_synced(&self) -> bool {
+        crate::sync_plan::compare_local_content(self.local.as_ref().and_then(|local| local.content.as_ref()), self.synced_content.as_ref()) == crate::sync_plan::ContentChange::Same
+    }
+
     /// The sync state of the file the folder shows as this item: the first that holds of no
     /// binding, content not on disk, local content that is not the synced one, and synced.
     /// `None` for an item the folder does not show as a file.

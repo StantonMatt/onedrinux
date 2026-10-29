@@ -318,6 +318,21 @@ impl StepMemory<'_> {
         self.write(|tx| forget_openings_before(tx, time))
     }
 
+    /// Keeps an opened session only if the row still owns the cloud binding the request
+    /// targeted. A save may exchange bindings while the opening is in flight without
+    /// changing the local content or its unsent stamp. That old session is cancelled,
+    /// never resumed into the newly acquired cloud identity.
+    pub fn remember_upload_session_for_binding(&mut self, planned: &crate::ItemVersions, session: &UploadSession) -> Result<UploadSessionStanding, TreeError> {
+        self.write(|tx| {
+            if !find_item(tx, planned.local_item_id)?.is_some_and(|row| row.onedrive_item == planned.onedrive_item) {
+                abandon(tx, session)?;
+                forget_opening_of(tx, planned.local_item_id)?;
+                return Ok(UploadSessionStanding::Abandoned);
+            }
+            remember_upload_session(tx, planned.local_item_id, planned.unsent_since, session)
+        })
+    }
+
     /// OneDrive opened `session` for `item`, whose step was planned from a row stamped
     /// `unsent_since`: given before its first byte is sent. After the call the address is
     /// the item's or among the cancellations. *Continued*: the session is the item's from
@@ -892,6 +907,16 @@ fn drop_facts_of_item_binding(conn: &Connection, item: LocalItemId) -> Result<Op
 pub(crate) fn drop_facts_of_binding(conn: &Connection, item: LocalItemId) -> Result<(), TreeError> {
     let temporary_name = drop_facts_of_item_binding(conn, item)?;
     change_kept_memory(conn, item, |memory| memory.temporary_name = temporary_name)
+}
+
+/// Two files exchange cloud bindings. Outstanding sessions are abandoned and facts of
+/// an unsent generation are dropped, while temporary cloud names follow their bindings.
+/// Inside the save's transaction; neither row is removed.
+pub(crate) fn exchange_file_bindings(conn: &Connection, first: LocalItemId, second: LocalItemId) -> Result<(), TreeError> {
+    let first_name = drop_facts_of_item_binding(conn, first)?;
+    let second_name = drop_facts_of_item_binding(conn, second)?;
+    change_kept_memory(conn, first, |memory| memory.temporary_name = second_name)?;
+    change_kept_memory(conn, second, |memory| memory.temporary_name = first_name)
 }
 
 /// The binding of `from` is `to`'s from now on: what is remembered follows, inside the

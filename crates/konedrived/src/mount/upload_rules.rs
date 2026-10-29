@@ -20,11 +20,17 @@ use crate::local::SharedIgnore;
 pub(crate) struct UploadRules {
     /// The account's ignore list: what is never uploaded.
     ignore: SharedIgnore,
+    pub(super) write_scope: crate::config::WriteScopeSource,
 }
 
 impl UploadRules {
     pub(super) fn new(ignore: SharedIgnore) -> Self {
-        UploadRules { ignore }
+        UploadRules { ignore, write_scope: Default::default() }
+    }
+
+    pub(super) fn with_write_scope(mut self, scope: crate::config::WriteScopeSource) -> Self {
+        self.write_scope = scope;
+        self
     }
 
     /// Whether the name itself is on the ignore list, whatever directory it is in: what a

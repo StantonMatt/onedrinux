@@ -178,9 +178,9 @@ fn an_empty_file_opened_and_closed_untouched_is_a_clean_copy_again() {
     operations.close(opened.fh);
     let row = operations.fixture.find_item(empty.local_item_id).unwrap();
     assert_eq!((row.local.clone(), row.content_before_write.clone(), row.content_presence, row.file_sync_state()), (empty.local.clone(), None, ContentPresence::OnDisk, Some(FileSyncState::Synced)));
-    // The made file is the whole copy of that content: its marks and its time say so.
-    let ContentVersion::Hashed { ctag, .. } = ItemFixture::onedrive_content_of(b"") else { unreachable!() };
-    assert_eq!(operations.fixture.read_disk_marks("empty.txt"), DiskMarksRead { onedrive_item_id: Some(onedrive_id_of("empty.txt")), is_whole: true, ctag });
+    // A write-open clears the old cTag even when the writer changes no bytes. The
+    // unchanged close restores the clean row, and the empty copy remains whole.
+    assert_eq!(operations.fixture.read_disk_marks("empty.txt"), DiskMarksRead { onedrive_item_id: Some(onedrive_id_of("empty.txt")), is_whole: true, ctag: None });
     assert_eq!(disk_time(&operations, "empty.txt"), (ONEDRIVE_MTIME, 0));
     operations.fixture.assert_rows_and_disk_agree();
     // So the check at start finds nothing to change.
@@ -545,4 +545,45 @@ fn what_is_downloaded_before_a_write_is_read_without_waiting_for_the_stores_read
     asker.join().unwrap().unwrap();
     let answered = answered.expect("answered while the store's reading thread is taken");
     assert!(matches!(answered, Ok(FileToFill::Download(ItemToDownload { item, .. })) if item == remote), "{answered:?}");
+}
+
+#[test]
+fn a_write_open_clears_the_old_ctag_before_an_in_place_edit() {
+    let operations = OperationsFixture::new();
+    let item = land(&operations, "edit.txt", b"aaa");
+    assert!(operations.fixture.read_disk_marks("edit.txt").ctag.is_some());
+    let opened = open(&operations, item).unwrap();
+    assert!(operations.fixture.read_disk_marks("edit.txt").ctag.is_none());
+    operations.write_through(opened.fh, b"bbb");
+    operations.close(opened.fh);
+    assert!(operations.fixture.read_disk_marks("edit.txt").ctag.is_none());
+}
+
+#[test]
+fn a_failed_intent_sync_does_not_truncate_the_backing_file() {
+    use std::os::unix::fs::PermissionsExt;
+    let operations = OperationsFixture::new();
+    let item = land(&operations, "keep.txt", b"unsent bytes");
+    let log = operations.fixture.store_path.with_file_name("tree.db-wal");
+    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let answer = overwrite(&operations, item).err();
+    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(answer, Some(Errno::EIO), "a store job's I/O failure is EIO, before cutting bytes");
+    assert_eq!(operations.fixture.read_disk_file("keep.txt").unwrap(), b"unsent bytes");
+}
+
+#[test]
+fn a_truncation_syncs_its_intent_before_even_opening_the_backing_file() {
+    use std::os::unix::fs::PermissionsExt;
+    let operations = OperationsFixture::new();
+    let item = land(&operations, "keep.txt", b"unsent bytes");
+    let path = operations.fixture.disk_path("keep.txt");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let log = operations.fixture.store_path.with_file_name("tree.db-wal");
+    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let answer = operations.run(move |operations| operations.truncate(item, None, 0));
+    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(answer, Err(Errno::EIO));
+    assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o444, "the writable open grants a write bit, so it must not have run");
+    assert_eq!(std::fs::read(path).unwrap(), b"unsent bytes");
 }

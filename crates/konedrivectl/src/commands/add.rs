@@ -23,7 +23,7 @@ type End = (String, String);
 /// `account add`: a new account, added by signing in (`Accounts.SignIn`). The daemon makes
 /// the account only once the sign-in has succeeded, names it by its email, and says how the
 /// sign-in ended in `SignInFinished`; a sign-in that did not succeed made nothing.
-pub(crate) async fn add(daemon: &Daemon) -> anyhow::Result<()> {
+pub(crate) async fn add(daemon: &Daemon, read_only: bool) -> anyhow::Result<()> {
     // An unreadable configuration first: a sign-in would be refused for it too.
     let accounts = daemon.accounts().await?;
     daemon.check_loaded(&accounts).await?;
@@ -32,7 +32,7 @@ pub(crate) async fn add(daemon: &Daemon) -> anyhow::Result<()> {
     let mut finished = daemon.manager.receive_sign_in_finished().await?;
     let bus = zbus::fdo::DBusProxy::new(&daemon.connection).await?;
     let mut owners = bus.receive_name_owner_changed_with_args(&[(0, SERVICE_NAME)]).await?;
-    let result = daemon.manager.sign_in().await;
+    let result = daemon.manager.add(if read_only { "read-only" } else { "" }).await;
     let (sign_in, url) = result.map_err(|e| anyhow!(explain_account_error(AccountAction::Add, &e)))?;
     if open_browser() {
         println!("Opening the Microsoft sign-in page in your browser. If it does not open, visit:\n\n  {url}\n");

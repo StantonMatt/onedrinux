@@ -289,14 +289,16 @@ impl FolderSteps {
     /// through [`run_show_items`](Self::run_show_items) with the one item, a
     /// `DownloadContent` through [`run_download_content`](Self::run_download_content);
     /// every other case is one job of the write-operation thread. Called by the plan's
-    /// task (`sync_plan_task`), which holds the folder's lease while it runs (and
-    /// calls the two named functions itself for the show steps of a plan and for a
-    /// download). A job dropped because the thread stopped, and any step after a
-    /// take-down was asked for, is `StepOutcome::NotRun(SendingStopped)`.
+    /// task (`sync_plan_task`), which holds the folder's lease for ordinary jobs and
+    /// calls downloads and content reader waits outside it. A content wait takes the
+    /// lease only for its final, revalidated mutation. A job dropped because the thread
+    /// stopped, and any step after a take-down was asked for, is `StepOutcome::NotRun(SendingStopped)`.
     pub(crate) async fn run(self: &Arc<Self>, step: FolderStep) -> StepOutcome {
         match step {
             FolderStep::ShowItem { item } => self.run_show_items(vec![item]).await.pop().unwrap_or(StepOutcome::NotRun(StepObstacle::SendingStopped)),
             FolderStep::DownloadContent { item } => self.run_download_content(item).await,
+            FolderStep::ReplaceContent { item } => self.run_replace_content(item).await,
+            FolderStep::TakeOneDriveContent { item } => self.run_take_content(item, None).await,
             step => {
                 let steps = Arc::clone(self);
                 self.write_operation_thread.run_and_wait(move || steps.run_as_job(&step)).await.unwrap_or(StepOutcome::NotRun(StepObstacle::SendingStopped))
@@ -317,7 +319,7 @@ impl FolderSteps {
             FolderStep::RemoveItem { item } => self.run_remove_item(item),
             FolderStep::TakeOneDriveContent { item } => self.run_take_onedrive_content(item),
             // The two cases that are no such job: `run` sends them their own way.
-            FolderStep::ShowItem { .. } | FolderStep::DownloadContent { .. } => StepOutcome::NotRun(StepObstacle::SendingStopped),
+            FolderStep::ShowItem { .. } | FolderStep::DownloadContent { .. } | FolderStep::ReplaceContent { .. } => StepOutcome::NotRun(StepObstacle::SendingStopped),
         }
     }
 
@@ -410,6 +412,45 @@ impl FolderSteps {
         let mut cancel = DownloadCancel { downloader: Arc::clone(&self.downloader), file: file.clone(), is_ended: false };
         let end = self.downloader.download_and_land(file, item).await;
         cancel.is_ended = true;
+        decide_download_outcome(end)
+    }
+
+    /// A cloud-only handle can also own mmap pages. Do not publish a new content
+    /// through that same FUSE inode until every old reader has gone.
+    pub(crate) async fn run_take_content(self: &Arc<Self>, item: ItemVersions, lease: Option<crate::sync_parts::lease::Lease>) -> StepOutcome {
+        if item.content_presence == ContentPresence::OnDisk && self.item_handles.is_open_for_reading(item.local_item_id) {
+            return self.run_replace_content_with_lease(item, lease).await;
+        }
+        let (store, versions, id) = (self.store.clone(), item.clone(), item.local_item_id);
+        let current = self.item_handles.wait_for_no_readers(id, move || {
+            let (store, versions) = (store.clone(), versions.clone());
+            async move { store.read_items(move |reader| Ok(reader.find_item(id)?.is_some_and(|row| versions.are_those_of(&row)))).await.unwrap_or(false) }
+        }).await;
+        if !current { return rows_changed(); }
+        let held = match lease { Some(lease) => Some(lease.hold().await), None => None };
+        let steps = Arc::clone(self);
+        self.write_operation_thread.run_and_wait(move || { let _held = held; steps.run_take_onedrive_content(&item) }).await
+            .unwrap_or(StepOutcome::NotRun(StepObstacle::SendingStopped))
+    }
+
+    /// Download the remote version while the old inode remains available. The
+    /// downloader's landing checks every planned version and commits the swap as one job.
+    pub(crate) async fn run_replace_content(self: &Arc<Self>, item: ItemVersions) -> StepOutcome {
+        self.run_replace_content_with_lease(item, None).await
+    }
+
+    async fn run_replace_content_with_lease(self: &Arc<Self>, item: ItemVersions, lease: Option<crate::sync_parts::lease::Lease>) -> StepOutcome {
+        if self.mount_take_down.is_asked() { return StepOutcome::NotRun(StepObstacle::SendingStopped); }
+        let (Some(onedrive_item), Some(content)) = (item.onedrive_item.clone(), item.onedrive.as_ref().and_then(|v| v.content.clone())) else { return rows_changed() };
+        let file = ItemToDownload { item: item.local_item_id, onedrive_item, content };
+        let mut cancel = DownloadCancel { downloader: Arc::clone(&self.downloader), file: file.clone(), is_ended: false };
+        let old_range = item.onedrive_item.clone().zip(item.local.as_ref().and_then(|v| v.content.clone()))
+            .map(|(onedrive_item, content)| RangeSource { onedrive_item, content });
+        let end = self.downloader.download_and_land_with_lease(file, item, lease).await;
+        cancel.is_ended = true;
+        if matches!(end, Ok(crate::mount::ItemLandingOutcome::Landed { .. })) {
+            if let Some(old_range) = old_range { self.range_fetcher.forget_ranges(&old_range); }
+        }
         decide_download_outcome(end)
     }
 
@@ -535,6 +576,15 @@ impl FolderSteps {
     /// content source remembers of the item (`ItemRangeFetcher::forget_ranges`) and its download states are
     /// forgotten.
     fn run_take_onedrive_content(&self, item: &ItemVersions) -> StepOutcome {
+        let _readers = crate::panic::lock(&self.item_handles.reader_gate);
+        if self.item_handles.is_open_for_reading(item.local_item_id)
+            || self.store.call_blocking({ let id = item.local_item_id; move |store| {
+                let item_store = store.item_store();
+                let reader = item_store.reader();
+                Ok(reader.is_pinned(id)? && reader.find_item(id)?.is_some_and(|row| row.content_presence == konedrive_tree::ContentPresence::OnDisk))
+            } }).unwrap_or(true) {
+            return rows_changed();
+        }
         let (change, set_aside) = match self.prepare_set_aside(item, false) {
             Ok(prepared) => prepared,
             Err(outcome) => return outcome,

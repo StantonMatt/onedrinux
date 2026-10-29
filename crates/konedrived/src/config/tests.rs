@@ -275,6 +275,7 @@ async fn the_list_refuses_the_read_write_token_export_and_nothing_else() {
     store
         .update(|c| {
             c.account_mut(&real).unwrap().mode = Mode::ReadWrite;
+            c.account_mut(&test).unwrap().mode = Mode::ReadOnly;
             c.account_mut(&fresh).unwrap().mode = Mode::ReadWrite;
             Ok::<_, ConfigError>(())
         })
@@ -366,7 +367,7 @@ async fn writers_never_save_over_each_other() {
     ids.sort();
     ids.dedup();
     assert_eq!(ids.len(), 8);
-    assert!(on_disk.accounts.iter().all(|a| a.origin == Origin::Added && a.mode == Mode::ReadOnly));
+    assert!(on_disk.accounts.iter().all(|a| a.origin == Origin::Added && a.mode == Mode::ReadWrite));
     assert_eq!(store.add_account("account 0"), Err(ConfigError::InvalidLabel("the label \"Account 0\" is already used".into())));
 }
 

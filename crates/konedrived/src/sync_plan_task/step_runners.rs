@@ -38,7 +38,9 @@ pub(crate) struct StepRunners {
 impl StepRunners {
     /// The three runners: a step of the rows to `RowSteps::run`; a step towards OneDrive
     /// to `OneDriveSteps::run`; `DownloadContent` to `FolderSteps::run_download_content`,
-    /// with no lease; every other step towards the folder to `FolderSteps::run`, and the
+    /// with no lease. `TakeOneDriveContent` waits for readers or a resident replacement
+    /// outside the lease, cancellable by `stop`, and leases only its final mutation.
+    /// Every other step towards the folder goes to `FolderSteps::run`, and the
     /// show steps to `FolderSteps::run_show_items`, each under the folder's lease, so that
     /// a Forget waits for it. The wait for the lease
     /// races `stop`, the token of the sync's stop (`SyncTasks::stop_handle`): a step that
@@ -58,6 +60,16 @@ impl StepRunners {
                         SyncStep::Row(step) => row_steps.run(step).await,
                         SyncStep::OneDrive(step) => onedrive_steps.run(step).await,
                         SyncStep::Folder(FolderStep::DownloadContent { item }) => folder_steps.run_download_content(item).await,
+                        SyncStep::Folder(FolderStep::ReplaceContent { item }) => folder_steps.run_replace_content(item).await,
+                        SyncStep::Folder(FolderStep::TakeOneDriveContent { item }) => {
+                            // Waiting for readers (or a verified resident replacement)
+                            // must not hold the lease needed to stop/forget the account.
+                            tokio::select! {
+                                biased;
+                                () = stop.cancelled() => StepOutcome::NotRun(StepObstacle::SendingStopped),
+                                outcome = folder_steps.run_take_content(item, Some(lease)) => outcome,
+                            }
+                        }
                         SyncStep::Folder(step) => {
                             let _held = tokio::select! {
                                 biased;

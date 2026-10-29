@@ -143,14 +143,18 @@ async fn account_add_signs_in_and_names_the_account_by_its_email() {
     assert!(said.contains("Open this address in a browser:"), "{said}");
     let url = said.split_whitespace().find(|w| w.starts_with("http")).unwrap_or_default();
     assert!(url.contains(DEFAULT_CLIENT_ID), "{said}");
+    assert!(url::Url::parse(url).unwrap().query_pairs().any(|(key, value)| key == "scope" && value.split_whitespace().any(|scope| scope == "Files.ReadWrite")));
+    assert_eq!(daemon.manager.accounts()[0].account.configured_mode(), konedrived::config::Mode::ReadWrite);
     assert!(said.contains("Signed in. The account is called ann@outlook.com"), "{said}");
     assert_eq!(labels(), ["ann@outlook.com"]);
 
     // With one present: another one, by its own email.
-    let out = add("code=bob-code").await;
+    let address = bus.address().to_owned();
+    let out = tokio::task::spawn_blocking(move || common::run_signing_in(&address, &["account", "add", "--read-only"], "code=bob-code")).await.unwrap();
     assert!(out.status.success(), "{out:?}");
     assert!(out_text(&out).contains("The account is called bob@live.com"), "{out:?}");
     assert_eq!(labels(), ["ann@outlook.com", "bob@live.com"]);
+    assert_eq!(daemon.manager.accounts()[1].account.configured_mode(), konedrived::config::Mode::ReadOnly);
     let list = succeeded(&bus, &["account", "list"], &[]);
     assert!(list.contains("ann@outlook.com") && list.contains("bob@live.com") && list.contains("signed-in"), "{list}");
 
@@ -232,4 +236,22 @@ async fn what_the_cli_says_of_a_label_is_what_the_daemon_takes() {
     let (_, told) = failed(&bus, &["account", "rename", "a@b", &"x".repeat(41)], &[]);
     assert!(told.contains("at most 40"), "{told}");
     assert!(!told.contains("no \"@\""), "the CLI says a label has no \"@\", and the daemon takes one: {told}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn account_write_scope_shows_sets_and_clears_the_persisted_allowlist() {
+    let bus = TestBus::start();
+    let dir = tempfile::tempdir().unwrap();
+    let daemon = common::start_daemon(&bus, dir.path()).await;
+    let account = daemon.manager.add("Trial account", &daemon.connection).await.unwrap();
+    assert_eq!(succeeded(&bus, &["account", "write-scope", "show"], &[]), "Whole drive.\n");
+    succeeded(&bus, &["--account", "Trial account", "account", "write-scope", "set", "Trial", "Documents/Trial"], &[]);
+    assert_eq!(succeeded(&bus, &["account", "write-scope", "show"], &[]), "Trial\nDocuments/Trial\n");
+    assert_eq!(daemon.manager.config().account(&account.id).unwrap().write_paths.unwrap(), ["Trial", "Documents/Trial"]);
+    let (code, message) = failed(&bus, &["account", "write-scope", "set", "../outside"], &[]);
+    assert_eq!(code, 1);
+    assert!(message.contains("relative") || message.contains("folder names"), "{message}");
+    assert_eq!(succeeded(&bus, &["account", "write-scope", "show"], &[]), "Trial\nDocuments/Trial\n");
+    succeeded(&bus, &["account", "write-scope", "clear"], &[]);
+    assert_eq!(daemon.manager.config().account(&account.id).unwrap().write_paths, None);
 }

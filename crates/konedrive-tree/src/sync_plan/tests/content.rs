@@ -12,15 +12,15 @@ fn a_clean_copy_whose_content_onedrive_changed_goes_and_the_file_shows_onedrives
     assert_eq!(answer(&given, 2), folder_step(FolderStep::TakeOneDriveContent { item: versions(&given, 2) }));
 }
 
-/// The scenario `pinned_file_stays_downloaded`. Two steps, in two plans: the copy goes, and
-/// the plan made after it downloads the content again.
+/// The scenario `pinned_file_stays_downloaded`: the old version stays until a verified
+/// replacement lands; an initially cloud-only pinned file still needs its first download.
 #[test]
-fn a_pinned_file_whose_content_onedrive_changed_loses_its_copy_and_is_then_downloaded_again() {
+fn a_pinned_file_whose_content_onedrive_changed_is_replaced_without_discarding_its_copy() {
     let mut given = input(vec![with_content_in_onedrive(on_disk(synced_file(2, ROOT, "a.txt")), hashed("theirs"))]);
     given.pinned_items = [id(2)].into();
-    assert_eq!(answer(&given, 2), folder_step(FolderStep::TakeOneDriveContent { item: versions(&given, 2) }));
+    assert_eq!(answer(&given, 2), folder_step(FolderStep::ReplaceContent { item: versions(&given, 2) }));
 
-    // What the step leaves: OneDrive's content on every side, and not on disk.
+    // Both a first download and a completed replacement leave the sides agreeing.
     let with_onedrives_content = |number: i64, name: &str| {
         let mut file = synced_file(number, ROOT, name);
         for content in [&mut file.local.as_mut().unwrap().content, &mut file.onedrive.as_mut().unwrap().content, &mut file.synced_content] {

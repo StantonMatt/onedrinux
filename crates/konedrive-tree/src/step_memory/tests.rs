@@ -287,7 +287,9 @@ fn a_session_a_temporary_name_and_an_opening_are_found_again_after_a_crash() {
     assert_eq!(remember_session(&mut store, file, &session), Continued);
     store.step_memory().remember_temporary_name(file, &temporary).unwrap();
     store.step_memory().remember_upload_session_opening(other, &place(ROOT, "other"), 10).unwrap();
-    // The daemon dies: nothing is closed.
+    // Process death releases the ownership lock, but leaves the WAL uncheckpointed.
+    // Keep SQLite open to model that WAL, explicitly releasing only the process lock.
+    drop(store._file_lock.take());
     std::mem::forget(store);
 
     let mut store = TreeStore::open(&path).unwrap();

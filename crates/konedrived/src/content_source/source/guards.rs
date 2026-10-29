@@ -3,6 +3,8 @@
 //! tried again, the checkpoint a download may continue from, the hash at the end, and the
 //! one time a download starts over.
 
+// test: a_remote_version_without_a_hash_never_passes_verification
+
 use std::fs::File;
 use std::io;
 use std::os::unix::fs::FileExt;
@@ -187,7 +189,7 @@ pub(super) fn check_answer(item_id: &str, fetched: &Fetched, asked_from: u64, or
 }
 
 pub(super) fn same_version(a: &Option<Version>, b: &Option<Version>) -> bool {
-    a.as_ref().map(|v| &v.ctag) == b.as_ref().map(|v| &v.ctag)
+    a == b
 }
 
 /// The hash a download continues with from the checkpoint `progress`, given the version
@@ -241,13 +243,13 @@ fn rehash(file: &File, bytes: u64) -> Option<QuickXor> {
 }
 
 /// The whole file is down: its hash against the version's. [`End::Mismatch`] when they
-/// differ; a version without a hash cannot be checked, and passes with a warning.
+/// differ; a remote version without a hash cannot be verified and fails closed.
 pub(super) fn verify(item_id: &str, version: &Option<Version>, hash: &QuickXor) -> Result<(), End> {
     match version.as_ref().map(|v| v.quick_xor) {
         Some(Some(want)) if hash.finish() != want => Err(End::Mismatch),
         Some(None) => {
             tracing::warn!("{item_id}: OneDrive gave no quickXorHash; the content could not be verified");
-            Ok(())
+            Err(End::Fail(libc::EIO))
         }
         _ => Ok(()),
     }

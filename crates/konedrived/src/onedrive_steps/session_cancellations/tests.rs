@@ -235,3 +235,14 @@ async fn openings_that_name_no_file_go_after_the_time_they_are_kept() {
     folder.cancellations.forget_old_openings().await;
     assert_eq!((windows(&folder, "gone.txt"), windows(&folder, "kept.txt")), (0, 1), "one that names a file stays");
 }
+
+#[tokio::test]
+async fn write_scope_keeps_opaque_cleanup_sessions_without_sending() {
+    use crate::config::{WriteScope, WriteScopeSource};
+    let (mut folder, addresses) = folder_with_abandoned_sessions(1).await;
+    folder.cancellations = folder.cancellations.with_write_scope(WriteScopeSource::new(WriteScope::denied));
+    let round = folder.cancellations.cancel_sessions(1).await;
+    assert_eq!((round.done_count, round.failed_count), (0, 1));
+    assert_eq!(folder.count("DELETE", "upload/"), 0);
+    assert_eq!(listed_cancellations(&folder), addresses);
+}

@@ -12,7 +12,7 @@
 use konedrive_tree::{ContentPresence, ContentVersion, DriveId, ItemKind, ItemPlace, ItemStore, LocalItemId, LocalVersionChange, OneDriveItemId, OneDriveItemReference, TreeError};
 
 use super::backing_directory_contents::BackingDirectoryEntry;
-use super::disk_finding::{CopyWholeness, DiskContent, DiskFinding, ItemBinding, UnresolvedReason};
+use super::disk_finding::{DiskContent, DiskFinding, ItemBinding, UnresolvedReason};
 use crate::mount::upload_rules::UploadRules;
 
 /// The reason a path is left with when the store refused its write.
@@ -20,14 +20,11 @@ fn to_refused(error: TreeError) -> UnresolvedReason {
     UnresolvedReason::Refused(error.to_string())
 }
 
-/// The content a file is made with: of a file bound by its mark that is marked whole and
-/// with a cTag, the one that cTag tells, with no hash, for the plan to compare with
-/// OneDrive's; of any other, one changed here. A directory has none.
-pub(super) fn tell_made_content(entry: &BackingDirectoryEntry, finding: DiskFinding) -> Option<ContentVersion> {
-    let (size, mtime, mtime_nsec) = (entry.file.size, entry.file.mtime, entry.file.mtime_nsec);
-    (entry.kind == ItemKind::File).then(|| match &entry.file.ctag {
-        Some(ctag) if finding == DiskFinding::MarkedWithoutRow && entry.wholeness == CopyWholeness::Whole => ContentVersion::Hashed { size, mtime, mtime_nsec, hash: None, ctag: Some(ctag.clone()) },
-        _ => ContentVersion::ChangedHere { size, mtime, mtime_nsec, change_count: 1 },
+/// Recovered bytes are always changed-here. Size, time and a surviving cTag mark
+/// cannot prove what a stopped daemon's writer left; the planner hashes them first.
+pub(super) fn tell_made_content(entry: &BackingDirectoryEntry, _finding: DiskFinding) -> Option<ContentVersion> {
+    (entry.kind == ItemKind::File).then_some(ContentVersion::ChangedHere {
+        size: entry.file.size, mtime: entry.file.mtime, mtime_nsec: entry.file.mtime_nsec, change_count: 1,
     })
 }
 

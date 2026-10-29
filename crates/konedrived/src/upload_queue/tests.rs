@@ -31,6 +31,7 @@ fn agreed_file() -> Item {
         local: Some(ItemVersion { place: Some(place("a")), content: Some(content(10)) }),
         onedrive: Some(ItemVersion { place: Some(place("a")), content: Some(content(10)) }),
         onedrive_etag: None,
+        onedrive_folder_ctag: None,
         onedrive_mime: None,
         synced_place: Some(place("a")),
         synced_content: Some(content(10)),

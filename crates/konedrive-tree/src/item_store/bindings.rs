@@ -1,9 +1,9 @@
-//! When one item takes another's place: the three operations that move a binding. The local
+//! When one item takes another's place: the four operations that move a binding. The local
 //! item id follows the file the kernel holds; the binding follows what OneDrive must see as
 //! one item. Where the two part, the binding moves, here and nowhere else.
 //!
 //! `give_up_binding` and `merge_items` are operations of [`ItemStore`]. `take_over_binding`
-//! is done only with the change of a local version that says which item replaces which.
+//! and `exchange_bindings` are done only with the change of a local version that says which item replaces which.
 //!
 //! A binding is given first here too: to an item of the folder that OneDrive confirmed as a
 //! new item (`bind_item`), and with a row made for an item of OneDrive the client did not
@@ -21,6 +21,9 @@
 //! What is OneDrive's goes with the binding, in every one of them: the OneDrive version, its
 //! eTag, the placement, the stamp of the last confirmation and the full listing that saw
 //! the item. An item that lets its binding go keeps none of it.
+
+// test: a_binding_exchange_rolls_back_whole_on_a_failure_between_rows
+// test: an_atomic_save_keeps_both_bindings_after_reopening_before_either_cloud_step
 
 use rusqlite::{params, Connection, Transaction};
 
@@ -90,6 +93,7 @@ fn move_onedrive_side(from: &mut Item, to: &mut Item) {
     to.onedrive_item = from.onedrive_item.take();
     to.onedrive = from.onedrive.take();
     to.onedrive_etag = from.onedrive_etag.take();
+    to.onedrive_folder_ctag = from.onedrive_folder_ctag.take();
     to.onedrive_mime = from.onedrive_mime.take();
     to.placement = std::mem::replace(&mut from.placement, Placement::Placed);
     to.confirmed_at_count = std::mem::take(&mut from.confirmed_at_count);
@@ -141,6 +145,38 @@ pub(crate) fn take_over_binding(tx: &Transaction<'_>, replacing: LocalItemId, re
         return Err(refuse(format!("item {replacing} and item {replaced} are not two files: only a file's binding is taken over")));
     }
     hand_over(tx, giver, taker)
+}
+
+/// Exchanges two files' cloud identities while their kernel identities stay put. Both
+/// bindings are released before either is assigned, inside the save's transaction.
+/// The destination row is already hidden; it keeps the temporary cloud file's agreed
+/// content so its removal is conditional on that content still being unchanged.
+pub(crate) fn exchange_bindings(tx: &Transaction<'_>, replacing: LocalItemId, replaced: LocalItemId) -> Result<(), TreeError> {
+    let (mut taker, mut giver) = (read_below_root(tx, replacing)?, read_below_root(tx, replaced)?);
+    if taker.kind != ItemKind::File || giver.kind != ItemKind::File || taker.onedrive_item.is_none() || giver.onedrive_item.is_none() || taker.local.is_none() || giver.local.is_some() {
+        return Err(refuse("only a shown bound file and a hidden bound file exchange bindings".to_owned()));
+    }
+    if taker.content_presence != ContentPresence::OnDisk {
+        return Err(refuse("the replacing file must be downloaded before exchanging cloud bindings".to_owned()));
+    }
+    let seen = (find_seen_in_full_listing(tx, replacing)?, find_seen_in_full_listing(tx, replaced)?);
+    // Old sessions must never resume into a newly acquired binding. In-flight commits
+    // resolve their original target by binding and therefore follow it to the other row.
+    crate::step_memory::exchange_file_bindings(tx, replacing, replaced)?;
+    tx.execute("UPDATE items SET synced_parent_id = NULL, synced_name = NULL, synced_size = NULL, synced_mtime = NULL, synced_mtime_nsec = NULL, synced_hash = NULL, synced_ctag = NULL, synced_change_count = NULL WHERE local_item_id IN (?1, ?2)", params![replacing.as_i64(), replaced.as_i64()])?;
+    tx.execute("UPDATE items SET onedrive_drive_id = NULL, onedrive_item_id = NULL, onedrive_parent_id = NULL, onedrive_name = NULL, onedrive_folded_name = NULL, onedrive_size = NULL, onedrive_mtime = NULL, onedrive_mtime_nsec = NULL, onedrive_hash = NULL, onedrive_ctag = NULL, onedrive_etag = NULL, onedrive_mime = NULL, onedrive_folder_ctag = NULL WHERE local_item_id IN (?1, ?2)", params![replacing.as_i64(), replaced.as_i64()])?;
+    std::mem::swap(&mut taker.onedrive_item, &mut giver.onedrive_item);
+    std::mem::swap(&mut taker.onedrive, &mut giver.onedrive);
+    std::mem::swap(&mut taker.onedrive_etag, &mut giver.onedrive_etag);
+    std::mem::swap(&mut taker.onedrive_mime, &mut giver.onedrive_mime);
+    std::mem::swap(&mut taker.synced_place, &mut giver.synced_place);
+    std::mem::swap(&mut taker.synced_content, &mut giver.synced_content);
+    std::mem::swap(&mut taker.placement, &mut giver.placement);
+    std::mem::swap(&mut taker.confirmed_at_count, &mut giver.confirmed_at_count);
+    write_item(tx, &taker)?;
+    write_item(tx, &giver)?;
+    set_seen_in_full_listing(tx, replacing, seen.1)?;
+    set_seen_in_full_listing(tx, replaced, seen.0)
 }
 
 /// [`ItemStore::give_up_binding`], inside the caller's transaction. On any error the

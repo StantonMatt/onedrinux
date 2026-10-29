@@ -19,6 +19,8 @@ async fn account_mode_shows_the_mode_and_read_write_starts_its_sign_in_for_any_a
     let bus = TestBus::start();
     let dir = tempfile::tempdir().unwrap();
     let daemon = common::start_daemon(&bus, dir.path()).await;
+    // Exercise the existing-account read-only upgrade, independently of the add default.
+    daemon.manager.config().update(|config| { config.new_account_mode = Mode::ReadOnly; Ok::<_, konedrived::config::ConfigError>(()) }).unwrap();
     let account = daemon.manager.add("Personal", &daemon.connection).await.unwrap();
     let configured = || daemon.manager.config().account(&account.id).unwrap().mode;
     assert!(daemon.manager.config().snapshot().write_test_drive_ids.is_empty(), "the list is empty");

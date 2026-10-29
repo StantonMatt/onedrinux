@@ -81,11 +81,12 @@ async fn main() -> ExitCode {
 /// does something else. `KONEDRIVE_ACCOUNT`, a default for a whole shell, is ignored by them.
 fn takes_no_account(command: &Cmd) -> Option<&'static str> {
     match command {
+        Cmd::Store { .. } => Some("the store path decides the account"),
         Cmd::SetClientId { .. } => Some("the client ID is one for every account"),
         Cmd::Guard { .. } => Some("the download guard is one for every account"),
         Cmd::Settings { .. } => Some("the settings are one for every account"),
         Cmd::Account { command: AccountCmd::List } => Some("`account list` shows every account"),
-        Cmd::Account { command: AccountCmd::Add } => Some("`account add` adds a new account"),
+        Cmd::Account { command: AccountCmd::Add { .. } } => Some("`account add` adds a new account"),
         #[cfg(feature = "dev-tools")]
         Cmd::Dev { command: cli::DevCmd::AddAccount { .. } } => Some("`dev add-account` adds a new account"),
         Cmd::Account { command: AccountCmd::Rename { .. } | AccountCmd::Remove { .. } } => {
@@ -108,9 +109,13 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     if let (Some(_), Some(why)) = (&cli.account, takes_no_account(&command)) {
         return Err(Usage(format!("{why}: leave out --account")).into());
     }
+    if let Cmd::Store { command } = command {
+        return commands::store::store(command);
+    }
     let daemon = Daemon::connect().await?;
     let option = cli.account.as_deref();
     match command {
+        Cmd::Store { .. } => unreachable!(),
         Cmd::Account { command } => account(&daemon, option, command).await,
         Cmd::SetClientId { id } => set_client_id(&daemon, &id).await,
         Cmd::Guard { command } => commands::guard::guard(&daemon, command).await,

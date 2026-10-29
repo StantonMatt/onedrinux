@@ -41,6 +41,8 @@
 // test: a_file_saved_by_a_rename_over_the_original_is_one_item_with_its_binding_and_new_content
 // test: a_move_that_cannot_be_taken_back_asks_for_the_take_down_and_keeps_its_record
 
+// test: a_bound_temporary_saved_over_a_bound_file_marks_the_original_cloud_id
+
 use std::ffi::OsStr;
 use std::path::PathBuf;
 
@@ -153,6 +155,9 @@ pub(super) fn decide_rename(case: &RenameCase) -> Result<RenameDecision, Errno> 
         (ItemKind::File, ItemKind::Directory) => Err(Errno::EISDIR),
         (ItemKind::Directory, ItemKind::File) => Err(Errno::ENOTDIR),
         (ItemKind::Directory, ItemKind::Directory) if !case.is_displaced_empty => Err(Errno::ENOTEMPTY),
+        // A binding exchange would leave the only copy of the source content behind
+        // in its old cloud item. Hydrate it first; never delete that item on a guess.
+        (ItemKind::File, ItemKind::File) if moved.onedrive_item.is_some() && displaced.onedrive_item.is_some() && moved.content_presence != ContentPresence::OnDisk => Err(Errno::EAGAIN),
         (ItemKind::File, ItemKind::File) | (ItemKind::Directory, ItemKind::Directory) => Ok(RenameDecision::SaveOver { replacing: moved.local_item_id, replaced: displaced.local_item_id }),
     }
 }
@@ -320,7 +325,7 @@ impl ItemWriteOperations {
     /// check at start writes it.
     fn mark_saved_over_file(&self, case: &RenameCase, to_path: &std::path::Path) {
         let (Some(moved), Some(_), Some(displaced)) = (&case.moved, &case.moved_path, &case.displaced) else { return };
-        let (ItemKind::File, None, Some(binding)) = (moved.kind, &moved.onedrive_item, &displaced.onedrive_item) else { return };
+        let (ItemKind::File, Some(binding)) = (moved.kind, &displaced.onedrive_item) else { return };
         if let Err(error) = self.backing_directory.mark_downloaded_copy(to_path, binding.item_id.as_str()) {
             tracing::warn!("{} could not be marked as the copy of the file it was saved over: {error}", to_path.display());
         }

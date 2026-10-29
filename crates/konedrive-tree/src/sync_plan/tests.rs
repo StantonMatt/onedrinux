@@ -59,6 +59,7 @@ pub(crate) fn blank(number: i64, kind: ItemKind) -> Item {
         local: None,
         onedrive: None,
         onedrive_etag: None,
+        onedrive_folder_ctag: None,
         onedrive_mime: None,
         synced_place: None,
         synced_content: None,

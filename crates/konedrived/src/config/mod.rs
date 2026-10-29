@@ -20,6 +20,8 @@ pub(crate) mod migrate;
 mod model;
 mod paths;
 mod store;
+mod write_scope;
+pub(crate) use write_scope::{WriteScope, WriteScopeSource};
 
 pub(crate) use atomic::write_atomic;
 pub use config_trouble::{AccountHold, ConfigTrouble};

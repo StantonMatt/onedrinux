@@ -18,10 +18,13 @@ async fn a_folder_served_through_fuse_is_driven_from_the_command_line() {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, ResponseTemplate};
     let (f, graph) = harness_onedrive().await;
+    let mut hash = konedrive_graph::quickxor::QuickXor::new();
+    hash.update(b"abc");
+    let quick_xor = hash.finish_base64();
     Mock::given(method("GET"))
         .and(path("/me/drive/items/F"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "id": "F", "name": "f.txt", "size": 3, "cTag": "c1", "file": {},
+            "id": "F", "name": "f.txt", "size": 3, "cTag": "c1", "file": {"hashes": {"quickXorHash": quick_xor}},
             "parentReference": {"id": "D"},
             "@microsoft.graph.downloadUrl": format!("{}/dl/F", graph.uri())
         })))

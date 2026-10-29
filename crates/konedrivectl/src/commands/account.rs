@@ -10,13 +10,34 @@ use konedrivectl::text::refusals::{explain_account_error, explain_sync_error, Ac
 use konedrivectl::text::status::{decide_read_only_asked, mode_shown_text, read_only_asked_text, SWITCH_CANCELLED};
 
 use super::browser::{open_browser, spawn_browser};
-use crate::cli::AccountCmd;
+use crate::cli::{AccountCmd, WriteScopeCmd};
 use crate::daemon::Daemon;
 use crate::{read, wait};
 
 pub(crate) async fn account(daemon: &Daemon, option: Option<&str>, command: AccountCmd) -> anyhow::Result<()> {
     match command {
         AccountCmd::Mode { mode, force } => return account_mode(daemon, option, mode.as_deref(), force).await,
+        AccountCmd::WriteScope { command } => {
+            let chosen = daemon.chosen(option).await?;
+            let proxy = daemon.account(&chosen.account.path).await?;
+            match command {
+                WriteScopeCmd::Show => {
+                    if proxy.write_scope_enabled().await? {
+                        let paths = proxy.write_paths().await?;
+                        if paths.is_empty() { println!("No writes allowed."); }
+                        else { for path in paths { println!("{path}"); } }
+                    } else { println!("Whole drive."); }
+                }
+                WriteScopeCmd::Set { paths } => {
+                    proxy.set_write_scope(&paths.iter().map(String::as_str).collect::<Vec<_>>()).await?;
+                    println!("Write scope set.");
+                }
+                WriteScopeCmd::Clear => {
+                    proxy.clear_write_scope().await?;
+                    println!("Write scope cleared.");
+                }
+            }
+        }
         AccountCmd::List => {
             let mut rows = Vec::new();
             for path in daemon.manager.list().await? {
@@ -33,7 +54,7 @@ pub(crate) async fn account(daemon: &Daemon, option: Option<&str>, command: Acco
                 eprintln!("{}", warning_text(&trouble));
             }
         }
-        AccountCmd::Add => return super::add::add(daemon).await,
+        AccountCmd::Add { read_only } => return super::add::add(daemon, read_only).await,
         AccountCmd::Rename { named, label } => {
             let accounts = daemon.accounts().await?;
             daemon.check_loaded(&accounts).await?;

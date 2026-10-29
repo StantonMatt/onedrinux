@@ -306,7 +306,7 @@ fn what_was_agreed_to_be_in_a_directory_that_gives_up_its_binding_waits_for_it()
     assert_eq!(answer(&given, 2), row_step(RowStep::GiveUpBinding { item: versions(&given, 2) }));
     assert_eq!(answer(&given, 4), waits_for(2), "it gives up its own binding after");
     assert_eq!(answer(&given, 5), waits_for(2), "its row is dropped after");
-    assert_eq!(answer(&given, 6), waits_for(2), "it leaves the folder after");
+    assert!(matches!(answer(&given, 6), Answer::Wait(WaitReason::User(Reason::Refused(Some(_))))), "the renamed cloud-only item stays visible for resolution");
 }
 
 /// Found by the larger convergence run (seed 73, the caller's facts drawn): the steps of one

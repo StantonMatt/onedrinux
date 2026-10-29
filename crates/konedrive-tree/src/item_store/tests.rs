@@ -98,6 +98,7 @@ fn the_root_is_item_1_a_directory_with_no_place() {
             local: Some(ItemVersion { place: None, content: None }),
             onedrive: None,
             onedrive_etag: None,
+            onedrive_folder_ctag: None,
             onedrive_mime: None,
             synced_place: None,
             synced_content: None,
@@ -596,18 +597,18 @@ fn an_item_renamed_over_one_that_is_not_in_onedrive_takes_its_place_and_its_row_
 /// the replaced one is a row the folder does not show, with what was agreed on. The same
 /// for two directories of OneDrive.
 #[test]
-fn a_file_of_onedrive_renamed_over_another_file_of_onedrive_is_moved_and_the_other_is_removed_here() {
+fn a_file_of_onedrive_saved_over_another_keeps_the_destinations_cloud_identity() {
     let mut store = TreeStore::in_memory().unwrap();
     let (a, b) = (make_file(&mut store, ROOT, "a"), make_file(&mut store, ROOT, "b"));
-    synced(&mut store, a, "A");
+    let a_before = synced(&mut store, a, "A");
     let b_row = synced(&mut store, b, "B");
     store.item_store().apply(&LocalVersionChange::SavedOver { replacing: a, replaced: b }).unwrap();
     let a_row = item(&mut store, a);
-    assert_eq!((a_row.onedrive_item.clone(), a_row.local.clone().unwrap().place, a_row.synced_place.clone()), (Some(reference("A")), Some(place(ROOT, "b")), Some(place(ROOT, "a"))));
-    assert_eq!(a_row.file_sync_state(), Some(FileSyncState::Synced), "moved, and its content is the one agreed on");
+    assert_eq!((a_row.onedrive_item.clone(), a_row.local.clone().unwrap().place, a_row.synced_place.clone()), (Some(reference("B")), Some(place(ROOT, "b")), Some(place(ROOT, "b"))));
+    assert_eq!(a_row.synced_content, b_row.synced_content, "the upload replaces the original item's content");
     let removed_at = unsent_since(&mut store, b);
     assert!(removed_at.is_some());
-    assert_eq!(item(&mut store, b), Item { local: None, content_presence: ContentPresence::NotOnDisk, unsent_since: removed_at, ..b_row }, "removed here, to be removed in OneDrive");
+    assert_eq!(item(&mut store, b), Item { local: None, content_presence: ContentPresence::NotOnDisk, unsent_since: removed_at, ..Item { local_item_id: b, ..a_before } }, "the temp cloud file is removed conditionally");
     assert_eq!(names(&mut store, ROOT), ["b"]);
 
     let (c, d) = (make_directory(&mut store, ROOT, "c"), make_directory(&mut store, ROOT, "d"));

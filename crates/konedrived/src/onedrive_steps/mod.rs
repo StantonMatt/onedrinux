@@ -85,7 +85,7 @@
 // test: each_case_sends_the_request_of_its_planned_versions_and_commits_the_answer
 // test: a_request_is_guarded_by_the_etag_planned_from_else_the_synced_ctag_and_a_content_by_its_ctag
 // test: a_temporary_name_is_remembered_before_the_request_of_a_new_item_and_of_a_move
-// test: a_commit_that_finds_the_rows_changed_after_a_new_item_was_made_removes_it_when_the_row_is_gone
+// test: a_directory_made_while_its_row_went_is_kept_without_its_original_folder_ctag
 // test: a_commit_that_finds_the_rows_changed_otherwise_asks_for_a_cycle
 // test: a_step_replayed_after_a_death_between_its_request_and_its_commit_adopts_what_it_finds
 // test: a_request_is_on_record_before_it_leaves_and_the_record_goes_with_its_commit_or_its_certain_refusal
@@ -110,6 +110,11 @@
 // eTag alone moved, with the new eTag and the cTag it had (measured on a personal account, 2026-10-11,
 // by a change of the time of last change and of the description). A content is guarded by its cTag,
 // which none of that moves.
+
+// test: a_folder_ctag_refuses_an_unlisted_descendant_creation_edit_or_removal
+// test: a_directory_removal_waits_for_a_later_completed_listing
+// test: an_uploaded_temporary_saved_over_a_cloud_file_updates_the_original_id
+// test: an_upload_in_flight_follows_the_temporary_binding_after_an_atomic_save
 
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
@@ -140,6 +145,7 @@ pub(crate) mod name_holders;
 /// What is left to clean in OneDrive: sessions to cancel, items uploads left, requests
 /// whose answer was never committed.
 pub(crate) mod session_cancellations;
+mod write_scope;
 
 use confirmed_item::{decide_content_guard, decide_guard, to_confirmed_item, to_graph_name, RequestGuard};
 use content_upload::{hash_content, ContentTarget, ContentUpload, NewFilePlace, SendContentError, SentContent};
@@ -210,9 +216,12 @@ fn describe_name_taken(item: &ItemVersions, name: &OsStr, holder_name: std::ffi:
 
 /// The runner of the steps towards OneDrive, for one folder.
 pub(crate) struct OneDriveSteps {
+    /// Listing generation seen when each unsent directory removal first ran.
+    directory_removal_listings: std::sync::Mutex<std::collections::BTreeMap<(LocalItemId, Option<u64>), u64>>,
     graph: GraphAccess,
-    /// Held across each commit and nothing else (`docs/design/sync.md` §7.1): never across
-    /// a request, a hash or a sync of a file.
+    write_scope: crate::config::WriteScopeSource,
+    /// Serializes commits and the binding check plus descriptor marks with rename.
+    /// Never held across a network request or a hash.
     tree_lock: Arc<tokio::sync::Mutex<()>>,
     content_files: Arc<ItemContentFiles>,
     content_upload: ContentUpload,
@@ -233,7 +242,7 @@ impl OneDriveSteps {
     /// with the parts it made before.
     #[allow(clippy::too_many_arguments)]
     pub fn new(graph: GraphAccess, tree_lock: Arc<tokio::sync::Mutex<()>>, content_files: Arc<ItemContentFiles>, content_upload: ContentUpload, name_holders: NameHolders, lost_answers: LostAnswers, made_items: MadeItems, running_steps: Arc<RunningSteps>, onedrive_space: Arc<OneDriveSpace>) -> Self {
-        Self { graph, tree_lock, content_files, content_upload, name_holders, lost_answers, made_items, running_steps, onedrive_space }
+        Self { directory_removal_listings: Default::default(), graph, tree_lock, content_files, content_upload, name_holders, lost_answers, made_items, running_steps, onedrive_space, write_scope: Default::default() }
     }
 
     /// Runs `step` and answers what came of it: the function of its case. Called by the
@@ -245,6 +254,7 @@ impl OneDriveSteps {
     /// (`RunningSteps::begin_commit`): what the step memory holds — the record of the
     /// request among it — lets the next run go on or adopt.
     pub(crate) async fn run(&self, step: OneDriveStep) -> StepOutcome {
+        if let Err(outcome) = self.check_write_scope(&step).await { return outcome; }
         match &step {
             OneDriveStep::MakeDirectory { item, parent, name } => self.run_make_directory(item, parent, name).await,
             OneDriveStep::SendNewFile { item, parent, name } => self.run_send_new_file(item, parent, name).await,
@@ -480,16 +490,26 @@ impl OneDriveSteps {
         }
     }
 
-    /// After the commit of an upload was written, with no lock: the file that was sent is
-    /// marked, and the bytes counted off the space OneDrive has.
+    /// After an upload commit: count its bytes, then mark the descriptor while the
+    /// row still owns the confirmed binding, serialized with the mount's rename.
     async fn mark_sent_content(&self, item: &ItemVersions, file: &Arc<LocalContentFile>, sent: &SentContent) {
+        self.onedrive_space.count_uploaded(file.size());
+        // A save can exchange bindings while an upload runs. Serialize the row check
+        // and descriptor marks with the mount's rename, so the old upload cannot put
+        // the temporary cloud id back onto the file after the save marked its new id.
+        let _tree = self.tree_lock.lock().await;
+        let (id, binding) = (item.local_item_id, sent.item.item.clone());
+        match self.graph.store.read_items(move |items| Ok(items.find_item(id)?.is_some_and(|row| row.onedrive_item.as_ref() == Some(&binding)))).await {
+            Ok(true) => {},
+            Ok(false) => return,
+            Err(error) => { tracing::warn!("cannot check the uploaded file's binding before marking it: {error}"); return; }
+        }
         let (content_files, marked_file, confirmed) = (Arc::clone(&self.content_files), Arc::clone(file), sent.item.clone());
         match tokio::task::spawn_blocking(move || content_files.mark_sent_file(&marked_file, &confirmed)).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => tracing::warn!("the file of item {} is not marked as sent: {error}", item.local_item_id),
             Err(error) => tracing::warn!("the marking of the file of item {} ended: {error}", item.local_item_id),
         }
-        self.onedrive_space.count_uploaded(file.size());
     }
 
     /// `SendNewFile`: a file made here is sent, with its content, into `parent` under
@@ -794,31 +814,9 @@ impl OneDriveSteps {
         }
     }
 
-    /// `SendDirectoryRemoval`: the removal of a directory is sent, with no guard, as one
-    /// removal of all OneDrive has in it.
-    ///
-    /// Request: `delete_folder`. 404 is a confirmation. BEFORE the request
-    /// leaves, under the tree lock, in one job of the store:
-    /// `ItemStore::can_directory_removal_be_sent(item,
-    /// below, items_with_running_step, destinations_of_running_steps)`, the two sets as
-    /// the plan is given them and with nothing taken out — `RunningSteps::list_items`
-    /// and the items of the request records that stand
-    /// (`ItemReader::list_request_records`), and the rows bound to
-    /// `RunningSteps::list_destinations` and to the destinations of those records
-    /// (`ItemReader::find_bound_item` of each, as `plan_input.rs` resolves them), both
-    /// read under the lock: every item a request not
-    /// settled yet is about, and every directory such a request sends an item into, a
-    /// request whose answer was lost among them, by its record; the
-    /// store leaves this step's own request out itself; when it
-    /// answers no, nothing is sent and the step ends `RowsChanged(Nothing)` — an
-    /// unguarded removal takes all OneDrive has in the directory, and it is sent only
-    /// while the rows still say that all of it was shown here and removed here, no
-    /// listing is under way and no request not settled is about any of it. When it
-    /// answers yes, the record of this removal is written in the same job. The lock is
-    /// let go before the request.
-    /// Commit: `commit_send_directory_removal(item, below)`, which asks the same of
-    /// the rows alone. `RowsChanged`: the directory is gone in OneDrive with what the rows
-    /// still say it has: a listing cycle is asked for.
+    /// Removes the planned subtree only after a new listing cycle, the store's checks
+    /// of every known descendant and outstanding request, and a conditional Graph DELETE.
+    /// Missing folder tags wait for a listing; there is no unconditional retry.
     async fn run_send_directory_removal(&self, item: &ItemVersions, below: &[ItemVersions]) -> StepOutcome {
         let id = item.local_item_id;
         let Some(onedrive_item) = item.onedrive_item.clone() else {
@@ -827,6 +825,21 @@ impl OneDriveSteps {
         if let Err(outcome) = self.check_drive(item, &onedrive_item) {
             return outcome;
         }
+        let listing = self.graph.store.call(|store| Ok((store.listing_count()?, store.item_store().find_listing_under_way()?.is_some()))).await;
+        let (count, under_way) = match listing { Ok(listing) => listing, Err(error) => return fail_store(error) };
+        let refreshed = {
+            let mut listings = crate::panic::lock(&self.directory_removal_listings);
+            listings.retain(|(known, stamp), _| *known != id || *stamp == item.unsent_since);
+            let first = listings.entry((id, item.unsent_since)).or_insert(count);
+            count > *first && !under_way
+        };
+        if !refreshed {
+            return StepOutcome::RowsChanged(RowsChangedFollowUp::CycleWanted);
+        }
+        let guard = match item.onedrive_folder_ctag.as_deref().filter(|tag| !tag.is_empty()) {
+            Some(tag) => tag.to_owned(),
+            None => return StepOutcome::Refused(StepRefusal::ItemChanged),
+        };
         let can_be_sent = {
             let _tree = self.tree_lock.lock().await;
             let (mut busy_items, mut destinations) = (self.running_steps.list_items(), self.running_steps.list_destinations());
@@ -862,7 +875,7 @@ impl OneDriveSteps {
         }
         let answered = {
             let _slot = self.graph.drive.pool().acquire(Class::Metadata).await;
-            self.graph.drive.delete_folder(onedrive_item.item_id.as_str()).await
+            self.graph.drive.delete_folder(onedrive_item.item_id.as_str(), &guard).await
         };
         if let Err(outcome) = self.follow_removal_answer(item, answered).await {
             return outcome;
@@ -872,6 +885,7 @@ impl OneDriveSteps {
             Ok(committed) => committed,
             Err(outcome) => return outcome,
         };
+        crate::panic::lock(&self.directory_removal_listings).remove(&(id, item.unsent_since));
         match committed.outcome {
             StepCommitOutcome::Written => describe_written(ActivityKind::CloudDeleted, committed.path_before, None),
             StepCommitOutcome::RowsChanged => StepOutcome::RowsChanged(RowsChangedFollowUp::CycleWanted),

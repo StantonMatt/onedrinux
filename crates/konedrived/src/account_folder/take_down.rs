@@ -1,7 +1,6 @@
 //! Taking a folder down: a Forget, `Accounts.Remove`'s first step, and a folder that was
 //! moved or deleted under its sync.
 
-use std::io;
 use std::path::{Path, PathBuf};
 
 use std::sync::Arc;
@@ -140,9 +139,9 @@ impl SyncService {
             }
         };
         if closed == TakeDownOutcome::StoreStillOpen {
-            tracing::warn!("the tree store of {} is still open somewhere; its files are removed all the same", record.root.path.display());
+            tracing::warn!("the tree store of {} is still open somewhere; its files stay untouched until it can be quarantined", record.root.path.display());
         }
-        self.remove_tree_store().await;
+        self.remove_tree_store().await?;
         // Only when *this daemon* is the one that excluded the folder from Baloo — never a folder that arrived
         // already excluded, and this survives a restart in between (the record carries it forward from
         // `config.toml`).
@@ -177,16 +176,15 @@ impl SyncService {
         self.let_go_of_activity().await;
     }
 
-    /// Removes the tree store's files: a forgotten folder's, or one left from a
+    /// Quarantines the tree store's files: a forgotten folder's, or one left from a
     /// folder forgotten earlier when a new one is registered. Inside a change, once
     /// the folder is absent: no sync holds the store, and the change has let go of its own.
-    pub(super) async fn remove_tree_store(&self) {
-        // Its pause goes with it.
+    pub(super) async fn remove_tree_store(&self) -> Result<(), SyncError> {
         self.drop_pause().await;
-        let Some(tree_db) = self.sync_paths().map(|paths| paths.tree_db.clone()) else { return };
-        if let Err(e) = tokio::task::spawn_blocking(move || remove_tree_files(&tree_db)).await {
-            tracing::warn!("the task removing the tree store failed: {e}");
-        }
+        let Some(tree_db) = self.sync_paths().map(|paths| paths.tree_db.clone()) else { return Ok(()) };
+        tokio::task::spawn_blocking(move || remove_tree_files(&tree_db)).await
+            .map_err(|error| SyncError::Store(format!("the store quarantine task failed: {error}")))?
+            .map_err(|error| SyncError::Store(format!("the store could not be quarantined; its files are preserved: {error}")))
     }
 }
 
@@ -387,18 +385,13 @@ fn retire_in(stopped: &mut Stopped<'_>) {
     folder.standing = Standing::Retiring { held };
 }
 
-/// The tree store's files: the database and SQLite's journal beside it.
-fn remove_tree_files(tree_db: &Path) {
-    for suffix in ["", "-wal", "-shm"] {
-        let mut name = tree_db.as_os_str().to_owned();
-        name.push(suffix);
-        let file = PathBuf::from(name);
-        if let Err(e) = std::fs::remove_file(&file) {
-            if e.kind() != io::ErrorKind::NotFound {
-                tracing::warn!("cannot remove {}: {e}", file.display());
-            }
-        }
-    }
+/// Forget preserves the store too. The next registration can carry readable pins and
+/// export old namespace intentions; removing an account archives this entire directory.
+fn remove_tree_files(tree_db: &Path) -> Result<(), konedrive_tree::TreeError> {
+    if !tree_db.try_exists()? { return Ok(()); }
+    let quarantine = konedrive_tree::TreeStore::quarantine_for_reset(tree_db)?;
+    tracing::info!("forgotten store preserved at {}", quarantine.display());
+    Ok(())
 }
 
 #[cfg(test)]

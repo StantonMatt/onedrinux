@@ -104,3 +104,32 @@ fn retry_after_reads_seconds_and_http_dates() {
     assert_eq!(wait("soon"), None);
     assert_eq!(retry_after(&header::HeaderMap::new(), now), None);
 }
+
+#[tokio::test]
+async fn a_folder_delete_carries_its_ctag_and_a_412_is_not_retried() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE")).and(path("/me/drive/items/D")).and(header("if-match", "folder-c1"))
+        .respond_with(ResponseTemplate::new(412)).expect(1).mount(&server).await;
+    assert!(matches!(client(&server).delete_folder("D", "folder-c1").await, Err(WriteError::Changed)));
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn opening_windows_use_graphs_date_and_never_an_invalid_clock() {
+    for (date, expected) in [("Sun, 06 Nov 1994 08:49:37 GMT", Some(784_111_777)), ("invalid", None)] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/me/drive/items/P"))
+            .respond_with(ResponseTemplate::new(200).insert_header("Date", date).set_body_json(json!({"id": "P", "folder": {}})))
+            .mount(&server).await;
+        assert_eq!(client(&server).item_with_date("P").await.unwrap().1, expected);
+    }
+}
+
+#[tokio::test]
+async fn a_folder_delete_without_a_specific_version_sends_nothing() {
+    let server = MockServer::start().await;
+    for guard in ["", " ", "*"] {
+        assert!(matches!(client(&server).delete_folder("D", guard).await, Err(WriteError::Failed(_))));
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+}

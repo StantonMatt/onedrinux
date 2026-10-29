@@ -15,6 +15,7 @@ fn item() -> ItemVersions {
         local: Some(version.clone()),
         onedrive: Some(version),
         onedrive_etag: Some("e1".to_owned()),
+        onedrive_folder_ctag: None,
         synced_place: Some(place),
         synced_content: Some(content),
         content_presence: ContentPresence::NotOnDisk,

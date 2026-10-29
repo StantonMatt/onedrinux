@@ -11,6 +11,7 @@ publish = false
 testing = []
 
 [dependencies]
+httpdate = "1"
 anyhow.workspace = true
 async-trait.workspace = true
 base64.workspace = true

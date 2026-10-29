@@ -289,7 +289,11 @@ impl ItemFilesInterface {
         let id = item.local_item_id;
         let (store, downloads) = (self.store.clone(), self.downloader.app_downloads.clone());
         let change = self.write_operation_thread.run_and_wait(move || {
-            let change = store.call_blocking(move |store| store.item_store().set_item_pin(id, is_pinned)).map_err(to_refusal)?;
+            let change = store.call_blocking(move |store| {
+                let change = store.item_store().set_item_pin(id, is_pinned)?;
+                store.sync_write_ahead_log()?;
+                Ok(change)
+            }).map_err(to_refusal)?;
             if is_pinned && matches!(change, PinChange::Written | PinChange::AlreadySo) {
                 forget_app_downloads_below(&store, &downloads, id)?;
             }
