@@ -12,8 +12,9 @@
 //!
 //! **Answers for:** who dedups (a download of the same
 //! item and content that runs is joined, whoever asks: a read, an open for writing,
-//! `Files.Hydrate`, the plan's pin); who answers "is downloading" (the state attribute,
-//! free-up); from which file a read is answered while its download runs. A download of
+//! `Files.Hydrate`, the plan's pin); who answers "is downloading" (free-up) and "is
+//! hydrating" (the delayed state attribute); from which file a read is answered while
+//! its download runs. A download of
 //! another content of the same item is another download: the older one's landing finds
 //! the row changed and drops its file.
 //!
@@ -52,6 +53,8 @@
 // test: the_failure_of_a_download_onedrive_did_not_answer_is_kept_with_what_is_remembered_of_its_key
 // test: a_handle_kept_after_the_abort_aborts_its_own_task_and_leaves_the_next_download_of_the_key
 // test: the_unfinished_files_are_those_of_the_running_downloads_that_are_not_whole_and_of_the_failed_ones
+// test: whole_downloads_wait_to_be_shown_and_old_timers_never_show_a_new_run
+// test: a_range_and_a_whole_download_keep_the_shown_item_continuous
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -106,7 +109,7 @@ pub(super) enum DownloadAsker {
 /// One download that runs, told from every other — also from an earlier and a later one
 /// of the same key. Handed out when a download is started, and given back with every
 /// word of that download: what an older download says changes nothing of a newer one.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct DownloadRun {
     key: DownloadKey,
     number: u64,
@@ -135,6 +138,8 @@ enum State {
     Running {
         /// Which download it is (`DownloadRun`).
         number: u64,
+        /// The fetch has stayed in flight for the emblem delay.
+        is_shown: bool,
         waiters: Vec<Waiter>,
         written_up_to: Arc<AtomicU64>,
         file: Option<Arc<File>>,
@@ -184,6 +189,7 @@ struct States {
 /// A running download taken out of the states: who waited for it, the file it wrote
 /// into, and what its task is aborted by.
 struct TakenDownload {
+    was_shown: bool,
     waiters: Vec<Waiter>,
     /// The file it wrote into, when that file is not whole: what may be gone on from.
     unfinished_file: Option<Arc<File>>,
@@ -212,7 +218,7 @@ fn take_running(states: &mut HashMap<DownloadKey, State>, key: &DownloadKey) -> 
         return None;
     }
     match states.remove(key) {
-        Some(State::Running { waiters, file, is_file_whole, abort, another_content, .. }) => Some(TakenDownload { waiters, unfinished_file: file.filter(|_| !is_file_whole), abort, another_content }),
+        Some(State::Running { waiters, file, is_file_whole, abort, another_content, is_shown, .. }) => Some(TakenDownload { was_shown: is_shown, waiters, unfinished_file: file.filter(|_| !is_file_whole), abort, another_content }),
         Some(State::Failed { .. } | State::AnotherContent { .. }) | None => None,
     }
 }
@@ -280,7 +286,8 @@ fn list_another_content_numbers(states: &HashMap<DownloadKey, State>) -> impl It
 /// The download states of one mount.
 pub(crate) struct ItemDownloadStates {
     states: std::sync::Mutex<States>,
-    pub(crate) changes: crate::sync_parts::state_changes::StateChanges,
+    pub(crate) changes: Arc<crate::sync_parts::state_changes::StateChanges>,
+    pub(super) range_reads: Arc<super::range_read_states::RangeReadStates>,
     bytes_read_as_ranges: std::sync::Mutex<HashMap<LocalItemId, u64>>,
     /// `[transfers] download_after`.
     download_after: u64,
@@ -291,7 +298,9 @@ pub(crate) struct ItemDownloadStates {
 impl ItemDownloadStates {
     /// No download runs. Made by the mount's build.
     pub(super) fn new(download_after: u64) -> Self {
-        ItemDownloadStates { changes: Default::default(), states: std::sync::Mutex::default(), bytes_read_as_ranges: std::sync::Mutex::default(), download_after, last_run_number: AtomicU64::new(0) }
+        let changes = Arc::default();
+        let range_reads = Arc::new(super::range_read_states::RangeReadStates::new(Arc::clone(&changes)));
+        ItemDownloadStates { changes, range_reads, states: std::sync::Mutex::default(), bytes_read_as_ranges: std::sync::Mutex::default(), download_after, last_run_number: AtomicU64::new(0) }
     }
 
     /// A download of `key` is asked for by `asker`: joined when one runs, started
@@ -307,6 +316,7 @@ impl ItemDownloadStates {
     /// Called by `ItemDownloader::download` alone.
     pub(super) fn start_or_join(&self, key: &DownloadKey, asker: &DownloadAsker, waiter: Option<Waiter>) -> ItemDownloadStart {
         let is_asker_beyond_plan = !matches!(asker, DownloadAsker::PlanPin { .. });
+        let range_is_shown = self.range_reads.is_hydrating(key.item);
         let mut states = crate::panic::lock(&self.states);
         if states.is_stopped {
             drop(states);
@@ -328,8 +338,13 @@ impl ItemDownloadStates {
             Some(State::AnotherContent { fact }) => (None, Some(fact)),
             Some(State::Running { .. }) | None => (None, None),
         };
+        // A shown item stays shown across overlapping downloads and the hand-off
+        // from a slow range. A fresh, quick download still has its own delay.
+        let is_shown = range_is_shown || states.by_key.iter().any(|(other, state)|
+            other.item == key.item && matches!(state, State::Running { is_shown: true, .. }));
         let running = State::Running {
             number,
+            is_shown,
             waiters: waiter.into_iter().collect(),
             written_up_to: Arc::default(),
             file: None,
@@ -342,6 +357,29 @@ impl ItemDownloadStates {
         drop(states);
         self.changes.changed(vec![key.item]);
         ItemDownloadStart::Started { run: DownloadRun { key: key.clone(), number }, unfinished_file }
+    }
+
+    /// The fetch of `run` has lasted past the emblem delay. An older timer can never
+    /// show a later download of the same content.
+    pub(super) fn show_download(&self, run: &DownloadRun) {
+        let changed = {
+            let mut states = crate::panic::lock(&self.states);
+            if !is_running(&states.by_key, run) { return; }
+            let mut changed = false;
+            for (key, state) in &mut states.by_key {
+                if key.item == run.key.item {
+                    if let State::Running { is_shown, .. } = state {
+                        changed |= !*is_shown;
+                        *is_shown = true;
+                    }
+                }
+            }
+            changed
+        };
+        if changed {
+            self.range_reads.keep_shown(run.key.item);
+            self.changes.changed(vec![run.key.item]);
+        }
     }
 
     /// Whether anything but the plan's pin has asked for the download `run`, which runs:
@@ -404,6 +442,7 @@ impl ItemDownloadStates {
             keep_left_by_download(&mut states.by_key, key, &taken, None);
             taken
         };
+        if taken.was_shown { self.range_reads.keep_shown(key.item); }
         taken.abort();
         self.changes.changed(vec![key.item]);
         true
@@ -501,9 +540,14 @@ impl ItemDownloadStates {
             } else if failed && !matches!(outcome, Err(libc::ESTALE | libc::EINTR | libc::EAGAIN)) {
                 *states.failures.entry(key.clone()).or_default() |= asked_beyond_plan;
             }
+            if taken.was_shown { self.range_reads.keep_shown(key.item); }
             taken.waiters
         };
-        self.changes.changed(vec![key.item]);
+        if outcome.is_ok() {
+            self.changes.content_changed(vec![key.item]);
+        } else {
+            self.changes.changed(vec![key.item]);
+        }
         if outcome.is_ok() {
             // Downloaded: what was read of it as ranges counts no more.
             crate::panic::lock(&self.bytes_read_as_ranges).remove(&key.item);
@@ -528,6 +572,7 @@ impl ItemDownloadStates {
             }
             let Some(taken) = take_running(&mut states.by_key, &run.key) else { return };
             remember_another_content(&mut states.by_key, &run.key, AnotherContentFact { number: run.number, failed_asking: None });
+            if taken.was_shown { self.range_reads.keep_shown(run.key.item); }
             taken.waiters
         };
         self.changes.changed(vec![run.key.item]);
@@ -594,6 +639,7 @@ impl ItemDownloadStates {
             }
             taken
         };
+        if taken.as_ref().is_some_and(|taken| taken.was_shown) { self.range_reads.keep_shown(run.key.item); }
         self.changes.changed(vec![run.key.item]);
         for waiter in taken.into_iter().flat_map(|taken| taken.waiters) {
             let _ = waiter.send(Err(libc::EIO));
@@ -636,9 +682,19 @@ impl ItemDownloadStates {
         }
     }
 
-    /// Whether a download of `item` runs, of any content: the state attribute, free-up.
+    /// Whether a whole download of `item` runs, of any content: admission and free-up.
+    /// The shown attribute separately asks `is_hydrating`.
     pub(super) fn is_downloading(&self, item: LocalItemId) -> bool {
         crate::panic::lock(&self.states).by_key.iter().any(|(key, state)| key.item == item && matches!(state, State::Running { .. }))
+    }
+
+    /// What the state attribute shows: a whole download or a range fetch that was slow
+    /// enough to be shown and has not lingered out. This never changes download admission
+    /// or free-up decisions, which ask `is_downloading` for whole downloads alone.
+    pub(super) fn is_hydrating(&self, item: LocalItemId) -> bool {
+        crate::panic::lock(&self.states).by_key.iter().any(|(key, state)|
+            key.item == item && matches!(state, State::Running { is_shown: true, .. }))
+            || self.range_reads.is_hydrating(item)
     }
 
     /// `bytes` more of `item` were read as ranges; whether that reaches the threshold at

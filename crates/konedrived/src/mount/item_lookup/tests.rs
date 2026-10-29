@@ -466,6 +466,8 @@ fn the_state_attribute_is_the_rows_sync_state_and_whether_it_is_downloading() {
     assert_eq!(find_xattr(&fixture, &lookup, node, XATTR_STATE).unwrap(), "online-only");
     let key = DownloadKey { item: node, content: file.local.clone().unwrap().content.unwrap() };
     let crate::mount::item_download_states::ItemDownloadStart::Started { run, .. } = fixture.download_states.start_or_join(&key, &DownloadAsker::Read, None) else { panic!("the download starts") };
+    assert_eq!(find_xattr(&fixture, &lookup, node, XATTR_STATE).unwrap(), "online-only", "the emblem delay has not passed");
+    fixture.download_states.show_download(&run);
     assert_eq!(find_xattr(&fixture, &lookup, node, XATTR_STATE).unwrap(), "hydrating");
     fixture.download_states.finish(&run, Ok(()));
     fixture.land_copy(node, b"hello");

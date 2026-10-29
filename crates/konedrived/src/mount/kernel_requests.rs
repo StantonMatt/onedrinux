@@ -14,9 +14,18 @@
 //!
 //! A reply that goes to the write-operation thread or to the runtime is moved into a
 //! closure ([`ReplyTo`]); dropped unanswered — the thread stopped, the task aborted — it
-//! answers the kernel an error by itself.
+//! answers EIO explicitly through [`pending_reply`], without dropping a raw reply.
 //!
 //! Made by `ItemMount::serve`, which gives it to the session.
+
+// test: the_kernels_interrupt_aborts_the_read_of_its_request_and_no_other
+// test: a_stop_gives_up_every_read_and_each_one_started_after_it
+// test: an_unpolled_interrupt_and_a_panicking_read_still_answer_once
+// test: a_read_on_a_stopped_runtime_is_answered_eio_and_forgotten
+
+mod pending_reply;
+
+use pending_reply::{PendingReply, reply_to};
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -115,7 +124,7 @@ fn to_fopen_flags(opened: &OpenedFile) -> FopenFlags {
 
 /// The reply of an open, as what an operation answers goes into.
 fn reply_to_open(reply: ReplyOpen) -> ReplyTo<OpenedFile> {
-    Box::new(move |opened| match opened {
+    reply_to::<OpenedFile>(move |opened| match opened {
         Ok(opened) => reply.opened(to_file_handle(opened.fh), to_fopen_flags(&opened)),
         Err(errno) => reply.error(errno),
     })
@@ -123,7 +132,7 @@ fn reply_to_open(reply: ReplyOpen) -> ReplyTo<OpenedFile> {
 
 /// The reply of a setattr.
 fn reply_to_attributes(reply: ReplyAttr) -> ReplyTo<FileAttr> {
-    Box::new(move |attributes| match attributes {
+    reply_to(move |attributes| match attributes {
         Ok(attributes) => reply.attr(&ATTRIBUTE_LIFETIME, &attributes),
         Err(errno) => reply.error(errno),
     })
@@ -131,7 +140,7 @@ fn reply_to_attributes(reply: ReplyAttr) -> ReplyTo<FileAttr> {
 
 /// The reply of a mkdir or a mknod.
 fn reply_to_made_entry(reply: ReplyEntry) -> ReplyTo<MadeEntry> {
-    Box::new(move |made| match made {
+    reply_to::<MadeEntry>(move |made| match made {
         Ok(made) => reply.entry(&ATTRIBUTE_LIFETIME, &made.entry.attributes, Generation(0)),
         Err(errno) => reply.error(errno),
     })
@@ -139,7 +148,7 @@ fn reply_to_made_entry(reply: ReplyEntry) -> ReplyTo<MadeEntry> {
 
 /// The reply of a create.
 fn reply_to_created(reply: ReplyCreate) -> ReplyTo<MadeEntry> {
-    Box::new(move |made| match made {
+    reply_to::<MadeEntry>(move |made| match made {
         Ok(made) => reply.created(&ATTRIBUTE_LIFETIME, &made.entry.attributes, Generation(0), to_file_handle(made.fh), FopenFlags::empty()),
         Err(errno) => reply.error(errno),
     })
@@ -147,7 +156,7 @@ fn reply_to_created(reply: ReplyCreate) -> ReplyTo<MadeEntry> {
 
 /// The reply of an unlink, an rmdir or a rename.
 fn reply_to_done(reply: ReplyEmpty) -> ReplyTo<()> {
-    Box::new(move |done| match done {
+    reply_to(move |done| match done {
         Ok(()) => reply.ok(),
         Err(errno) => reply.error(errno),
     })
@@ -157,8 +166,47 @@ fn reply_to_done(reply: ReplyEmpty) -> ReplyTo<()> {
 /// mount stopped, after which none is kept running.
 #[derive(Default)]
 struct KeptReads {
-    by_request: HashMap<u64, AbortHandle>,
+    by_request: HashMap<u64, PendingRead>,
     is_stopped: bool,
+}
+
+/// The reply is shared only to arbitrate completion against interrupt and stop. Taking
+/// it is the one answer; aborting the task afterward releases its active range slot.
+struct PendingRead {
+    task: Option<AbortHandle>,
+    reply: Arc<Mutex<Option<PendingReply<Vec<u8>>>>>,
+}
+
+impl PendingRead {
+    fn cancel(self, errno: Errno) {
+        let reply = crate::panic::lock(&self.reply).take();
+        if let Some(reply) = reply { reply.answer(Err(errno)); }
+        if let Some(task) = self.task { task.abort(); }
+    }
+}
+
+/// Kept by the future from its creation, including before its first poll. Completion,
+/// panic and abort all remove the request; an unanswered reply deliberately gets EIO.
+struct ReadCompletion {
+    request: u64,
+    reads: Arc<InterruptibleReads>,
+    reply: Arc<Mutex<Option<PendingReply<Vec<u8>>>>>,
+}
+
+impl ReadCompletion {
+    fn answer(self, answer: Result<Vec<u8>, Errno>) {
+        self.reads.remove(self.request);
+        let reply = crate::panic::lock(&self.reply).take();
+        if let Some(reply) = reply { reply.answer(answer); }
+    }
+}
+
+impl Drop for ReadCompletion {
+    fn drop(&mut self) {
+        self.reads.remove(self.request);
+        let reply = crate::panic::lock(&self.reply).take();
+        drop(reply);
+    }
 }
 
 /// The reads of one served mount that wait for OneDrive on the runtime. Made by
@@ -169,25 +217,36 @@ struct KeptReads {
 pub(super) struct InterruptibleReads(Mutex<KeptReads>);
 
 impl InterruptibleReads {
-    /// Starts a read with `start` and keeps it under `request`, in one hold of the lock:
-    /// the read's own [`remove`](Self::remove) waits for that lock, so it never comes
-    /// before the keeping and leaves no entry behind. `start` only spawns. After the
-    /// stop the read is aborted at once.
-    fn start(&self, request: u64, start: impl FnOnce() -> AbortHandle) {
-        let mut reads = crate::panic::lock(&self.0);
-        let read = start();
-        if reads.is_stopped {
-            return read.abort();
+    /// Registers the reply before spawning, then attaches the task. Interrupt or stop
+    /// between those steps answers the reply now and aborts the task once it arrives.
+    /// Spawning holds no lock: a stopped runtime may drop an unpolled future inline,
+    /// whose completion guard must still be able to remove the request.
+    fn start(&self, request: u64, reply: Arc<Mutex<Option<PendingReply<Vec<u8>>>>>, start: impl FnOnce() -> AbortHandle) {
+        let stopped = {
+            let mut reads = crate::panic::lock(&self.0);
+            if reads.is_stopped { true } else {
+                reads.by_request.insert(request, PendingRead { task: None, reply: Arc::clone(&reply) });
+                false
+            }
+        };
+        if stopped {
+            let reply = crate::panic::lock(&reply).take();
+            if let Some(reply) = reply { reply.answer(Err(Errno::EIO)); }
         }
-        reads.by_request.insert(request, read);
+        let task = start();
+        let mut reads = crate::panic::lock(&self.0);
+        match reads.by_request.get_mut(&request) {
+            Some(read) => read.task = Some(task),
+            None => task.abort(),
+        }
     }
 
     fn remove(&self, request: u64) {
         crate::panic::lock(&self.0).by_request.remove(&request);
     }
 
-    /// The mount stops: every read is aborted — its reply, dropped with the task, answers
-    /// the kernel — and each one started later is aborted as it starts. Called by
+    /// The mount stops: every read is answered EIO and aborted, as is each one started
+    /// later. No raw reply is dropped unanswered. Called by
     /// `ItemMount::stop`.
     pub(super) fn stop(&self) {
         let reads = {
@@ -195,15 +254,15 @@ impl InterruptibleReads {
             reads.is_stopped = true;
             std::mem::take(&mut reads.by_request)
         };
-        reads.into_values().for_each(|read| read.abort());
+        reads.into_values().for_each(|read| read.cancel(Errno::EIO));
     }
 
-    /// The kernel gave the request up: its read is aborted, and its reply, dropped with
-    /// the task, answers the kernel.
+    /// The kernel gave the request up: answer that read EINTR exactly once, then abort
+    /// its task. A completed request is no longer kept and is left alone.
     fn interrupt(&self, request: u64) {
         let read = crate::panic::lock(&self.0).by_request.remove(&request);
         if let Some(read) = read {
-            read.abort();
+            read.cancel(Errno::EINTR);
         }
     }
 }
@@ -241,18 +300,19 @@ impl KernelRequests {
         let request = req.unique().0;
         let pid = req.pid();
         let (requests, reads) = (Arc::clone(&self.requests), Arc::clone(&self.interruptible_reads));
+        let reply = Arc::new(Mutex::new(Some(PendingReply::new(Box::new(move |answer: Result<Vec<u8>, Errno>| match answer {
+            Ok(bytes) => reply.data(&bytes),
+            Err(errno) => reply.error(errno),
+        })))));
+        let completion = ReadCompletion { request, reads, reply: Arc::clone(&reply) };
         let read = async move {
             let fetched = match fetch {
                 RangeFetch::Range => requests.read_range(range, Some(pid)).await,
                 RangeFetch::AfterWholeDownload => requests.read_after_download(range, Some(pid)).await,
             };
-            reads.remove(request);
-            match fetched {
-                Ok(bytes) => reply.data(&bytes),
-                Err(errno) => reply.error(errno),
-            }
+            completion.answer(fetched);
         };
-        self.interruptible_reads.start(request, || self.runtime.spawn(read).abort_handle());
+        self.interruptible_reads.start(request, reply, || self.runtime.spawn(read).abort_handle());
     }
 }
 
@@ -372,7 +432,7 @@ impl Filesystem for KernelRequests {
     }
 
     fn release(&self, _req: &Request, _ino: INodeNo, fh: FileHandle, _flags: OpenFlags, _lock_owner: Option<LockOwner>, _flush: bool, reply: ReplyEmpty) {
-        self.requests.queue_release(to_fh(fh), Box::new(move |answer| match answer {
+        self.requests.queue_release(to_fh(fh), reply_to(move |answer| match answer {
             Ok(()) => reply.ok(),
             Err(errno) => reply.error(errno),
         }));

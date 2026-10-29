@@ -90,8 +90,8 @@ so is every step towards the folder, a landing, a free-up, the switch to read-on
 of ignored names. The jobs run one after another, each under the folder's tree lock, which the
 commit of a step towards OneDrive takes too. The kernel's reply is moved into the job: a program
 hears its change was made only once its row is written, and no two changes of names interleave. A
-stopped thread runs nothing more: the job in flight ends, and the queued ones are dropped with
-their replies, which answer the kernel an error.
+stopped thread runs nothing more: the job in flight ends, and the queued jobs deliberately
+answer `EIO` through their reply guards before being dropped.
 
 A cycle of the listing takes no tree lock ([sync.md](sync.md) §5). What it may write between a
 step's disk change and its commit is answered by the commit's condition: a commit that finds the
@@ -234,8 +234,8 @@ The attributes a program reads through the mount (`user.konedrive.item-id`, `.st
 Through the mount, `user.konedrive.state` on a bound file is `online-only`,
 `hydrating`, `hydrated`, or `failed`. `failed` means a whole download exhausted the
 content source's existing retries or failed to land (disk I/O or an occupied backing
-place), or a pinned file's download is held by `free_space_reserve_gb`. A running
-retry reports `hydrating`; success clears the remembered failure. Failures are keyed
+place), or a pinned file's download is held by `free_space_reserve_gb`. A retry that
+stays in flight past the delay below reports `hydrating`; success clears the remembered failure. Failures are keyed
 by item and content version, so new content does not inherit them. Unpinning clears
 the reserve-held case and a failure of a download only the pin asked for; failures
 of downloads also requested by a read, write-open or explicit hydration remain until
@@ -243,6 +243,24 @@ recovery. Throttling, sign-out, cancellation and stale-content answers
 are not download failures. Whole downloads triggered by reads use the same rule;
 individual range-read errors do not. Download failures and retry memory last for the
 mount's run; they are not persisted across restart.
+
+A fetch first shows `hydrating` after one asking for the item's bytes has stayed in
+flight for 500 ms. This applies to ranges read for a program and to whole downloads,
+starting once their transfer-pool slot is held. Waiting for a slot, a disk read, and an
+immediate answer from the source's memory cache never trigger the mark. The delay is
+per asking: repeated or overlapping reads that each finish within 500 ms do not add
+up, so a viewer's quick reads of many images do not flash their emblems.
+
+Once a range fetch is shown, the item stays `hydrating` while any range is in flight
+and for `READ_LINGERS` (two seconds) after its last range ends, or while a whole download
+is shown. Afterwards its row decides `online-only`, `hydrated` or `failed` again. Errors,
+refusals and interrupts drop the same range guard and end that linger; a throttle wait
+cancels an unanswered program fetch rather than leaving it marked throughout the wait.
+The file is announced only when its shown state changes. A successful whole download
+combines its final-state announcement and page-cache invalidation after its running
+state is cleared; its start no longer pretends that content changed. `Files.ItemState`
+and `konedrivectl sync state` read this same attribute, and the menu's path status uses the
+same presentation state. This changes no admission, free-up or download-threshold rule.
 
 Every directory, including the sync root, has `user.konedrive.state`, aggregated
 recursively over all files shown below it, with this precedence:
@@ -338,6 +356,13 @@ answered from the handle's own file (getattr, a truncation).
 In a read-only folder every request that would change it is `EROFS`, before anything else is
 asked.
 
+Pending reads keep their replies separately from their tasks. A kernel `INTERRUPT` answers
+that request `EINTR` exactly once, then aborts its task; mount shutdown answers all pending
+reads `EIO`, including reads arriving after the stop. Completion and cancellation take the
+same reply, so neither can answer it twice. The aborted future drops its active range reader
+and removes its request. Replies queued for writes or hydration also have a guard that
+explicitly answers `EIO` if their task or job is dropped, without fuser's unanswered-reply warning.
+
 ### 4.3 Errnos
 
 | A program gets | When |
@@ -349,7 +374,8 @@ asked.
 | `EACCES` | the download guard refuses remote content ([download-guard.md](download-guard.md)); local bytes remain readable |
 | `EAGAIN` | OneDrive asks the account to wait, and the content is needed now (§5.6) |
 | `ENOSPC`, `EDQUOT` | a download or a write ran out of space; or the reserve prevents a verified whole download required for a read |
-| `EIO` | the store failed; a download failed after its tries; a row against the rules |
+| `EIO` | the store failed; a download failed after its tries; a row against the rules; a pending read or queued write is cancelled by mount shutdown |
+| `EINTR` | the kernel interrupts a pending read |
 | `EBADF` | a handle that holds no file, or may not write |
 
 A download's own failure is clamped to `EPERM`, `EIO`, `EAGAIN`, `EBUSY`, `ETXTBSY`, `ENOSPC` or
@@ -367,8 +393,10 @@ A read through a handle opened not on disk is decided on the mount's thread
 - otherwise the range is fetched from OneDrive on the runtime, by the item's binding, and the
   kernel's interrupt aborts it.
 
-A range asks the content source for exactly those bytes (`ItemRangeFetcher::fetch_range`). Over
-Graph (`graph_source.rs`) it is asked one of two ways:
+A range asks the content source for the program's bytes (`ItemRangeFetcher::fetch_range`). Over
+Graph, a cache miss fetches the aligned 1 MiB block containing the range, clipped to the file's
+size; a range crossing blocks fetches from the first block's start to the last block's end.
+Files of at most 256 KiB retain their whole-file fetch. The same rule applies on both paths:
 
 - **By the listed version, in one request.** Where the row's OneDrive version is the opened
   content, the read carries the eTag and size OneDrive listed with it, and the OneDrive id of
@@ -380,18 +408,19 @@ Graph (`graph_source.rs`) it is asked one of two ways:
   publishes its links at once: a read waits only until its item arrives or the listing ends,
   while remaining pages continue in the background, one listing per folder. A failed listing
   is not asked again for a minute. URLs also come from earlier metadata reads, only where
-  the download ETag matched that metadata's eTag. A file of at most 256 KiB is asked whole,
-  and its other ranges of the same opened content are served from memory for five minutes
-  (`graph_source/small_files.rs`: at most 16 MiB). Expired URLs and bytes are freed on cache
-  lookup or insertion; bytes are also dropped when the item is forgotten. This is no
-  download and changes nothing on disk.
+  the download ETag matched that metadata's eTag. Accepted blocks and small whole files of
+  the same opened content share a 64 MiB memory bound (`graph_source/read_blocks.rs`), oldest
+  out first, each kept five minutes from fetching. Adjacent cached blocks can answer a crossing
+  range together. Expired URLs and bytes are freed on lookup or insertion; bytes are also
+  dropped when the item is forgotten. These bytes change nothing on disk.
 - **By the metadata, in three.** The item's metadata, the range from the address it gives, and
   the metadata again, which must not have changed. Whenever the first way cannot be taken: no
   listed eTag (a listing found another content the step has not taken yet, a content changed
   here), no folder, no URL, an expired URL, an answer with another `ETag` or size or none said.
   A URL that expired, failed with an invalid response, or answered another version is
   dropped; the metadata's URL replaces it only if its download ETag matches the metadata.
-  Network failures retain their usual retry behavior.
+  Network failures retain their usual retry behavior. The aligned piece is kept only after
+  the second metadata check, and only under a compatible opened generation.
 
 Before either cached URLs or cached bytes are used, the source checks that the account has
 an authenticated, fresh access token, in memory without a secret lookup or network call.
@@ -404,6 +433,8 @@ the new eTag as its `ETag` (measured on OneDrive personal, 2026-10-29). The eTag
 rename or move too, so such a file is read by the metadata until the row has its new eTag.
 Every range of one opened content is held to the version the first was, by whichever way it
 came: its `ETag`, or its metadata version and response `ETag`. A changed version is `ESTALE`.
+Eviction or expiry of bytes never resets this version binding. Old cached blocks may still
+answer the old content, but a later uncached block must prove that same version.
 An answer that starts elsewhere than asked, or ends early, fails the read with `EIO`. A listing
 moves no content; the download guard counts the bytes each read asks, also those served from
 memory, as before.
@@ -414,17 +445,28 @@ with their URLs about 1.6 s. Gwenview, opening one screenshot of a folder of 200
 first 16 KiB of every image in the folder one after the other on its window's thread: by the
 metadata each took 1.3–2.1 s and the window froze for about a minute (its crash on close that
 day was its own, set off by the slow reads). By the listed version the folder costs one
-listing and one range request an image. While a file is read as ranges it holds one slot
+listing and one range request an image. Later that day, a 491,408-byte screenshot cost 22
+small reads (mostly 4 KiB) at about 210 ms each, about five seconds. With aligned blocks,
+the regression's 22 probes cost one listing and one range request; the range path for a
+5 MiB file in 128 KiB pieces costs one listing and five ranges (or five metadata/body/metadata
+exchanges without listed facts). Threshold-triggered whole hydration is separate (§5.2).
+These are fake-server request counts, not a new live latency measurement.
+While a file is read as ranges it holds one slot
 of the transfer pool as a file being opened does, until two seconds after its last read
 (`range_readers.rs`): what a program reads goes before the background downloads.
 
 ### 5.2 The threshold
 
-The bytes read as ranges are counted per item. Once they reach `[transfers] download_after`
-(1 MiB by default; 0 downloads at the first read), or the whole of a smaller file, the file is
+The bytes returned to programs as ranges are counted per item; bytes fetched ahead into
+aligned blocks are not counted. The download guard likewise continues to admit each program's
+requested bytes before fetching, including cache hits ([download-guard.md](download-guard.md)).
+Once returned bytes reach `[transfers] download_after` (1 MiB by default; 0 downloads at the
+first read), or the whole of a smaller file, the file is
 downloaded whole, with no waiter: reads continue as checked ranges until the verified backing
-file lands. Unfinished staging is never a read origin. A program that looks only at the start of a
-file, a file manager finding its type, downloads nothing more.
+file lands. The whole download still fetches afresh and checks quickXorHash; the in-memory
+range cache is not a verified landing source. Unfinished staging is never a read origin.
+A program that looks only at the start can fetch up to one aligned block, without starting
+that whole download.
 
 ### 5.3 The whole download
 

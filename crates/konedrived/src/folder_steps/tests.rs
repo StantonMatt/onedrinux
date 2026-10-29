@@ -799,12 +799,12 @@ fn every_step_announces_the_former_name_and_the_new_one() {
     let appeared = |item: &Item, directory: &str, name: &str| ItemAnnouncement::Appeared { item: item.local_item_id, place: place_at(&fixture, directory, name) };
     assert_eq!(list_announced(&fixture), [vec![appeared(&directory, "", "docs"), appeared(&inside, "docs", "a.txt")]]);
 
-    // A download: the file is shown as being downloaded, and then as downloaded.
+    // A quick download has no hydrating transition: only the landed content changes.
     let pinned = fixture.show_onedrive_file("docs/pinned.txt", b"pinned");
     let before = list_announced(&fixture).len();
     assert!(matches!(run(&fixture, &steps, FolderStep::DownloadContent { item: ItemVersions::of(&pinned) }), StepOutcome::Written { .. }));
     let changed = vec![ItemAnnouncement::ContentChanged { item: pinned.local_item_id, place: place_at(&fixture, "docs", "pinned.txt") }];
-    assert_eq!(list_announced(&fixture)[before..], [changed.clone(), changed]);
+    assert_eq!(list_announced(&fixture)[before..], [changed], "a quick download invalidates its landed content once; its start changes no content");
 }
 
 #[test]

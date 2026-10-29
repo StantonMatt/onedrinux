@@ -590,3 +590,48 @@ fn terminal_failure_is_content_specific_and_holds_or_cancellation_do_not_create_
     assert!(states.has_failed_download(&key, true));
     assert!(!states.has_failed_download(&key, false), "unpin resolves a failure of a plan-only download");
 }
+
+#[test]
+fn whole_downloads_wait_to_be_shown_and_old_timers_never_show_a_new_run() {
+    let states = download_states();
+    let item = LocalItemId::new(5);
+    let first = start_anew(&states, &key(5, "c1"));
+    assert!(states.is_downloading(item));
+    assert!(!states.is_hydrating(item), "a fresh download has not passed the emblem delay");
+    states.finish(&first, Ok(()));
+    let next = start_anew(&states, &key(5, "c1"));
+    states.show_download(&first);
+    assert!(!states.is_hydrating(item), "an earlier run's timer cannot show this one");
+    states.show_download(&next);
+    assert!(states.is_hydrating(item));
+    // Once shown, overlapping versions and a new download keep the same shown state.
+    let overlapping = start_anew(&states, &key(5, "c2"));
+    states.finish(&next, Err(libc::ESTALE));
+    assert!(states.is_hydrating(item));
+    states.finish(&overlapping, Err(libc::EIO));
+    assert!(!states.is_hydrating(item));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_range_and_a_whole_download_keep_the_shown_item_continuous() {
+    use super::super::range_read_states::SHOW_AFTER;
+    use super::super::range_readers::READ_LINGERS;
+    let states = download_states();
+    let item = LocalItemId::new(5);
+    let read = states.range_reads.begin_read(item);
+    tokio::time::sleep(SHOW_AFTER).await;
+    tokio::task::yield_now().await;
+    assert!(states.is_hydrating(item));
+    let whole = start_anew(&states, &key(5, "c1"));
+    drop(read);
+    tokio::time::sleep(READ_LINGERS).await;
+    tokio::task::yield_now().await;
+    assert!(states.is_hydrating(item), "the whole download keeps a shown range's item hydrating");
+    let next_range = states.range_reads.begin_read(item);
+    states.finish(&whole, Ok(()));
+    assert!(states.is_hydrating(item), "a range begun during the whole download inherits its shown state");
+    drop(next_range);
+    tokio::time::sleep(READ_LINGERS).await;
+    tokio::task::yield_now().await;
+    assert!(!states.is_hydrating(item));
+}

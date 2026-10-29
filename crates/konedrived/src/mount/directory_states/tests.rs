@@ -12,7 +12,7 @@ fn pin(f: &ItemFixture, item: LocalItemId, pinned: bool) {
 fn download(f: &ItemFixture, item: &Item) -> super::super::item_download_states::DownloadRun {
     let key = DownloadKey { item: item.local_item_id, content: item.local.as_ref().unwrap().content.clone().unwrap() };
     match f.download_states.start_or_join(&key, &DownloadAsker::Read, None) {
-        ItemDownloadStart::Started { run, .. } => run,
+        ItemDownloadStart::Started { run, .. } => { f.download_states.show_download(&run); run },
         _ => panic!("a new download"),
     }
 }
@@ -44,7 +44,7 @@ fn recount(f: &ItemFixture, states: &DirectoryStates) {
             .nodes
             .get(&row.item.local_item_id)
             .is_some_and(|node| node.row.as_ref().is_some_and(|cached| cached.item == row.item && cached.pinned == row.pinned)));
-        let counts = states.contribution(row);
+        let counts = DirectoryStates::contribution(row, states.file_values(row));
         let mut at = Some(row.item.local_item_id);
         while let Some(id) = at {
             let total = expected.entry(id).or_default();
@@ -383,4 +383,25 @@ fn a_batch_can_reverse_directory_ancestry_and_then_remove_a_subtree() {
     f.remove_here(b);
     assert_eq!(s.directory_values(ROOT), (State::Hydrated, None));
     recount(&f, &s);
+}
+
+#[test]
+fn a_pinned_files_fetch_announces_its_state_even_when_its_aggregate_stays_hydrating() {
+    use crate::mount::item_announcements::ItemAnnouncement;
+    let f = ItemFixture::new();
+    let row = f.show_onedrive_file("photo.png", &[7; 65536]);
+    let item = row.local_item_id;
+    let states = states(&f);
+    pin(&f, item, true);
+    assert_eq!(states.directory_values(ROOT).0, State::Hydrating);
+    assert_eq!(states.file_state(item), Some(State::OnlineOnly));
+    let run = download(&f, &row);
+    f.download_states.show_download(&run);
+    assert_eq!(states.file_state(item), Some(State::Hydrating));
+    let announcements = || f.inotify_bridge.list_queued().into_iter().flatten().filter(|a| a.item() == item).collect::<Vec<_>>();
+    assert_eq!(announcements().iter().filter(|a| matches!(a, ItemAnnouncement::MarksChanged { .. })).count(), 1, "the pinned aggregate hid no file-state change, and showing twice did not repeat it");
+    f.land_copy(item, &[7; 65536]);
+    f.download_states.finish(&run, Ok(()));
+    assert_eq!(states.file_state(item), Some(State::Hydrated));
+    assert_eq!(announcements().iter().filter(|a| matches!(a, ItemAnnouncement::ContentChanged { .. })).count(), 1, "landing and the final state share one invalidating announcement");
 }

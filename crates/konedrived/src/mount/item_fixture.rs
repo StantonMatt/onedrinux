@@ -294,7 +294,8 @@ impl ItemFixture {
         let place_changes = Arc::new(place_changes);
         let content_source = Arc::new(FixtureContentSource::default());
         let pool = TransferPool::new(4);
-        let range_readers = Arc::new(RangeReaders::new(Arc::clone(&pool), runtime.handle().clone()));
+        let download_states = Arc::new(ItemDownloadStates::new(DOWNLOAD_AFTER));
+        let range_readers = Arc::new(RangeReaders::new(Arc::clone(&pool), runtime.handle().clone()).with_read_states(Arc::clone(&download_states.range_reads)));
         let sync_state = SyncStateHandle::new(SyncSnapshot::default());
         let range_fetcher = Arc::new(ItemRangeFetcher::new(range_readers, Arc::clone(&content_source) as Arc<dyn ContentSource>, ThrottleWait::new(sync_state.clone())));
         let sync_plan_wake = Arc::new(SyncPlanWake::new());
@@ -308,7 +309,7 @@ impl ItemFixture {
             write_operation_thread,
             place_changes,
             read_connections: Arc::new(ReadConnections::new(store_path.clone())),
-            download_states: Arc::new(ItemDownloadStates::new(DOWNLOAD_AFTER)),
+            download_states,
             inotify_bridge: Arc::new(ItemInotifyBridge::new(folder)),
             range_fetcher,
             item_handles: Arc::new(ItemHandles::new()),

@@ -150,6 +150,8 @@ mounted_folder() {
     ip link set lo up
     for name in \
         directory_states_follow_descendants_and_notify_the_parent \
+        a_slow_range_fetch_shows_downloading_until_its_linger_ends \
+        a_pinned_download_announces_its_hydrating_and_final_states \
         start_from_nothing_shows_onedrives_files_and_reads_them \
         file_that_is_not_on_disk_is_read_in_ranges_and_then_downloaded_whole \
         changes_made_in_onedrive_arrive_in_the_folder \
@@ -201,4 +203,59 @@ directory_states_follow_descendants_and_notify_the_parent() {
     daemon free-up "$F/docs" > /dev/null
     check_state docs online-only
     wait "$watcher"
+}
+
+# The watch reads the xattr on each IN_ATTRIB, as Dolphin does. A partial read never
+# reaches the whole-download threshold; its final state must therefore be online-only.
+a_slow_range_fetch_shows_downloading_until_its_linger_ends() {
+    begin_folder
+    seed_folder D R docs
+    seed_random X D image.bin 8388608
+    register_folder read-only
+    check_within 10 "the named file is placed" folder_has docs/image.bin
+    $U "$bin/watch-client" "$F/docs" 8 states > "$LOGS/fetch-watch" &
+    local watcher=$!
+    check_within 3 "the watcher is ready" grep -q '^watching$' "$LOGS/fetch-watch"
+    onedrive delay GET dl/X 1500 1 > /dev/null
+    user "head -c 4096 docs/image.bin > '$SRC/part'" &
+    local reader=$!
+    check_within 3 "the slow range is hydrating on its attribute" state_is docs/image.bin hydrating
+    check "the Files.ItemState answer agrees" "$(daemon state "$F/docs/image.bin")" hydrating
+    check_state docs hydrating
+    check_state . hydrating
+    check_within 3 "IN_ATTRIB reports the start on the mounted file" grep -q '^state: image.bin hydrating$' "$LOGS/fetch-watch"
+    wait "$reader"
+    check "the partial read is correct" "$(cmp -s "$SRC/part" <(head -c 4096 "$SRC/seed-X") && echo equal)" equal
+    check_state docs/image.bin hydrating
+    check_within 5 "the range linger ends online-only" state_is docs/image.bin online-only
+    check_within 3 "IN_ATTRIB reports the final state" grep -q '^state: image.bin online-only$' "$LOGS/fetch-watch"
+    check_state docs online-only
+    check_state . online-only
+    check "the Files.ItemState answer still agrees" "$(daemon state "$F/docs/image.bin")" online-only
+    wait "$watcher"
+    check "the file announced each state once" "$(grep -c '^state: image.bin hydrating$' "$LOGS/fetch-watch") $(grep -c '^state: image.bin online-only$' "$LOGS/fetch-watch")" "1 1"
+    check "the partial read never downloaded the whole file" "$(user 'stat -c %b docs/image.bin')" 0
+}
+
+# A several-MB whole download through the existing pin path: notifications must be
+# observed at both ends, and the end notification must already read hydrated.
+a_pinned_download_announces_its_hydrating_and_final_states() {
+    begin_folder
+    seed_random X R pinned.bin 8388608
+    register_folder read-only
+    check_within 10 "the named file is placed" folder_has pinned.bin
+    $U "$bin/watch-client" "$F" 7 states > "$LOGS/pin-watch" &
+    local watcher=$!
+    check_within 3 "the watcher is ready" grep -q '^watching$' "$LOGS/pin-watch"
+    onedrive delay GET dl/X 2000 1 > /dev/null
+    daemon pin "$F/pinned.bin" > /dev/null
+    check_within 3 "the pinned download is hydrating" state_is pinned.bin hydrating
+    check "the Files.ItemState answer agrees during download" "$(daemon state "$F/pinned.bin")" hydrating
+    check_within 3 "IN_ATTRIB reports the whole download start" grep -q '^state: pinned.bin hydrating$' "$LOGS/pin-watch"
+    check_within 15 "the pinned copy lands" state_is pinned.bin hydrated
+    check_within 3 "IN_ATTRIB reports the completed whole download" grep -q '^state: pinned.bin hydrated$' "$LOGS/pin-watch"
+    check "the Files.ItemState answer agrees after download" "$(daemon state "$F/pinned.bin")" hydrated
+    check "the landed bytes are correct" "$(is_seed pinned.bin X && echo equal)" equal
+    wait "$watcher"
+    check "the start and end were each announced once" "$(grep -c '^state: pinned.bin hydrating$' "$LOGS/pin-watch") $(grep -c '^state: pinned.bin hydrated$' "$LOGS/pin-watch")" "1 1"
 }

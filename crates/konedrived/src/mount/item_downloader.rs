@@ -345,6 +345,12 @@ impl Drop for RunningDownload {
     }
 }
 
+/// The delayed emblem task never outlives its download, including an abort.
+struct AbortOnDrop(tokio::task::AbortHandle);
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) { self.0.abort(); }
+}
+
 /// The downloader of one mount.
 pub(crate) struct ItemDownloader {
     backing_directory: Arc<BackingDirectory>,
@@ -493,6 +499,13 @@ impl ItemDownloader {
             if let Some(answer) = answer {
                 let _ = answer.send(end.clone());
             }
+            // Leaf-only users have no aggregate listener to invalidate the landed
+            // bytes. A served mount always combines this with its final state below.
+            if !downloader.download_states.changes.has_listener() {
+                if let Ok(ItemLandingOutcome::Landed { place, .. }) = &end {
+                    downloader.inotify_bridge.announce(vec![ItemAnnouncement::ContentChanged { item: file.item, place: place.clone() }]);
+                }
+            }
             // The task's last act: after it the key is free for another download. Only
             // an answer that stated another content is remembered as one.
             match &end {
@@ -504,24 +517,18 @@ impl ItemDownloader {
         self.download_states.keep_abort_handle(&run, task.abort_handle());
     }
 
-    /// One download from its start to what it is shown and announced as: the place and
-    /// the path the folder shows the file at are read, the change announced (the file is
-    /// shown as being downloaded), the content fetched and landed
-    /// ([`fetch_and_land`](Self::fetch_and_land)), the activity told — but for the plan's
-    /// pin, whose step is told by the plan's task —, the space counted again, and the
-    /// change announced.
+    /// One download from its shown path to its outcome: fetch and land the content,
+    /// record activity (except the plan's pin, which the plan records), and recount
+    /// space. The state observer announces its delayed start and its end, after the
+    /// running state is cleared. A successful end invalidates content in that same
+    /// announcement.
     ///
-    /// A download of a key remembered as another content
-    /// (`ItemDownloadStates::is_another_content`) is not announced at its start: it asks
-    /// OneDrive anew, and nothing is known to change yet. Where it ends as
-    /// [`DownloadEndNews::AnotherContentAgain`] or [`DownloadEndNews::SameFailureAgain`],
-    /// nothing is told at its end either.
+    /// A download that ends as [`DownloadEndNews::AnotherContentAgain`] or
+    /// [`DownloadEndNews::SameFailureAgain`] records no repeated activity. Slow retries
+    /// still show their real in-flight state; quick ones announce no state change.
     async fn run_download(self: &Arc<Self>, file: &ItemToDownload, asker: &DownloadAsker, run: &DownloadRun, unfinished_file: Option<Arc<File>>, charge: Option<Arc<crate::download_guard::DownloadCharge>>, attribution: Option<&crate::download_guard::DownloadTicket>) -> DownloadEnd {
-        let Some((place, path)) = self.download_landing.find_shown_place(file.item).await else { return Ok(ItemLandingOutcome::RowsChanged) };
+        let Some((_place, path)) = self.download_landing.find_shown_place(file.item).await else { return Ok(ItemLandingOutcome::RowsChanged) };
         let shown_path = self.folder.join(&path).display().to_string();
-        if !self.download_states.is_another_content(run.key()) {
-            self.inotify_bridge.announce(vec![ItemAnnouncement::ContentChanged { item: file.item, place: place.clone() }]);
-        }
         let end = self.fetch_and_land(file, asker, run, unfinished_file, &shown_path, charge, attribution).await;
         // Asked before the end is told to the states, which remember the key anew then.
         match decide_end_news(&end, self.download_states.find_another_content(run.key())) {
@@ -540,11 +547,6 @@ impl ItemDownloader {
             self.report.activity.record(vec![event]).await;
         }
         self.report.space.kick();
-        let place = match &end {
-            Ok(ItemLandingOutcome::Landed { place, .. }) => place.clone(),
-            _ => place,
-        };
-        self.inotify_bridge.announce(vec![ItemAnnouncement::ContentChanged { item: file.item, place }]);
         end
     }
 
@@ -587,6 +589,13 @@ impl ItemDownloader {
             slot = self.acquire_slot(asker, run, Size::of(size)) => slot,
         };
         let class = slot.class();
+        let shown = self.download_states.clone();
+        let shown_run = run.clone();
+        let show_task = self.runtime.spawn(async move {
+            tokio::time::sleep(super::range_read_states::SHOW_AFTER).await;
+            shown.show_download(&shown_run);
+        });
+        let _show_task = AbortOnDrop(show_task.abort_handle());
         // Shown as a transfer for as long as the slot is held: this is dropped where the
         // slot is, whatever ends the download. The size is the row's until the source
         // says one.

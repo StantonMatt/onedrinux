@@ -71,15 +71,18 @@ async fn a_hash_is_kept_without_a_ctag_and_hashless_graph_is_still_a_remote_vers
 async fn ranges_refuse_a_changed_metadata_version_or_download_etag() {
     let (server, source) = serve(json!({"file": {}, "size": 5, "cTag": "c1"}), b"bytes").await;
     assert_eq!(read_whole(source.read_range("A1", &opened("c1"), None, 0, 2).await.unwrap()).await, b"by");
+    source.read_blocks.clear();
     Mock::given(method("GET")).and(path_regex("/items/A1$"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":"A1", "file":{}, "size":5, "cTag":"c1", "eTag":"renamed", "@microsoft.graph.downloadUrl":format!("{}/bytes-of-a1", server.uri())})))
         .with_priority(2).mount(&server).await;
     assert_eq!(read_whole(source.read_range("A1", &opened("c1"), None, 2, 5).await.unwrap()).await, b"tes", "a metadata-only eTag change preserves the cTag's content");
+    source.read_blocks.clear();
     Mock::given(method("GET")).and(path("/bytes-of-a1"))
         .respond_with(ResponseTemplate::new(200).insert_header("ETag", "another-endpoint-version").set_body_bytes(b"other"))
         .with_priority(1).mount(&server).await;
     assert!(matches!(source.read_range("A1", &opened("c1"), None, 2, 5).await, Err(SourceError::NotFound(_))), "same metadata, another endpoint version");
     source.forget("A1");
+    source.read_blocks.clear();
     Mock::given(method("GET")).and(path_regex("/items/A1$"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "A1", "file": {}, "size": 5, "cTag": "c2", "@microsoft.graph.downloadUrl": format!("{}/bytes-of-a1", server.uri())})))
         .with_priority(1).mount(&server).await;
@@ -92,6 +95,7 @@ async fn a_range_that_changes_during_its_body_is_never_answered() {
     let (server, source) = serve(json!({"file": {}, "size": 5, "cTag": "unused"}), b"bytes").await;
     let count = Arc::new(AtomicUsize::new(0));
     let url = format!("{}/bytes-of-a1", server.uri());
+    source.read_blocks.clear();
     Mock::given(method("GET")).and(path_regex("/items/A1$"))
         .respond_with(move |_: &wiremock::Request| {
             let ctag = if count.fetch_add(1, Ordering::SeqCst) == 0 { "c1" } else { "c2" };
@@ -104,6 +108,7 @@ async fn a_range_that_changes_during_its_body_is_never_answered() {
 async fn a_new_content_generation_does_not_inherit_an_earlier_ranges_version() {
     let (server, source) = serve(json!({"file": {}, "size": 5, "cTag": "c1"}), b"bytes").await;
     assert_eq!(read_whole(source.read_range("A1", &opened("c1"), None, 0, 2).await.unwrap()).await, b"by");
+    source.read_blocks.clear();
     Mock::given(method("GET")).and(path_regex("/items/A1$"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":"A1", "file":{}, "size":5, "cTag":"c2", "@microsoft.graph.downloadUrl":format!("{}/bytes-of-a1", server.uri())})))
         .with_priority(1).mount(&server).await;
@@ -124,7 +129,7 @@ use crate::fake_onedrive::{FakeGraph, FakeItem, ROOT};
 
 /// Bytes `size` long, of a file `n` of a folder: no two files the same.
 fn bytes_of(n: usize, size: usize) -> Vec<u8> {
-    (0..size).map(|at| (at * 7 + n * 13) as u8).collect()
+    (0..size).map(|at| (at * 7 + n * 13 + at / 65536) as u8).collect()
 }
 
 /// A fake OneDrive with the folder `F` holding `files` files `P0`, `P1`… of `size` bytes,
@@ -172,7 +177,7 @@ fn of(kind: &'static str, id: &str) -> (&'static str, String) {
     (kind, id.to_owned())
 }
 
-/// A file over [`SMALL_FILE`]: its ranges are asked one by one.
+/// A file over the small-file limit, contained in one aligned block.
 const LARGE: usize = 300 * 1024;
 
 #[tokio::test]
@@ -185,7 +190,8 @@ async fn a_range_with_a_listed_link_asks_onedrive_once() {
     assert_eq!(read_whole(first).await, bytes[..16384]);
     assert_eq!(requests_since(&graph), [of("children", "F"), of("bytes", "P0")], "no URL yet: the folder is listed once");
     assert_eq!(read_whole(source.read_range("P0", &content, Some(&listed), 16384, 32768).await.unwrap()).await, bytes[16384..32768]);
-    assert_eq!(requests_since(&graph), [of("bytes", "P0")], "with the URL at hand: one request, no metadata");
+    assert!(requests_since(&graph).is_empty(), "the next range is already in the aligned piece");
+    source.read_blocks.clear();
     // Without what was listed, the metadata is asked before and after, as ever.
     assert_eq!(read_whole(source.read_range("P0", &content, None, 0, 10).await.unwrap()).await, bytes[..10]);
     assert_eq!(requests_since(&graph), [of("item", "P0"), of("bytes", "P0"), of("item", "P0")]);
@@ -248,6 +254,7 @@ async fn a_file_changed_behind_its_listed_link_is_never_served_as_the_opened_ver
         graph.with(|cloud| cloud.edit("P0", &bytes_of(9, size)));
         requests_since(&graph);
         if size == LARGE {
+            source.read_blocks.clear();
             // A program that read the old version goes on reading the same opened content.
             let later = source.read_range("P0", &content, Some(&listed), 10, 20).await;
             assert!(matches!(later, Err(SourceError::NotFound(_))), "another eTag through the link, and the metadata's version is not the one its first range was");
@@ -283,14 +290,16 @@ async fn a_changed_answer_through_a_listed_link_is_dropped_and_the_metadata_aske
     let answer = source.read_range("P0", &content, Some(&listed), 0, 10).await.unwrap();
     assert_ne!(answer.version.as_ref().map(|v| v.ctag.as_str()), Some("c-P0"), "the new bytes carry the new version");
     assert_eq!(requests_since(&graph), [of("bytes", "P0"), of("item", "P0"), of("bytes", "P0"), of("item", "P0")]);
-    assert!(source.small_files.find("P0", &content).is_none(), "nothing of the new bytes is held as the opened content");
+    assert!(source.read_blocks.find("P0", &content, 0, 10).is_none(), "nothing of the new bytes is held as the opened content");
     // An answer that says no `ETag`, or another size, is not taken either.
     let (graph, source) = folder_of(1, LARGE).await;
     let (content, listed) = opened_now(&graph, "P0");
     let url = format!("{}/dl/P0", graph.server.uri());
     for answer in [ResponseTemplate::new(206).insert_header("Content-Range", format!("bytes 0-9/{LARGE}").as_str()).set_body_bytes(vec![0; 10]),
                    ResponseTemplate::new(206).insert_header("ETag", listed.etag.as_str()).insert_header("Content-Range", "bytes 0-9/11").set_body_bytes(vec![0; 10])] {
+        source.read_blocks.clear();
         source.links.keep("P0", Link { url: url.clone(), etag: listed.etag.clone() });
+        source.read_blocks.clear();
         graph.with(|cloud| cloud.script("GET", "dl/P0", answer, 1));
         requests_since(&graph);
         assert_eq!(read_whole(source.read_range("P0", &content, Some(&listed), 0, 10).await.unwrap()).await, bytes_of(0, LARGE)[..10]);
@@ -304,10 +313,12 @@ async fn an_expired_link_falls_back_to_the_metadata_and_is_refreshed() {
     let (content, listed) = opened_now(&graph, "P0");
     let bytes = bytes_of(0, LARGE);
     source.read_range("P0", &content, Some(&listed), 0, 10).await.unwrap();
+    source.read_blocks.clear();
     graph.with(|cloud| cloud.script("GET", "dl/P0", ResponseTemplate::new(410), 1));
     requests_since(&graph);
     assert_eq!(read_whole(source.read_range("P0", &content, Some(&listed), 10, 20).await.unwrap()).await, bytes[10..20]);
     assert_eq!(requests_since(&graph), [of("bytes", "P0"), of("item", "P0"), of("bytes", "P0"), of("item", "P0")], "an expired link: the metadata, which gives a new one");
+    source.read_blocks.clear();
     assert_eq!(read_whole(source.read_range("P0", &content, Some(&listed), 20, 30).await.unwrap()).await, bytes[20..30]);
     assert_eq!(requests_since(&graph), [of("bytes", "P0")], "the metadata's link serves the next range");
 }
@@ -354,7 +365,7 @@ async fn signed_out_or_revoked_accounts_never_serve_cached_links_or_small_files(
             let (content, listed) = opened_now(&graph, "P0");
             source.read_range("P0", &content, Some(&listed), 0, 10).await.unwrap();
             assert!(source.links.find("P0").is_some());
-            assert_eq!(source.small_files.find("P0", &content).is_some(), size == 1024);
+            assert!(source.read_blocks.find("P0", &content, 0, 10).is_some());
             if revoke {
                 Mock::given(method("POST")).and(path("/token"))
                     .respond_with(ResponseTemplate::new(400).set_body_json(json!({"error":"invalid_grant"})))
@@ -365,7 +376,7 @@ async fn signed_out_or_revoked_accounts_never_serve_cached_links_or_small_files(
                 tokens.forget().await.unwrap();
             }
             assert!(source.links.find("P0").is_none(), "invalidation clears URLs immediately");
-            assert!(source.small_files.find("P0", &content).is_none(), "invalidation clears bytes immediately");
+            assert!(source.read_blocks.find("P0", &content, 0, 10).is_none(), "invalidation clears bytes immediately");
             requests_since(&graph);
             assert!(matches!(source.read_range("P0", &content, Some(&listed), 10, 20).await, Err(SourceError::SignedOut(_))));
             assert!(requests_since(&graph).is_empty(), "no URL or metadata request after sign-out");
@@ -414,12 +425,13 @@ async fn incompatible_download_etags_do_not_recache_the_metadata_url() {
     for etag in [Some("endpoint-only"), None] {
         let (graph, source) = folder_of(1, LARGE).await;
         let (content, listed) = opened_now(&graph, "P0");
-        let mut answer = ResponseTemplate::new(206).insert_header("Content-Range", format!("bytes 0-9/{LARGE}").as_str()).set_body_bytes(bytes_of(0, LARGE)[..10].to_vec());
+        let mut answer = ResponseTemplate::new(206).insert_header("Content-Range", format!("bytes 0-{}/{LARGE}", LARGE - 1).as_str()).set_body_bytes(bytes_of(0, LARGE));
         if let Some(etag) = etag { answer = answer.insert_header("ETag", etag); }
         graph.with(|cloud| cloud.script("GET", "dl/P0", answer, 4));
         source.read_range("P0", &content, Some(&listed), 0, 10).await.unwrap();
         assert!(source.links.find("P0").is_none(), "an incompatible endpoint cannot prove listed reads");
         assert_eq!(requests_since(&graph), [of("children", "F"), of("bytes", "P0"), of("item", "P0"), of("bytes", "P0"), of("item", "P0")]);
+        source.read_blocks.clear();
         source.read_range("P0", &content, Some(&listed), 0, 10).await.unwrap();
         assert_eq!(requests_since(&graph), [of("item", "P0"), of("bytes", "P0"), of("item", "P0")], "later reads cost only the careful three requests");
     }
@@ -431,10 +443,12 @@ async fn failed_cached_downloads_drop_the_link_and_take_the_metadata_path() {
         let (graph, source) = folder_of(1, LARGE).await;
         let (content, listed) = opened_now(&graph, "P0");
         source.read_range("P0", &content, Some(&listed), 0, 10).await.unwrap();
+        source.read_blocks.clear();
         graph.with(|cloud| cloud.script("GET", "dl/P0", answer, 1));
         requests_since(&graph);
         assert_eq!(read_whole(source.read_range("P0", &content, Some(&listed), 10, 20).await.unwrap()).await, bytes_of(0, LARGE)[10..20]);
         assert_eq!(requests_since(&graph), [of("bytes", "P0"), of("item", "P0"), of("bytes", "P0"), of("item", "P0")]);
+        source.read_blocks.clear();
         source.links.keep("P0", Link { url: ":not-a-url".into(), etag: listed.etag.clone() });
         source.read_range("P0", &content, Some(&listed), 20, 30).await.unwrap();
         assert_eq!(requests_since(&graph), [of("item", "P0"), of("bytes", "P0"), of("item", "P0")]);
@@ -449,3 +463,5 @@ async fn a_refused_listed_binding_sends_no_request() {
     assert!(matches!(source.read_range("P0", &content, Some(&listed), 0, 10).await, Err(SourceError::NotFound(_))));
     assert!(requests_since(&graph).is_empty(), "the refusal precedes even a folder listing");
 }
+
+mod blocks;

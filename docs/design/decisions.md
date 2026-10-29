@@ -157,7 +157,10 @@ security](#5-account-and-security), [the desktop](#6-the-desktop), [testing](#7-
   thumbnailer, `file`) costs a range, not the whole file. A program that reads the file through
   gets it at the speed of one download, checked against its hash, and kept on disk. A read that
   waits for OneDrive can be interrupted: the workspace uses `fuser` with one change, which hands the
-  kernel's `INTERRUPT` to the daemon (`vendor/fuser/README.konedrive.md`).
+  kernel's `INTERRUPT` to the daemon (`vendor/fuser/README.konedrive.md`). The daemon
+  answers that read `EINTR` exactly once before aborting its task. Mount shutdown answers
+  pending reads `EIO`; reply guards do the same for dropped write jobs and hydration tasks,
+  with no raw fuser reply left unanswered. No further vendor change is needed.
 - **Trade-off.** Each range's version is proven by the listed eTag and size or by metadata
   checks before and after its body (§2.15), but it has no independent whole-file hash proof
   (F297). A patched copy of `fuser` is kept in the repository.
@@ -269,7 +272,10 @@ security](#5-account-and-security), [the desktop](#6-the-desktop), [testing](#7-
   come from one listing of the file's folder with its children's download URLs, kept 40
   minutes (at most 10,000 URLs). Each page releases readers of its items immediately; the
   rest continues in the background, bounded to 1,000 children and six pages. A file of at
-  most 256 KiB is asked whole and its other ranges come from memory. Neither cache bypasses
+  most 256 KiB is asked whole; larger files fetch aligned 1 MiB blocks, clipped to size,
+  covering every block a read spans. Both the listed and careful metadata paths keep proven
+  pieces in one 64 MiB cache, oldest out first, for five minutes. Eviction does not clear
+  the opened generation's version binding. Neither cache bypasses
   a signed-out account: a fresh token is required locally, and token invalidation clears
   both caches and cancels pending listings.
   Without a URL, with no listed eTag, or with any other answer, the read asks the metadata
@@ -282,7 +288,10 @@ security](#5-account-and-security), [the desktop](#6-the-desktop), [testing](#7-
   about a minute. A listing of 200 children with their URLs takes about 1.6 s. A download
   URL is not bound to a version — after an edit it serves the new content — but every answer
   says the item's eTag as its `ETag` and the whole size in `Content-Range`, and the eTag moves
-  at every change of the content (measured the same day).
+  at every change of the content (measured the same day). A later 491,408-byte screenshot
+  took 22 small reads at about 210 ms each, about five seconds. Aligned fetching makes those
+  probes one range request and a sequential 5 MiB range path five, plus one folder listing;
+  any threshold-triggered whole hydration is separate (§2.5).
 - **Trade-off.** The proof is OneDrive's `ETag` on the answer, against the eTag the store
   holds with the content: no stronger than the metadata's word, and still no whole-file hash
   (F297). The eTag moves at a rename or a move too, so a file renamed elsewhere is read by the
@@ -291,8 +300,12 @@ security](#5-account-and-security), [the desktop](#6-the-desktop), [testing](#7-
   listing, plus the listing itself on a cold folder; later reads use the usual three
   requests. Metadata URLs are cached only when the download ETag matches the metadata's
   eTag. A newly populated folder listing may try that fast request again after 40 minutes.
-  Small files read whole cost up to 16 MiB of memory; expired bytes are freed on lookup or
-  insertion, as well as when forgotten or signed out.
+  Cached pieces cost up to 64 MiB, shared with small files; expired bytes are freed on lookup
+  or insertion, as well as when forgotten or signed out. Reading a few bytes can fetch up to
+  one MiB ahead. The guard still counts requested bytes and `download_after` still counts
+  returned bytes, so the same program reads make the same admission and hydration decisions.
+  Whole hydration still fetches and verifies independently; reusing cached bytes for landing
+  would need to preserve its hash, version and durability checks.
 
 ## 3. The store and the sync
 
@@ -823,6 +836,23 @@ answer a user already knows, it is followed.
 - **Trade-off.** Unpin is refused as one call for the whole selection if any path in it is kept
   pinned by a folder above it that is not unpinned in the same call; the checkbox is then shown
   locked. The daemon says so (`Files.Menu`), and the plugin shows it.
+
+### 6.12 Show slow content fetches, without flashing quick reads
+
+- **Decision.** `hydrating` includes a program's range fetches as well as whole downloads,
+  once one asking has stayed in flight for 500 ms with its pool slot held. Shown ranges
+  stay through the existing two-second read linger; a running whole download keeps a
+  shown item hydrating too. Disk and immediate memory answers never start the mark.
+  Parent folders include these reads in their existing syncing aggregate and retain
+  their 100 ms notification debounce ([mount.md](mount.md) §3.5).
+- **Why.** A slow cloud image needs visible feedback before its viewer finishes reading
+  it. 500 ms is above the observed 0–300 ms image-header reads, so browsing a folder does
+  not flash every image. The linger bridges a program's successive reads.
+- **Trade-off.** A quick fetch completes with no downloading emblem; a shown partial read
+  stays marked for two seconds after it ends, then returns to online-only if no whole
+  copy landed. The existing syncing icon is shared with uploads and pins. File-state
+  transitions announce once; a whole download's final state and cache invalidation use
+  one notification after its running state clears.
 
 ## 7. Testing
 

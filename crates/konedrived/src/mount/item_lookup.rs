@@ -133,7 +133,7 @@ pub(super) struct XattrFacts {
     pub(super) is_pinned: bool,
     /// It is left here: its name, or that of a directory above it, is ignored.
     pub(super) is_ignored: bool,
-    /// Its whole content is being downloaded.
+    /// A slow content fetch is shown: a whole download or a range read and its linger.
     pub(super) is_downloading: bool,
     /// A step runs for it.
     pub(super) has_running_step: bool,
@@ -170,8 +170,8 @@ pub(super) fn decide_xattr_value(name: &str, item: &Item, facts: &XattrFacts) ->
 
 /// What `user.konedrive.state` says of an item whose row says `sync_state`
 /// (`Item::file_sync_state`): `None` for what is no file of OneDrive (a directory, a file
-/// with no binding, an item the folder does not show); `hydrating` while its whole
-/// content is being downloaded; else `online-only` for content that is not on disk and
+/// with no binding, an item the folder does not show); `hydrating` while a slow content
+/// fetch is shown (whole or range, including read linger); else `online-only` for content that is not on disk and
 /// `hydrated` for content that is. Pure. Of the two facts both its callers have: the
 /// attribute's answer from the row, and the status of a path for the bus
 /// (`ItemPathStatus::find_state_attribute`), which keeps no row.
@@ -455,7 +455,7 @@ impl ItemLookup {
         let facts = XattrFacts {
             is_pinned,
             is_ignored,
-            is_downloading: wants(XATTR_STATE) && self.download_states.is_downloading(node),
+            is_downloading: wants(XATTR_STATE) && self.download_states.is_hydrating(node),
             has_running_step: is_unsent && self.running_steps.has_running_step(node),
             answer: if is_unsent { self.published_plan.find_answer(node) } else { None },
             has_refusal_for_good,
@@ -465,7 +465,7 @@ impl ItemLookup {
 
     /// Getxattr: the value of the attribute `name` of `node`: the folder's own on the
     /// root; the binding's item id; the state, from `Item::file_sync_state` and
-    /// `ItemDownloadStates::is_downloading`; the pin, from `ItemReader::is_pinned`; the
+    /// `ItemDownloadStates::is_hydrating`; the pin, from `ItemReader::is_pinned`; the
     /// sync mark, from [`decide_sync_mark`] with `RunningSteps::has_running_step` and
     /// `PublishedPlan::find_answer`. `ENODATA` for an attribute the item has not.
     /// `ESTALE` for a node whose row is gone or shows nothing.

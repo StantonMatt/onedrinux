@@ -63,73 +63,118 @@ fn a_listed_item_is_named_by_its_local_place_and_one_with_no_local_version_has_n
     assert_eq!(find_listed_name(&listed_only), None, "nothing shows it");
 }
 
-/// A task of `runtime` that never ends by itself, and whether it was dropped (ended or
-/// aborted).
-fn spawn_waiting_read(runtime: &tokio::runtime::Handle) -> (tokio::task::JoinHandle<()>, Arc<()>) {
-    let held = Arc::new(());
-    let in_task = Arc::clone(&held);
-    let read = runtime.spawn(async move {
-        let _held = in_task;
-        std::future::pending::<()>().await
+/// Uses the same ownership and completion path as a kernel range fetch, with an answer
+/// callback that records every reply. `held` stands for resources owned by the future.
+fn start_read(reads: &Arc<InterruptibleReads>, runtime: &tokio::runtime::Handle, request: u64,
+    future: impl std::future::Future<Output = Result<Vec<u8>, Errno>> + Send + 'static,
+) -> (tokio::task::JoinHandle<()>, Arc<Mutex<Vec<Result<Vec<u8>, Errno>>>>) {
+    let answers = Arc::new(Mutex::new(Vec::new()));
+    let answered = Arc::clone(&answers);
+    let reply = Arc::new(Mutex::new(Some(PendingReply::new(Box::new(move |answer| crate::panic::lock(&answered).push(answer))))));
+    let completion = ReadCompletion { request, reads: Arc::clone(reads), reply: Arc::clone(&reply) };
+    let mut task = None;
+    reads.start(request, reply, || {
+        let spawned = runtime.spawn(async move { completion.answer(future.await); });
+        let abort = spawned.abort_handle();
+        task = Some(spawned);
+        abort
     });
-    (read, held)
+    (task.unwrap(), answers)
 }
 
-#[test]
-fn the_kernels_interrupt_aborts_the_read_of_its_request_and_no_other() {
-    let fixture = ItemFixture::new();
-    let runtime = fixture.runtime();
-    let reads = InterruptibleReads::default();
-    let (first, _) = spawn_waiting_read(&runtime);
-    let (second, _) = spawn_waiting_read(&runtime);
-    reads.start(1, || first.abort_handle());
-    reads.start(2, || second.abort_handle());
-
+#[tokio::test(start_paused = true)]
+async fn the_kernels_interrupt_aborts_the_read_of_its_request_and_no_other() {
+    let runtime = tokio::runtime::Handle::current();
+    let reads = Arc::new(InterruptibleReads::default());
+    let (pool, ranges) = crate::mount::range_readers::tests::range_readers();
+    let (started, waiting) = tokio::sync::oneshot::channel();
+    let (first, first_answers) = start_read(&reads, &runtime, 1, async move {
+        let _active = ranges.begin_read("A").await;
+        started.send(()).unwrap();
+        std::future::pending().await
+    });
+    let (second, second_answers) = start_read(&reads, &runtime, 2, std::future::pending());
+    waiting.await.unwrap();
+    reads.interrupt(1);
     reads.interrupt(1);
     reads.interrupt(7);
-
-    assert!(runtime.block_on(first).unwrap_err().is_cancelled(), "the read of request 1 is aborted");
-    assert!(!second.is_finished(), "the read of request 2 goes on");
+    assert!(first.await.unwrap_err().is_cancelled());
+    assert_eq!(*crate::panic::lock(&first_answers), [Err(Errno::EINTR)], "EINTR exactly once, no raw reply dropped");
+    assert!(!second.is_finished());
+    assert!(crate::panic::lock(&second_answers).is_empty());
     assert_eq!(crate::panic::lock(&reads.0).by_request.len(), 1);
-    second.abort();
+    tokio::time::sleep(super::super::range_readers::READ_LINGERS * 2).await;
+    assert_eq!(pool.held(konedrive_graph::pool::Class::Open), 0, "abort dropped ActiveRangeRead and its slot expired");
+    reads.stop();
+    assert!(second.await.unwrap_err().is_cancelled());
+    assert_eq!(*crate::panic::lock(&second_answers), [Err(Errno::EIO)]);
 }
 
-#[test]
-fn a_read_that_ended_is_kept_no_more() {
-    let reads = InterruptibleReads::default();
-    let fixture = ItemFixture::new();
-    let (read, _) = spawn_waiting_read(&fixture.runtime());
-    reads.start(3, || read.abort_handle());
-
-    reads.remove(3);
-
+#[tokio::test]
+async fn a_read_that_ended_is_kept_no_more() {
+    let reads = Arc::new(InterruptibleReads::default());
+    let (read, answers) = start_read(&reads, &tokio::runtime::Handle::current(), 3, async { Ok(b"done".to_vec()) });
+    read.await.unwrap();
     assert!(crate::panic::lock(&reads.0).by_request.is_empty());
     reads.interrupt(3);
-    assert!(!read.is_finished(), "an interrupt that comes late aborts nothing");
-    read.abort();
+    reads.stop();
+    assert_eq!(*crate::panic::lock(&answers), [Ok(b"done".to_vec())]);
+}
+
+#[tokio::test]
+async fn a_stop_gives_up_every_read_and_each_one_started_after_it() {
+    let reads = Arc::new(InterruptibleReads::default());
+    let runtime = tokio::runtime::Handle::current();
+    let held = Arc::new(());
+    let in_task = Arc::clone(&held);
+    let (first, answers) = start_read(&reads, &runtime, 1, async move { let _held = in_task; std::future::pending().await });
+    // No yield: stop also answers a task that has never been polled.
+    reads.stop();
+    assert!(first.await.unwrap_err().is_cancelled());
+    assert_eq!(*crate::panic::lock(&answers), [Err(Errno::EIO)]);
+    assert_eq!(Arc::strong_count(&held), 1);
+    assert!(crate::panic::lock(&reads.0).by_request.is_empty());
+    let (late, answers) = start_read(&reads, &runtime, 3, std::future::pending());
+    assert!(late.await.unwrap_err().is_cancelled());
+    assert_eq!(*crate::panic::lock(&answers), [Err(Errno::EIO)]);
+    assert!(crate::panic::lock(&reads.0).by_request.is_empty());
+}
+
+#[tokio::test]
+async fn an_unpolled_interrupt_and_a_panicking_read_still_answer_once() {
+    let reads = Arc::new(InterruptibleReads::default());
+    let runtime = tokio::runtime::Handle::current();
+    let (task, answers) = start_read(&reads, &runtime, 1, std::future::pending());
+    reads.interrupt(1);
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert_eq!(*crate::panic::lock(&answers), [Err(Errno::EINTR)]);
+    let (task, answers) = start_read(&reads, &runtime, 2, async { panic!("a failed range task") });
+    assert!(task.await.unwrap_err().is_panic());
+    assert_eq!(*crate::panic::lock(&answers), [Err(Errno::EIO)]);
+    assert!(crate::panic::lock(&reads.0).by_request.is_empty());
 }
 
 #[test]
-fn a_stop_gives_up_every_read_and_each_one_started_after_it() {
-    let fixture = ItemFixture::new();
-    let runtime = fixture.runtime();
-    let reads = InterruptibleReads::default();
-    let (first, first_held) = spawn_waiting_read(&runtime);
-    let (second, second_held) = spawn_waiting_read(&runtime);
-    reads.start(1, || first.abort_handle());
-    reads.start(2, || second.abort_handle());
+fn an_unrun_write_reply_and_a_panicking_job_answer_eio_once() {
+    for panic in [false, true] {
+        let answers = Arc::new(Mutex::new(Vec::new()));
+        let answered = Arc::clone(&answers);
+        let reply = reply_to(move |answer: Result<(), Errno>| crate::panic::lock(&answered).push(answer));
+        let job = move || { if panic { panic!("a failed write job"); } reply(Ok(())); };
+        if panic { assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).is_err()); }
+        else { drop(job); }
+        assert_eq!(*crate::panic::lock(&answers), [Err(Errno::EIO)]);
+    }
+}
 
-    reads.stop();
-
-    assert!(runtime.block_on(first).unwrap_err().is_cancelled());
-    assert!(runtime.block_on(second).unwrap_err().is_cancelled());
-    assert_eq!((Arc::strong_count(&first_held), Arc::strong_count(&second_held)), (1, 1), "what the reads held is let go");
+#[test]
+fn a_read_on_a_stopped_runtime_is_answered_eio_and_forgotten() {
+    let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    let handle = runtime.handle().clone();
+    drop(runtime);
+    let reads = Arc::new(InterruptibleReads::default());
+    let (task, answers) = start_read(&reads, &handle, 1, std::future::pending());
+    assert!(task.is_finished());
+    assert_eq!(*crate::panic::lock(&answers), [Err(Errno::EIO)]);
     assert!(crate::panic::lock(&reads.0).by_request.is_empty());
-
-    // The session's threads answer until the unmount: a read that starts now is given up at once.
-    let (late, late_held) = spawn_waiting_read(&runtime);
-    reads.start(3, || late.abort_handle());
-    assert!(runtime.block_on(late).unwrap_err().is_cancelled());
-    assert_eq!(Arc::strong_count(&late_held), 1);
-    assert!(crate::panic::lock(&reads.0).by_request.is_empty(), "and is not kept");
 }

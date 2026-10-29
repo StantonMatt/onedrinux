@@ -54,6 +54,8 @@ pub(crate) struct ItemPathStatus {
     pub(crate) sync_state: Option<FileSyncState>,
     /// Whether a pin holds for the item: the nearest mark at it or above it is a pin.
     pub(crate) is_pinned: bool,
+    /// The presentation state, including delayed range fetches and read linger.
+    /// Free-up decisions separately check actual whole downloads, without this delay.
     pub(crate) is_downloading: bool,
     pub(crate) is_open_for_writing: bool,
 }
@@ -152,7 +154,7 @@ impl ItemFilesInterface {
         let (item, is_pinned) = self.find_onedrive_item(path).await?;
         let Some(onedrive_item) = item.onedrive_item.clone() else { return Err(FilesRefusal::NotInOneDrive) };
         let id = item.local_item_id;
-        Ok(ItemPathStatus { item: id, kind: item.kind, onedrive_item, sync_state: item.file_sync_state(), is_pinned, is_downloading: self.download_states.is_downloading(id), is_open_for_writing: self.item_handles.is_open_for_writing(id) })
+        Ok(ItemPathStatus { item: id, kind: item.kind, onedrive_item, sync_state: item.file_sync_state(), is_pinned, is_downloading: self.download_states.is_hydrating(id), is_open_for_writing: self.item_handles.is_open_for_writing(id) })
     }
 
     /// Asks for the download of each of `files` and waits for them all: the first

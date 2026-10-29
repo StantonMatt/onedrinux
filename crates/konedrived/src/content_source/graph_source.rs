@@ -10,7 +10,8 @@
 //!   file is at hand ([`links`]: one listing of its folder gives the URLs of all its
 //!   files), the range is asked of that URL, and taken only when the answer's `ETag` is the
 //!   listed eTag and the whole size it says is the listed size. A file up to
-//!   [`small_files::SMALL_FILE`] is asked whole, and its other ranges come from memory.
+//!   [`read_blocks::SMALL_FILE`] is asked whole; larger files fetch aligned 1 MiB blocks.
+//!   Both paths keep proven bytes in [`read_blocks`], shared under a 64 MiB bound.
 //! - **By the metadata**, in three: the item's metadata, the range, and the metadata
 //!   again, which must not have changed. Whenever the first way cannot be taken or its
 //!   answer is not the listed version: no URL, an expired one, another `ETag` or size, or
@@ -36,9 +37,14 @@
 // test: incompatible_download_etags_do_not_recache_the_metadata_url
 // test: failed_cached_downloads_drop_the_link_and_take_the_metadata_path
 // test: a_refused_listed_binding_sends_no_request
+// test: a_five_mib_file_in_128_kib_reads_costs_five_blocks
+// test: an_uncached_crossing_read_fetches_both_blocks_and_clips_the_last
+// test: the_careful_path_fetches_and_remembers_whole_blocks
+// test: a_later_block_cannot_switch_the_version_even_after_cache_eviction
+// test: an_incomplete_block_is_never_cached_or_partly_answered
 
 mod links;
-mod small_files;
+mod read_blocks;
 
 use std::time::{Duration, SystemTime};
 use std::sync::Arc;
@@ -52,7 +58,7 @@ use konedrive_graph::drive::{DriveClient, DriveError, DriveItem};
 use konedrive_graph::quickxor::decode_base64;
 use konedrive_tree::ContentVersion;
 use links::{DownloadLinks, Link};
-use small_files::{SmallFiles, WholeFile, SMALL_FILE};
+use read_blocks::{ReadBlocks, Piece, covering};
 
 /// What the first range of an opened content asked by the metadata was bound to: the
 /// metadata version, the metadata eTag where there is no cTag, and the download
@@ -87,7 +93,7 @@ pub(crate) struct GraphSource {
     /// Serializes cache publication with token invalidation; never held across await.
     cache_use: Arc<std::sync::Mutex<()>>,
     links: Arc<DownloadLinks>,
-    small_files: Arc<SmallFiles>,
+    read_blocks: Arc<ReadBlocks>,
     /// Keeps the token source's weak invalidation callback registered until this source drops.
     _on_invalidate: Arc<konedrive_graph::token::InvalidateHook>,
 }
@@ -95,17 +101,17 @@ pub(crate) struct GraphSource {
 impl GraphSource {
     pub fn new(drive: DriveClient) -> Self {
         let links = Arc::new(DownloadLinks::default());
-        let small_files = Arc::new(SmallFiles::default());
+        let read_blocks = Arc::new(ReadBlocks::default());
         let cache_use = Arc::new(std::sync::Mutex::new(()));
         let clear_use = Arc::clone(&cache_use);
-        let (clear_links, clear_files) = (Arc::clone(&links), Arc::clone(&small_files));
+        let (clear_links, clear_files) = (Arc::clone(&links), Arc::clone(&read_blocks));
         let on_invalidate: Arc<konedrive_graph::token::InvalidateHook> = Arc::new(move || {
             let _cache_use = crate::panic::lock(&clear_use);
             clear_links.clear();
             clear_files.clear();
         });
         drive.on_token_invalidate(&on_invalidate);
-        Self { drive, ranges: Default::default(), cache_use, links, small_files, _on_invalidate: on_invalidate }
+        Self { drive, ranges: Default::default(), cache_use, links, read_blocks, _on_invalidate: on_invalidate }
     }
 
     /// A range of `opened_as` by the listed version, in one request: `None` when it cannot
@@ -133,8 +139,7 @@ impl GraphSource {
         // listings, and the answer could not be taken.
         if link.etag != listed.etag { return Ok(None); }
         if !self.drive.cached_content_allowed() { return Ok(None); }
-        let is_whole = listed.size <= SMALL_FILE;
-        let (ask_from, ask_end) = if is_whole { (0, listed.size) } else { (from, end) };
+        let (ask_from, ask_end) = covering(from, end, listed.size);
         let download = match self.drive.download(&link.url, ask_from, Some(ask_end)).await {
             Ok(download) => download,
             Err(DriveError::UrlExpired | DriveError::Failed(_)) => {
@@ -164,11 +169,9 @@ impl GraphSource {
         let version = Some(Version { ctag: ctag.clone().unwrap_or_default(), quick_xor: hash.as_deref().and_then(decode_base64) });
         let _cache_use = crate::panic::lock(&self.cache_use);
         if !self.drive.cached_content_allowed() { return Ok(None); }
-        if is_whole {
-            let file = self.small_files.keep(item_id, opened_as, WholeFile { size: Some(listed.size), mtime: SystemTime::UNIX_EPOCH, version, bytes });
-            return Ok(Some(file.range(from, end)));
-        }
-        Ok(Some(Fetched { served_from: from, size: Some(listed.size), mtime: SystemTime::UNIX_EPOCH, version, stream: Box::new(std::io::Cursor::new(bytes)) }))
+        let piece = Piece { from: ask_from, size: Some(listed.size), mtime: SystemTime::UNIX_EPOCH, version, bytes };
+        self.read_blocks.keep(item_id, opened_as, &piece);
+        Ok(Some(piece.range(from, end)))
     }
 
     /// Whether a range answered with the `ETag` `etag` by the listed version may be
@@ -203,7 +206,11 @@ impl GraphSource {
             Some(url) => url.clone(),
             None => self.drive.content_url(item_id).await.map_err(source_error)?,
         };
-        let download = self.drive.download(&address, from, Some(end)).await.map_err(source_error)?;
+        let (ask_from, ask_end) = covering(from, end, item.size.unwrap_or(opened_as.size()));
+        let download = self.drive.download(&address, ask_from, Some(ask_end)).await.map_err(source_error)?;
+        if download.served_from != ask_from {
+            return Err(SourceError::Transient("the range started at another offset".into()));
+        }
         // cTag is the content version; eTag also changes for a rename. Use
         // metadata eTag only when no cTag is available.
         let metadata_etag = item.e_tag.clone().filter(|tag| content_tag_of(&item).is_none() && !tag.is_empty());
@@ -222,11 +229,13 @@ impl GraphSource {
             }
             bound.checked.get_or_insert(identity);
         }
-        // Keep only this requested range in memory, then check metadata again before
-        // any of it reaches FUSE. No staging file or whole-file allocation is needed.
+        // Read the aligned piece, then check metadata again before publication or FUSE.
         let mut bytes = Vec::new();
-        download.stream.take(end.saturating_sub(from)).read_to_end(&mut bytes).await
+        download.stream.take(ask_end.saturating_sub(ask_from)).read_to_end(&mut bytes).await
             .map_err(|e| SourceError::Transient(e.to_string()))?;
+        if bytes.len() as u64 != ask_end.saturating_sub(ask_from) {
+            return Err(SourceError::Transient("the range ended before the aligned piece was complete".into()));
+        }
         let after = self.drive.item(item_id).await.map_err(source_error)?;
         if after.deleted.is_some() || after.file.is_none() || version_of(&after) != version
             || (content_tag_of(&item).is_none() && after.e_tag != item.e_tag) || after.size != item.size {
@@ -240,8 +249,14 @@ impl GraphSource {
                 self.links.keep(item_id, Link { url, etag });
             }
         }
-        Ok(Fetched { served_from: download.served_from, size: item.size, mtime: mtime_of(&item),
-            version, stream: Box::new(std::io::Cursor::new(bytes)) })
+        let piece = Piece { from: ask_from, size: item.size, mtime: mtime_of(&item), version, bytes };
+        let _cache_use = crate::panic::lock(&self.cache_use);
+        // The caller compares these facts with the opened row too. Never remember a
+        // changed answer as the old generation before that comparison can reject it.
+        if self.drive.cached_content_allowed() && matches_opened(&piece, opened_as) {
+            self.read_blocks.keep(item_id, opened_as, &piece);
+        }
+        Ok(piece.range(from, end))
     }
 }
 
@@ -255,9 +270,9 @@ impl ContentSource for GraphSource {
             let allowed = self.drive.cached_content_allowed();
             if !allowed {
                 self.links.clear();
-                self.small_files.clear();
-            } else if let Some(file) = self.small_files.find(item_id, opened_as) {
-                return Ok(file.range(from, end));
+                self.read_blocks.clear();
+            } else if let Some(answer) = self.read_blocks.find(item_id, opened_as, from, end) {
+                return Ok(answer);
             }
             allowed
         };
@@ -272,7 +287,7 @@ impl ContentSource for GraphSource {
 
     fn forget(&self, item_id: &str) {
         crate::panic::lock(&self.ranges).remove(item_id);
-        self.small_files.forget(item_id);
+        self.read_blocks.forget(item_id);
         self.links.drop_link(item_id);
     }
 
@@ -344,4 +359,18 @@ fn version_of(item: &DriveItem) -> Option<Version> {
 
 fn content_tag_of(item: &DriveItem) -> Option<&str> {
     item.c_tag.as_deref().filter(|tag| !tag.is_empty())
+}
+
+/// Cache only facts compatible with the opened row, using the range fetcher's same
+/// cTag-first comparison (and the hash when both sides supply one).
+fn matches_opened(piece: &Piece, opened: &ContentVersion) -> bool {
+    let ContentVersion::Hashed { ctag, hash, .. } = opened else { return false };
+    if let (Some(opened), Some(answered)) = (hash.as_deref().and_then(decode_base64), piece.version.as_ref().and_then(|v| v.quick_xor)) {
+        if opened != answered { return false; }
+    }
+    if let (Some(opened), Some(answered)) = (ctag, piece.version.as_ref().filter(|v| !v.ctag.is_empty())) {
+        return opened == &answered.ctag;
+    }
+    let mtime = piece.mtime.duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+    !piece.size.is_some_and(|size| size != opened.size()) && (mtime == 0 || mtime == opened.mtime().0)
 }

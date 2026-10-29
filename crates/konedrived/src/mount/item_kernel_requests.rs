@@ -707,6 +707,9 @@ impl ItemKernelRequests {
     /// the one refused during the wait, when it is the first
     /// (`ItemDownloader::tell_throttle_refusal`).
     async fn fetch_range(&self, range: &RangeToFetch) -> Result<Vec<u8>, Errno> {
+        // The pool reader starts activity only once its slot is held. Dropping this
+        // asking on a refusal or interrupt forgets the binding too.
+        let _reading = self.download_states.range_reads.prepare(range.source.onedrive_item.item_id.as_str(), range.item);
         match self.range_fetcher.fetch_range(range.item, &range.source, range.from, range.end).await {
             Ok(bytes) => Ok(bytes),
             Err(RangeRefusal::AnotherContent) => Err(Errno::ESTALE),

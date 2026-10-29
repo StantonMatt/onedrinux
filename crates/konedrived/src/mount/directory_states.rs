@@ -65,6 +65,9 @@ struct Node {
     children: HashSet<LocalItemId>,
     row: Option<Row>,
     own: Counts,
+    /// The file's shown marks differ from its aggregate contribution: a pinned
+    /// online-only file already contributes hydrating to its ancestors.
+    shown: (Option<State>, Option<SyncMark>),
     total: Counts,
 }
 struct Row {
@@ -137,9 +140,9 @@ impl DirectoryStates {
     ) -> Result<Arc<Self>, TreeError> {
         let states = Arc::new(Self { index: Mutex::default(), downloads, running, plan, bridge });
         let weak = Arc::downgrade(&states);
-        let listener: Arc<dyn Fn(Vec<LocalItemId>) + Send + Sync> = Arc::new(move |items| {
+        let listener: Arc<dyn Fn(Vec<LocalItemId>, bool) + Send + Sync> = Arc::new(move |items, content_changed| {
             if let Some(states) = weak.upgrade() {
-                states.refresh_runtime(items);
+                states.refresh_runtime(items, content_changed);
             }
         });
         states.downloads.changes.listen(listener.clone());
@@ -156,7 +159,7 @@ impl DirectoryStates {
     }
     fn file_values(&self, row: &Row) -> (Option<State>, Option<SyncMark>) {
         let item = &row.item;
-        let downloading = self.downloads.is_downloading(item.local_item_id);
+        let downloading = self.downloads.is_hydrating(item.local_item_id);
         let replacement = super::item_lookup::has_pending_replacement(item);
         let failed = (item.content_presence == ContentPresence::NotOnDisk || replacement)
             && ((row.pinned && self.plan.is_download_held(item.local_item_id))
@@ -178,11 +181,11 @@ impl DirectoryStates {
         );
         (state, sync)
     }
-    fn contribution(&self, row: &Row) -> Counts {
+    fn contribution(row: &Row, values: (Option<State>, Option<SyncMark>)) -> Counts {
         if row.item.kind != ItemKind::File || row.item.local.is_none() {
             return Counts::default();
         }
-        let (state, sync) = self.file_values(row);
+        let (state, sync) = values;
         let state = state.unwrap_or(State::Hydrated);
         let state = if state == State::OnlineOnly && row.pinned { State::Hydrating } else { state };
         Counts::of(state, sync)
@@ -271,9 +274,12 @@ impl DirectoryStates {
             }
             // Runtime changes can run during staging. Compute from the current source
             // states under the apply lock, never from a pre-I/O counter snapshot.
-            let own = row.as_ref().map_or(Counts::default(), |row| self.contribution(row));
+            let shown = row.as_ref().map_or((None, None), |row| self.file_values(row));
+            let own = row.as_ref().map_or(Counts::default(), |row| Self::contribution(row, shown));
             index.set_own(id, own, &mut changed);
-            index.nodes.get_mut(&id).unwrap().row = row;
+            let node = index.nodes.get_mut(&id).unwrap();
+            node.shown = shown;
+            node.row = row;
         }
         for (id, parent) in parents {
             index.reparent(id, parent, &mut changed);
@@ -289,20 +295,26 @@ impl DirectoryStates {
         self.bridge.announce_directories(changed);
         Ok(())
     }
-    fn refresh_runtime(&self, items: Vec<LocalItemId>) {
+    fn refresh_runtime(&self, items: Vec<LocalItemId>, content_changed: bool) {
         let mut index = crate::panic::lock(&self.index);
         let mut changed = BTreeSet::new();
         let mut files = Vec::new();
         for id in items {
             let Some(node) = index.nodes.get(&id) else { continue };
             let Some(row) = node.row.as_ref() else { continue };
-            let own = self.contribution(row);
-            if own != node.own && row.item.kind == ItemKind::File {
+            let shown = self.file_values(row);
+            let own = Self::contribution(row, shown);
+            if (content_changed || shown != node.shown) && row.item.kind == ItemKind::File {
                 if let Some(place) = row.item.local.as_ref().and_then(|local| local.place.clone()) {
-                    files.push(super::item_announcements::ItemAnnouncement::MarksChanged { item: id, place });
+                    files.push(if content_changed {
+                        super::item_announcements::ItemAnnouncement::ContentChanged { item: id, place }
+                    } else {
+                        super::item_announcements::ItemAnnouncement::MarksChanged { item: id, place }
+                    });
                 }
             }
             index.set_own(id, own, &mut changed);
+            index.nodes.get_mut(&id).unwrap().shown = shown;
         }
         drop(index);
         // After the source state changed: a watcher that immediately reads xattrs sees

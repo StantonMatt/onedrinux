@@ -204,7 +204,11 @@ fn the_status_of_a_path_is_the_rows_sync_state_its_pin_and_what_runs_for_it() {
 
     // What runs for it: a download, a writer.
     let key = crate::mount::item_download_states::DownloadKey { item: remote.local_item_id, content: remote.local.clone().unwrap().content.unwrap() };
-    let _started = fixture.download_states.start_or_join(&key, &DownloadAsker::Read, None);
+    let started = fixture.download_states.start_or_join(&key, &DownloadAsker::Read, None);
+    assert!(!status("docs/remote.txt").is_downloading, "the emblem delay has not passed");
+    if let super::super::item_download_states::ItemDownloadStart::Started { run, .. } = started {
+        fixture.download_states.show_download(&run);
+    } else { panic!("a new download"); }
     let (writer, _) = fixture.item_handles.add_writer(clean.local_item_id, Arc::new(fs::File::open(fixture.disk_path("docs/clean.txt")).unwrap()));
     assert!(status("docs/remote.txt").is_downloading && !status("docs/remote.txt").is_open_for_writing);
     assert!(status("docs/clean.txt").is_open_for_writing && !status("docs/clean.txt").is_downloading);

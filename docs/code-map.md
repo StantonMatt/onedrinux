@@ -235,9 +235,13 @@ Where a download gets its bytes from, and the download of a whole file.
   kept 40 minutes with a 10,000-entry cap; pages release readers as they arrive, and one
   background listing per folder is cancelled on token invalidation or drop. `[tests]`
 - `graph_source/links/tests.rs` — URL expiry pruning, the entry cap and background cancellation.
-- `graph_source/small_files.rs` — the whole bytes of small files read as ranges, held in
-  memory a short while, freed on expiry lookup, insertion, forget or token invalidation. `[tests]`
-- `graph_source/small_files/tests.rs` — expired bytes are pruned on lookup and insertion.
+- `graph_source/read_blocks.rs` — aligned 1 MiB pieces and small whole files in one 64 MiB
+  memory cache, keyed by item and opened generation; five-minute expiry, oldest-first eviction,
+  crossing-range assembly, forget and token invalidation. `[tests]`
+- `graph_source/read_blocks/tests.rs` — alignment, clipping, shared memory bound, expiry and
+  generation separation.
+- `graph_source/tests/blocks.rs` — request counts on both paths, boundary reads, incomplete
+  answers and version changes across blocks and eviction.
 - `tracked.rs` — `Tracked`: a content source that reports what it fetches to `Transfers`.
   `[tests]`
 
@@ -285,8 +289,10 @@ mount.
   names kept syncing, the start's refresh (pins, bytes and held uploads) and a new OneDrive folder at
   a left-here name; mounted equivalents run in `tests/fuse-probe/file_writes.sh`.
 - `kernel_requests.rs` — `KernelRequests`: the one `fuser::Filesystem`, a thin wrapper over
-  `ItemKernelRequests`; what the folder never takes (links, special files, set attributes).
-  `[tests]`
+  `ItemKernelRequests`; interrupt answers EINTR and stop answers EIO, exactly once; what the
+  folder never takes (links, special files, set attributes). `[tests]`
+- `kernel_requests/pending_reply.rs` — replies moved to tasks and write jobs explicitly
+  answer EIO on drop instead of dropping a raw fuser reply. `[tests]`
 - `item_kernel_requests.rs` — `ItemKernelRequests`: what each request of the kernel does,
   request by request; `ATTRIBUTE_LIFETIME`. `[tests]`
 - `fuse_connection.rs` — the connection of a mount to the kernel, as the kernel numbers it, and
@@ -388,6 +394,11 @@ A file that is not on disk:
   OneDrive. `[tests]`
 - `item_range_fetcher.rs` — `ItemRangeFetcher`: a range asked of OneDrive, of the content the
   reader opened; a range answered short fails the read. `[tests]`
+- `range_read_states.rs` — the delayed hydrating mark for program range fetches, per
+  asking rather than cumulative: no mark before 500 ms, then through the read linger;
+  pool admission and early refusals do not count. Tests in `range_read_states/tests.rs`
+  and `item_kernel_requests/tests/fetch_states.rs` cover quick, overlapping and slow
+  fetches, disk/memory answers, errors, stale content, interrupts and throttle waits.
 - `range_readers.rs` — the files being read as ranges, which go before the background
   downloads. `[tests]`
 - `item_downloader.rs` — `ItemDownloader`: a file downloaded whole into the backing directory,
@@ -1176,7 +1187,8 @@ Each has its file in `crates/konedrived/src/dbus/`.
   daemon on a thread of its own.
 - `session-bus.conf.in`, `activating-bus.conf.in`, `failing-daemon.service.in` — the tests'
   buses, and a daemon that fails to start.
-- `overlayenginetest.cpp` — the overlay logic on its own.
+- `overlayenginetest.cpp` — the overlay logic on its own, including live file transitions
+  from cloud to syncing and back after a partial fetch, or to downloaded after a landing.
 - `overlayplugintest.cpp` — the overlay plugin as Dolphin loads it.
 - `actionplugintest.cpp` — the context menu plugin as `KFileItemActions` loads it.
 - `noopentest.cpp` — the plugins never open a file inside the folder.
@@ -1199,11 +1211,13 @@ suite".
 - `scenario_checks.sh` — the checks a scenario makes, and the count of what passed and failed.
 - `scenario_folder.sh` — a scenario's own folder, service and fake OneDrive, started and
   stopped.
-- `mounted_folder.sh` — the group `mounted_folder`: a start from nothing, range reads and a
+- `mounted_folder.sh` — the group `mounted_folder`: delayed range-fetch and pinned
+  whole-download states with real mounted `IN_ATTRIB` at both ends, a start from nothing, range reads and a
   whole download, changes from OneDrive, a directory that cannot be removed, Forget with unsent
   changes.
 - `file_writes.sh` — the group `file_writes`: what a program's changes become in OneDrive.
-- `file_reads.sh` — the group `file_reads`: reads, downloads, free-up.
+- `file_reads.sh` — the group `file_reads`: reads, downloads, free-up; an interrupted libc
+  pread receives EINTR promptly without an unanswered FUSE reply warning.
 - `download_guard.sh` — the group `download_guard`: app-download reclamation and its keep/open skip rules, bulk and background refusals, explicit actions,
   initial-placement readiness, missing-name accounting, low-space ranges, already-open handles and mmap.
 - `daemon_restarts.sh` — the group `daemon_restarts`: stops and kills in the middle of work.
@@ -1220,8 +1234,9 @@ suite".
 - `src/bin/fuse-service.rs` — `fuse-service`: the daemon's service for one account, taking a
   command a line.
 - `src/bin/fake-onedrive.rs` — `fake-onedrive`: the fake OneDrive as a process of its own.
-- `src/bin/watch-client.rs` — `watch-client`: an inotify watch on a directory, every event
-  printed.
+- `src/bin/watch-client.rs` — `watch-client`: an inotify watch on a directory; optional
+  `states` reads the xattr on each `IN_ATTRIB` to verify range/pin start and end states;
+  every event printed.
 
 ## `tests/write-account`: the test account's harness
 
@@ -1337,8 +1352,9 @@ from schema 31, and atomic saves crossing upload requests, without a mount or ac
 - `crates/konedrived/src/mount/item_write_operations/write_scope.rs` — common scope admission
   used by kernel dispatch, carrying the request PID and existing containing folder into
   refusal reports; tests in `mount/item_kernel_requests/tests/write_scope.rs`.
-- `crates/konedrived/src/mount/item_kernel_requests/tests/listed_ranges.rs` — range reads of
-  a folder's small files through the Graph source over the fake OneDrive: one listing and one
+- `crates/konedrived/src/mount/item_kernel_requests/tests/listed_ranges.rs` — the 491,408-byte
+  screenshot's 22 probes use one block on both Graph paths and keep guard counters unchanged;
+  range reads of a folder's small files through the Graph source over the fake OneDrive: one listing and one
   request a file, and the download guard's counts the same as through a source that asks for
   each range.
 - `crates/konedrived/src/onedrive_steps/write_scope.rs` — local and remote path admission for

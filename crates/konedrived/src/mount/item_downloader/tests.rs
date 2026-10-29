@@ -998,38 +998,38 @@ fn a_failure_that_stands_for_a_content_onedrive_stated_another_one_for_is_told_o
 
     // OneDrive states another content: told, and remembered.
     assert_eq!(read(), Err(libc::ESTALE));
-    assert_eq!(told(), (1, 2));
+    assert_eq!(told(), (1, 0));
 
     // The account is signed out: the first read's failure is told, by its end alone.
     source.refuse(Some(|| SourceError::SignedOut("401".into())));
     assert_eq!(read(), Err(libc::EIO));
-    assert_eq!(told(), (2, 3), "the first failure since OneDrive answered");
+    assert_eq!(told(), (2, 0), "the first failure since OneDrive answered");
     for _read in 0..3 {
         assert_eq!(read(), Err(libc::EIO));
     }
-    assert_eq!(told(), (2, 3), "the same failure stands: each read asks, none is told");
+    assert_eq!(told(), (2, 0), "the same failure stands: each read asks, none is told");
     assert!(fixture.download_states.is_another_content(&key_of(&shown)), "no answer voided what is remembered");
 
     // Another failure, by the errno the reads hear: told, once.
     source.refuse(Some(|| SourceError::NotFound("404".into())));
     assert_eq!((read(), read()), (Err(libc::ESTALE), Err(libc::ESTALE)));
-    assert_eq!(told(), (3, 4));
+    assert_eq!(told(), (3, 0));
 
     // OneDrive answers, with another content again: no news. The failure that comes
     // after that answer is told again.
     source.refuse(None);
     assert_eq!(read(), Err(libc::ESTALE));
-    assert_eq!(told(), (3, 4));
+    assert_eq!(told(), (3, 0));
     source.refuse(Some(|| SourceError::NotFound("404".into())));
     assert_eq!((read(), read()), (Err(libc::ESTALE), Err(libc::ESTALE)));
-    assert_eq!(told(), (4, 5));
+    assert_eq!(told(), (4, 0));
     assert_eq!(report.transfers.list(), [], "none of these downloads left an entry of `Transfers`");
 
     // OneDrive states the asked content again: told as any download.
     source.refuse(None);
     fixture.serve_content(item, b"the report");
     assert_eq!(read(), Ok(()));
-    assert_eq!((count_events(EventKind::Failed), count_events(EventKind::Downloaded), count_announcements() - announced_before), (4, 1, 6));
+    assert_eq!((count_events(EventKind::Failed), count_events(EventKind::Downloaded), count_announcements() - announced_before), (4, 1, 1));
 }
 
 #[test]
@@ -1047,7 +1047,7 @@ fn a_content_onedrive_keeps_stating_another_one_for_is_told_once() {
 
     // The first time the content is found to be another one: everything is told.
     assert_eq!(hear(ask(&downloader, &shown, DownloadAsker::Read)), Err(libc::ESTALE));
-    assert_eq!((count_events(EventKind::Failed), count_announcements() - announced_before), (1, 2));
+    assert_eq!((count_events(EventKind::Failed), count_announcements() - announced_before), (1, 0));
     assert_eq!(report.transfers.list(), [], "no answer was accepted: nothing is left shown as a transfer");
 
     // Each read asks OneDrive anew, which states the same: nothing changed to be told.
@@ -1055,14 +1055,14 @@ fn a_content_onedrive_keeps_stating_another_one_for_is_told_once() {
         assert_eq!(hear(ask(&downloader, &shown, DownloadAsker::Read)), Err(libc::ESTALE));
     }
     assert!(fixture.download_states.is_another_content(&key_of(&shown)));
-    assert_eq!((count_events(EventKind::Failed), count_announcements() - announced_before), (1, 2), "the failure and the announcements of the first download only");
+    assert_eq!((count_events(EventKind::Failed), count_announcements() - announced_before), (1, 0), "the failure and the announcements of the first download only");
     assert_eq!(report.transfers.list(), [], "no entry of `Transfers` is left of an asking");
 
     // OneDrive states the asked content again: the download is told as any is, from its
     // first answer on.
     fixture.serve_content(item, b"the report");
     assert_eq!(hear(ask(&downloader, &shown, DownloadAsker::Read)), Ok(()));
-    assert_eq!((count_events(EventKind::Failed), count_events(EventKind::Downloaded), count_announcements() - announced_before), (1, 1, 3));
+    assert_eq!((count_events(EventKind::Failed), count_events(EventKind::Downloaded), count_announcements() - announced_before), (1, 1, 1));
     assert_eq!(report.transfers.list(), [], "landed: shown no more");
 }
 
@@ -1401,4 +1401,36 @@ fn hashless_remote_bytes_never_hydrate_a_write_open_as_clean() {
     assert_eq!(hear(ask(&downloader, &row, DownloadAsker::OpenForWriting)), Err(libc::EIO));
     assert_eq!(fixture.read_disk_file("unverified.txt"), None);
     assert_eq!(presence_of(&fixture, &row), ContentPresence::NotOnDisk);
+}
+
+#[test]
+fn slow_whole_downloads_show_once_after_the_delay_and_quick_ones_never_show() {
+    use crate::mount::directory_states::DirectoryStates;
+    use konedrive_fs::placeholder::State;
+    let fixture = ItemFixture::new();
+    let row = fixture.show_onedrive_file("slow.bin", &[7; 65536]);
+    let quick = fixture.show_onedrive_file("quick.bin", &[8; 65536]);
+    let source = HeldSource::held(&fixture);
+    let downloader = make_downloader(&fixture, &source);
+    let states = DirectoryStates::build(&fixture.store, fixture.download_states.clone(), fixture.running_steps.clone(), fixture.published_plan.clone(), fixture.inotify_bridge.clone()).unwrap();
+    let item = row.local_item_id;
+    let marks = |item| fixture.inotify_bridge.list_queued().into_iter().flatten().filter(|a| matches!(a, ItemAnnouncement::MarksChanged { item: changed, .. } if *changed == item)).count();
+    let heard = ask(&downloader, &row, DownloadAsker::FilesInterface);
+    wait_until_it_writes(&fixture, &row);
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(states.file_state(item), Some(State::OnlineOnly));
+    assert_eq!(marks(item), 0, "no immediate downloading announcement");
+    let limit = Instant::now() + Duration::from_secs(3);
+    while states.file_state(item) != Some(State::Hydrating) || marks(item) != 1 {
+        assert!(Instant::now() < limit, "a slow whole download was not shown");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    source.let_go();
+    assert_eq!(hear(heard), Ok(()));
+    assert_eq!(states.file_state(item), Some(State::Hydrated));
+    assert_eq!(marks(item), 1, "the final state shares its content invalidation");
+    assert_eq!(fixture.inotify_bridge.list_queued().into_iter().flatten().filter(|a| matches!(a, ItemAnnouncement::ContentChanged { item: changed, .. } if *changed == item)).count(), 1);
+    assert_eq!(hear(ask(&downloader, &quick, DownloadAsker::FilesInterface)), Ok(()));
+    assert_eq!(states.file_state(quick.local_item_id), Some(State::Hydrated));
+    assert_eq!(marks(quick.local_item_id), 0, "a quick whole download announced no hydrating transition");
 }

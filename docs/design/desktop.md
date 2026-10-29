@@ -676,16 +676,23 @@ A file:
 |---|---|---|
 | `online-only` | no | `konedrive-online-only` |
 | `online-only` | yes (its download is queued) | `konedrive-syncing` |
-| `hydrating` | either | `konedrive-syncing` |
+| `hydrating` (a slow content fetch, including ranges read by a program) | either | `konedrive-syncing` |
 | `hydrated` | no | `konedrive-downloaded` |
 | `hydrated` | yes | `konedrive-always-keep` |
 | outside a folder, or a state the plugin does not know | — | none |
+
+A fetch shows `hydrating` only after one asking for bytes has stayed in flight for
+500 ms. Quick image-header reads and answers from disk or memory do not flash the
+emblem. Once shown, range activity stays through the two-second read linger, including
+between a program's reads; a whole download keeps it shown too. The mark then returns
+to the file's real state, with one attribute notification per shown-state change.
+Errors, cancellation and throttle refusals end the same activity ([mount.md](mount.md) §3.5).
 
 A folder, from what the mount sums up below it:
 
 | State | Pinned | Emblem |
 |---|---|---|
-| `hydrating` (something below is downloading) | either | `konedrive-syncing` |
+| `hydrating` (a file below is fetching content, including a shown range read) | either | `konedrive-syncing` |
 | any | yes | `konedrive-always-keep` |
 | `online-only` (a file below is) | no | `konedrive-online-only` |
 | `hydrated` (everything below is, or it is empty) | no | `konedrive-downloaded` |

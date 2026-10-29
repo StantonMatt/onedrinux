@@ -129,7 +129,7 @@ fn build_over(backing_directory: Arc<BackingDirectory>, setup: ItemMountSetup, r
     let download_states = Arc::new(ItemDownloadStates::new(download_after));
 
     let inotify_bridge = Arc::new(ItemInotifyBridge::new(folder.clone()));
-    let range_readers = Arc::new(RangeReaders::new(Arc::clone(&pool), runtime.clone()));
+    let range_readers = Arc::new(RangeReaders::new(Arc::clone(&pool), runtime.clone()).with_read_states(Arc::clone(&download_states.range_reads)));
     let range_fetcher = Arc::new(ItemRangeFetcher::new(range_readers, Arc::clone(&source), report.throttle_wait.clone()));
     let download_landing = Arc::new(ItemDownloadLanding::new(Arc::clone(&place_changes), store.clone(), Arc::clone(&running_steps), Arc::clone(&mount_take_down), Arc::clone(&item_handles))?);
     let downloader = Arc::new(ItemDownloader::new(

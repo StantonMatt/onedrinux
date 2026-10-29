@@ -65,3 +65,57 @@ fn a_folders_small_files_cost_one_listing_and_one_request_each_and_the_guard_cou
     let (counted_per_range, _) = read_the_heads_of_a_folders_files(false);
     assert_eq!(counted, counted_per_range, "the guard counts the same");
 }
+
+/// The supplied Gwenview header/stride pattern, including repeated probes of its header.
+/// Extra header probes bring this to the 22 reads observed in the journal.
+fn screenshot_reads() -> Vec<(u64, u32)> {
+    let mut reads = vec![(0, 4096); 3];
+    reads.extend([(0, 33), (33, 4096)]);
+    reads.extend((65536..491408).step_by(65536).map(|from| (from, 4096)));
+    reads.push((487424, 3984));
+    reads.extend(std::iter::repeat_n((0, 4096), 22 - reads.len()));
+    reads
+}
+
+fn read_a_larger_screenshot(through_graph: bool, listed: bool) -> (Vec<GuardApp>, Vec<(String, String)>) {
+    let size = 491408;
+    let bytes: Vec<_> = (0..size).map(|at| (at * 7 + at / 65536) as u8).collect();
+    let fixture = ItemFixture::new();
+    fixture.show_onedrive_directory("Screenshots");
+    let file = fixture.show_onedrive_file("Screenshots/large.png", &bytes);
+    let graph = fixture.runtime().block_on(fixture.start_fake_onedrive());
+    let mut setup = fixture.mount_setup();
+    if through_graph { setup.source = Arc::new(GraphSource::new(graph.client())); }
+    let guard = Arc::new(DownloadGuard::new(true, GuardConfig::default()));
+    setup.download_guard = Arc::clone(&guard);
+    let (_mount, requests) = crate::mount::item_mount::build_order::build(setup, fixture.runtime()).unwrap();
+    let pid = std::process::id();
+    let opened = requests.open_to_read(file.local_item_id, Some(pid)).unwrap();
+    graph.with(|cloud| cloud.log.clear());
+    for (from, size) in screenshot_reads() {
+        let ReadAnswer::Range(mut range) = requests.decide_read(opened.fh, from, size).unwrap() else { panic!("a range") };
+        if !listed { range.source.listed = None; }
+        let answer = fixture.runtime().block_on(requests.read_range(range, Some(pid))).unwrap();
+        assert_eq!(answer, bytes[from as usize..from as usize + size as usize]);
+    }
+    assert!(!requests.download_states.is_downloading(file.local_item_id), "the whole block fetched does not count toward download_after");
+    requests.answer_release(opened.fh);
+    let asked = graph.with(|cloud| std::mem::take(&mut cloud.log));
+    (guard.apps().into_iter().filter(|app| app.files > 0).collect(), asked)
+}
+
+#[test]
+fn a_491408_byte_screenshot_costs_one_range_for_22_reads_and_the_guard_counts_only_requested_bytes() {
+    let (counted, asked) = read_a_larger_screenshot(true, true);
+    assert_eq!(screenshot_reads().len(), 22);
+    let program_bytes = screenshot_reads().iter().map(|(_, size)| *size as u64).sum::<u64>();
+    assert_eq!(asked.iter().filter(|(_, route)| route.starts_with("me/drive/items/Screenshots/children")).count(), 1);
+    assert_eq!(asked.iter().filter(|(_, route)| route.starts_with("dl/")).count(), 1);
+    assert_eq!(asked.len(), 2, "one listing and one range, every later read from memory: {asked:?}");
+    assert_eq!(counted.iter().map(|app| (app.files, app.bytes)).collect::<Vec<_>>(), [(1, program_bytes)]);
+    assert_eq!(counted, read_a_larger_screenshot(false, true).0, "aligned fetches preserve guard decisions and counters for the same reads");
+    let (careful, asked) = read_a_larger_screenshot(true, false);
+    assert_eq!(counted, careful);
+    assert_eq!(asked.iter().filter(|(_, route)| route.starts_with("dl/")).count(), 1);
+    assert_eq!(asked.len(), 3, "without listed metadata, one metadata/body/metadata exchange for all 22 reads: {asked:?}");
+}

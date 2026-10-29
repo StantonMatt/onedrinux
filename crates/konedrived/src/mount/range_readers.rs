@@ -39,6 +39,7 @@ pub(super) struct RangeReaders {
     pool: Arc<TransferPool>,
     /// Where the timers run.
     runtime: tokio::runtime::Handle,
+    read_states: Option<Arc<super::range_read_states::RangeReadStates>>,
 }
 
 /// One read of a file as a range, in flight from [`RangeReaders::begin_read`] until this is
@@ -46,6 +47,7 @@ pub(super) struct RangeReaders {
 pub(super) struct ActiveRangeRead {
     range_readers: Arc<RangeReaders>,
     onedrive_id: String,
+    _activity: Vec<super::range_read_states::ActiveRead>,
 }
 
 impl Drop for ActiveRangeRead {
@@ -59,7 +61,12 @@ impl Drop for ActiveRangeRead {
 
 impl RangeReaders {
     pub(super) fn new(pool: Arc<TransferPool>, runtime: tokio::runtime::Handle) -> Self {
-        RangeReaders { readers: Mutex::default(), pool, runtime }
+        RangeReaders { readers: Mutex::default(), pool, runtime, read_states: None }
+    }
+
+    pub(super) fn with_read_states(mut self, states: Arc<super::range_read_states::RangeReadStates>) -> Self {
+        self.read_states = Some(states);
+        self
     }
 
     /// One more read of the file `id` is in flight, if the file has a reader already.
@@ -73,26 +80,36 @@ impl RangeReaders {
     pub(super) async fn begin_read(self: &Arc<Self>, id: &str) -> ActiveRangeRead {
         if !self.join_reader(id) {
             let slot = self.pool.acquire_sized(Class::Open, Size::Small).await;
-            // Another read of the file may have become its reader meanwhile: one slot a file.
-            if !self.join_reader(id) {
+            // Another read may have become its reader while the slot was awaited.
+            // Join or insert under one lock: never overwrite that reader or its slot.
+            let mut readers = crate::panic::lock(&self.readers);
+            if let Some(reader) = readers.get_mut(id) {
+                reader.in_flight += 1;
+            } else {
                 let lingers_until = Instant::now() + READ_LINGERS;
-                crate::panic::lock(&self.readers).insert(id.to_owned(), RangeReader { _slot: slot, in_flight: 1, lingers_until });
+                readers.insert(id.to_owned(), RangeReader { _slot: slot, in_flight: 1, lingers_until });
                 self.runtime.spawn(Arc::clone(self).expire_reader(id.to_owned()));
             }
         }
-        ActiveRangeRead { range_readers: Arc::clone(self), onedrive_id: id.to_owned() }
+        let activity = self.read_states.as_ref().map(|states| states.begin_fetch(id)).unwrap_or_default();
+        ActiveRangeRead { range_readers: Arc::clone(self), onedrive_id: id.to_owned(), _activity: activity }
     }
 
     /// The timer of the reader of `id`: lets the reader, and its slot, go once no read of it
     /// is in flight and it lingered out.
     async fn expire_reader(self: Arc<Self>, id: String) {
         loop {
-            let Some((in_flight, lingers_until)) = crate::panic::lock(&self.readers).get(&id).map(|reader| (reader.in_flight, reader.lingers_until)) else { return };
             let now = Instant::now();
-            if in_flight == 0 && now >= lingers_until {
-                crate::panic::lock(&self.readers).remove(&id);
-                return;
-            }
+            let (in_flight, lingers_until) = {
+                let mut readers = crate::panic::lock(&self.readers);
+                let Some(reader) = readers.get(&id) else { return };
+                let facts = (reader.in_flight, reader.lingers_until);
+                if facts.0 == 0 && now >= facts.1 {
+                    readers.remove(&id);
+                    return;
+                }
+                facts
+            };
             // While a read is in flight it is looked at again after a while; the read's end
             // moves `lingers_until`.
             tokio::time::sleep_until(if in_flight == 0 { lingers_until } else { now + READ_LINGERS }).await;

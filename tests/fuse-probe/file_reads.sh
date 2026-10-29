@@ -208,7 +208,7 @@ slow_download_does_not_stall_another_file() {
     check "the other file is read whole meanwhile" "$(is_seed other.bin Y && echo equal)" equal
     ended=$(date +%s%N)
     check "within three seconds" "$([ $(((ended - began) / 1000000)) -lt 3000 ] && echo yes || echo "no: $(((ended - began) / 1000000)) ms")" yes
-    check "while the slow file still waits" "$(state_of slow.bin)" online-only
+    check "while the slow file still waits" "$(state_of slow.bin)" hydrating
     wait $reader
     check "the slow file is read whole in the end" "$(cmp -s "$SRC/got" "$SRC/seed-X" && echo equal)" equal
 }
@@ -283,11 +283,46 @@ read_while_onedrive_asks_to_wait_fails_at_once_and_works_after() {
     check "after the wait the file is read whole" "$(is_seed away.bin X && echo equal)" equal
 }
 
+# A real kernel INTERRUPT reaches the pending read: a libc pread avoids Python's
+# automatic EINTR retry, and records the errno returned to the program.
+an_interrupted_range_read_answers_eintr_without_dropping_its_reply() {
+    begin_folder
+    seed_random X R slow.bin 491408
+    register_folder read-only
+    check_within 10 "the slow file is placed before reading" folder_has slow.bin
+    onedrive delay GET dl/X 6000 1 > /dev/null
+    $U python3 -c "
+import ctypes, errno, os, pathlib, signal, sys
+root = pathlib.Path(sys.argv[2])
+signal.signal(signal.SIGUSR1, lambda *_: None)
+signal.siginterrupt(signal.SIGUSR1, True)
+libc = ctypes.CDLL(None, use_errno=True)
+libc.pread.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_longlong]
+libc.pread.restype = ctypes.c_ssize_t
+fd = os.open(sys.argv[1], os.O_RDONLY)
+(root / 'reader-pid').write_text(str(os.getpid()))
+buffer = ctypes.create_string_buffer(4096)
+result = libc.pread(fd, buffer, len(buffer), 0)
+(root / 'read-errno').write_text(errno.errorcode.get(ctypes.get_errno(), 'none') if result < 0 else 'none')
+os.close(fd)" "$F/slow.bin" "$SRC" &
+    local reader=$!
+    range_is_waiting() { [ -f "$SRC/reader-pid" ] && [ "$(onedrive count GET dl/X)" -ge 1 ]; }
+    check_within 10 "the range reached OneDrive before interruption" range_is_waiting
+    kill -USR1 "$(cat "$SRC/reader-pid")"
+    check_within 3 "the interrupted read is answered promptly" test -f "$SRC/read-errno"
+    wait "$reader"
+    check "the kernel read is answered EINTR" "$(cat "$SRC/read-errno")" EINTR
+    check "no raw FUSE reply was dropped" "$(grep -c 'Reply not sent' "$LOGS/service.err")" 0
+    check "an interrupted header read does not start a whole download" "$(state_of slow.bin)" online-only
+    check "a later read still gives the right bytes" "$(is_seed slow.bin X && echo equal)" equal
+}
+
 # The group: every scenario of reading beside a fault.
 file_reads() {
     echo "==== reading beside a fault ===="
     ip link set lo up
     for name in \
+        an_interrupted_range_read_answers_eintr_without_dropping_its_reply \
         download_cut_off_gives_no_wrong_bytes \
         download_cut_off_keeps_what_it_has_and_goes_on_from_there \
         file_changed_in_onedrive_during_its_download_is_read_as_it_is_now \

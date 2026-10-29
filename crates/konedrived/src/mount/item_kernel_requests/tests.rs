@@ -1574,3 +1574,5 @@ fn staged_bytes_are_never_served_before_the_final_hash_even_under_the_expected_v
 
 mod write_scope;
 mod listed_ranges;
+
+mod fetch_states;

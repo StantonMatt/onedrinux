@@ -116,6 +116,29 @@ private Q_SLOTS:
         QCOMPARE(reads, afterFirst);
     }
 
+    void fileFetchStateIsFollowedLive()
+    {
+        Tree tree;
+        QVERIFY(tree.root(QStringLiteral("OneDrive")));
+        QVERIFY(tree.file(QStringLiteral("OneDrive/photo.png"), "online-only"));
+        const QString path = tree.path(QStringLiteral("OneDrive/photo.png"));
+        const QUrl fileUrl = url(path);
+        OverlayEngine engine;
+        QCOMPARE(engine.overlays(fileUrl), Cloud);
+        QSignalSpy changed(&engine, &OverlayEngine::overlaysChanged);
+        QVERIFY(setState(path, "hydrating"));
+        QTRY_COMPARE(changedOverlaysFor(changed, fileUrl), Syncing);
+        changed.clear();
+        QVERIFY(setState(path, "online-only")); // A partial fetch left no whole copy.
+        QTRY_COMPARE(changedOverlaysFor(changed, fileUrl), Cloud);
+        changed.clear();
+        QVERIFY(setState(path, "hydrating"));
+        QTRY_COMPARE(changedOverlaysFor(changed, fileUrl), Syncing);
+        changed.clear();
+        QVERIFY(setState(path, "hydrated")); // A whole download landed.
+        QTRY_COMPARE(changedOverlaysFor(changed, fileUrl), CheckOutline);
+    }
+
     void rootFolderHasItsOwnLiveEmblem()
     {
         Tree tree;
