@@ -1,8 +1,12 @@
 //! Microsoft Graph's drive API. Reads live here: the delta feed, one item's
-//! metadata, a file's bytes from an offset, and the `/content` redirect.
+//! metadata, a folder's files with their download URLs, a file's bytes from an offset, and
+//! the `/content` redirect.
 //! Writes live in [`mod@write`] (folders, rename, move, delete) and [`upload`]
 //! (upload sessions); the daemon's steps towards OneDrive call them, and the scope stays `Files.Read` until an account is switched
 //! to read-write.
+
+// test: a_children_listing_caps_requests_even_when_pages_are_empty_or_short
+// test: a_folders_children_come_with_their_download_urls_page_by_page_up_to_a_bound
 
 mod account;
 mod error;
@@ -63,6 +67,10 @@ pub struct Download {
     pub served_from: u64,
     /// The download endpoint's version, when supplied.
     pub etag: Option<String>,
+    /// The whole file's size as the answer says it: the total of a `206`'s
+    /// `Content-Range`, the `Content-Length` of a `200`. `None` when it says none, and
+    /// for an answer with no body to tell it (a `416`, or nothing asked).
+    pub size: Option<u64>,
     pub stream: Box<dyn AsyncRead + Send + Unpin>,
 }
 
@@ -117,6 +125,18 @@ struct DeltaBody {
     #[serde(rename = "@odata.deltaLink")]
     delta_link: Option<String>,
 }
+
+/// A page of a folder's children: what [`DriveClient::children_with_download_urls`] reads.
+#[derive(Deserialize)]
+struct ChildrenBody {
+    value: Vec<DriveItem>,
+    #[serde(rename = "@odata.nextLink")]
+    next_link: Option<String>,
+}
+
+/// How many children a page of [`DriveClient::children_with_download_urls`] asks for:
+/// OneDrive's own largest page.
+const CHILDREN_PAGE: usize = 200;
 
 #[derive(Deserialize)]
 struct DriveBody {
@@ -261,6 +281,51 @@ impl DriveClient {
         self.get_json(self.child_url(parent_id, name, None)?).await
     }
 
+    /// Whether content may use a cached pre-authenticated URL without a token request.
+    pub fn cached_content_allowed(&self) -> bool {
+        self.tokens.cached_content_allowed()
+    }
+
+    /// Discard cached content when the account's token is invalidated or forgotten.
+    pub fn on_token_invalidate(&self, hook: &Arc<crate::token::InvalidateHook>) {
+        self.tokens.on_invalidate(hook);
+    }
+
+    /// The children of the folder `folder_id` with what a range read needs of each: id,
+    /// eTag, cTag, size and the download URL (`@microsoft.graph.downloadUrl`, which a
+    /// folder has none of). Pages of [`CHILDREN_PAGE`], followed by their next links (to
+    /// Graph itself only) until the folder ends or at least `at_most` children came:
+    /// a larger folder is listed in part, the first of its pages. A second bound of
+    /// `ceil(at_most / 200) + 1` pages ends short or empty pages with repeating next links.
+    ///
+    /// No content moves: the URLs are links only, each living about an hour, and
+    /// not bound to the version of the file it was listed with (measured on OneDrive
+    /// personal, 2026-10-29: a link listed before an edit serves the new content).
+    pub async fn children_with_download_urls(&self, folder_id: &str, at_most: usize) -> Result<Vec<DriveItem>, DriveError> {
+        let mut children = Vec::new();
+        self.visit_children_with_download_urls(folder_id, at_most, |page| children.extend(page)).await?;
+        Ok(children)
+    }
+
+    /// Like [`Self::children_with_download_urls`], handing each page to `visit` as soon as
+    /// it arrives. At most `ceil(at_most / 200) + 1` pages, even if pages are empty or short.
+    pub async fn visit_children_with_download_urls(&self, folder_id: &str, at_most: usize, mut visit: impl FnMut(Vec<DriveItem>) + Send) -> Result<(), DriveError> {
+        let mut url = self.item_url(folder_id, Some("children"))?;
+        // `select` without its `$` is the form measured to return the download URLs.
+        url.set_query(Some(&format!("$top={CHILDREN_PAGE}&select=id,eTag,cTag,size,@microsoft.graph.downloadUrl")));
+        let mut count = 0;
+        for _ in 0..at_most.div_ceil(CHILDREN_PAGE).saturating_add(1) {
+            let page: ChildrenBody = self.get_json(url).await?;
+            count += page.value.len();
+            visit(page.value);
+            match page.next_link {
+                Some(next) if count < at_most => url = self.same_host(&next)?,
+                _ => return Ok(()),
+            }
+        }
+        Ok(())
+    }
+
     /// Where `/items/{id}/content` redirects to — for an item whose metadata
     /// carried no download URL.
     pub async fn content_url(&self, id: &str) -> Result<String, DriveError> {
@@ -289,7 +354,7 @@ impl DriveClient {
         let url = Url::parse(url)
             .map_err(|e| DriveError::Failed(format!("a download URL from Graph cannot be parsed: {e}").into()))?;
         if end.is_some_and(|end| end <= from) {
-            return Ok(Download { served_from: from, etag: None, stream: Box::new(tokio::io::empty()) });
+            return Ok(Download { served_from: from, etag: None, size: None, stream: Box::new(tokio::io::empty()) });
         }
         // `Range` names the last byte wanted, not the first one past it.
         let range = match end {
@@ -319,9 +384,11 @@ impl DriveClient {
             206 => {
                 let start = content_range_start(response.headers())
                     .ok_or_else(|| DriveError::Failed("a partial answer without a readable Content-Range".into()))?;
-                Ok(Download { served_from: start, etag, stream: bounded(self.body(response), start) })
+                let size = content_range_size(response.headers());
+                Ok(Download { served_from: start, etag, size, stream: bounded(self.body(response), start) })
             }
             200 => {
+                let size = response.headers().get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse().ok());
                 let mut stream = self.body(response);
                 if from > 0 {
                     // The server ignored the range, as it may.
@@ -336,11 +403,11 @@ impl DriveClient {
                         ));
                     }
                 }
-                Ok(Download { served_from: from, etag, stream: bounded(stream, from) })
+                Ok(Download { served_from: from, etag, size, stream: bounded(stream, from) })
             }
             _ => match classify(status, "") {
                 // Asked from the end of the file or past it: nothing to serve.
-                Kind::RangeNotSatisfiable => Ok(Download { served_from: from, etag: None, stream: Box::new(tokio::io::empty()) }),
+                Kind::RangeNotSatisfiable => Ok(Download { served_from: from, etag: None, size: None, stream: Box::new(tokio::io::empty()) }),
                 Kind::Unauthorized | Kind::Forbidden | Kind::NotFound | Kind::Gone => Err(DriveError::UrlExpired),
                 _ => Err(refused(format!("the download returned {status}"), status, "")),
             },
@@ -504,6 +571,12 @@ fn content_range_start(headers: &header::HeaderMap) -> Option<u64> {
     let value = headers.get(header::CONTENT_RANGE)?.to_str().ok()?;
     let range = value.strip_prefix("bytes ")?;
     range.split('-').next()?.trim().parse().ok()
+}
+
+/// The whole size of `Content-Range: bytes <first>-<last>/<size>`; `None` for `*`.
+fn content_range_size(headers: &header::HeaderMap) -> Option<u64> {
+    let value = headers.get(header::CONTENT_RANGE)?.to_str().ok()?;
+    value.strip_prefix("bytes ")?.rsplit_once('/')?.1.trim().parse().ok()
 }
 
 /// Which `410` Graph answered (`docs/design/sync.md` §5.4): the two resync codes

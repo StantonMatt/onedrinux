@@ -32,6 +32,7 @@ fn range_source(item_id: &str) -> RangeSource {
     RangeSource {
         onedrive_item: OneDriveItemReference { drive_id: DriveId::new("drive").unwrap(), item_id: OneDriveItemId::new(item_id) },
         content: ContentVersion::Hashed { size: 10, mtime: 1_700_000_000, mtime_nsec: 0, hash: None, ctag: Some("c1".into()) },
+        listed: None,
     }
 }
 

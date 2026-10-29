@@ -565,9 +565,10 @@ impl ItemKernelRequests {
             OpenItemFile::ReadingNotOnDisk { item, content } => (item, content),
         };
         for _try in 0..ROW_TRIES {
-            let source = match decide_not_on_disk_read_origin(&self.lookup.find_node_row(item)?, &content) {
+            let row = self.lookup.find_node_row(item)?;
+            let source = match decide_not_on_disk_read_origin(&row, &content) {
                 NotOnDiskReadOrigin::Refused(errno) => return Err(errno),
-                NotOnDiskReadOrigin::OneDriveRange(source) => source,
+                NotOnDiskReadOrigin::OneDriveRange(source) => self.lookup.find_listed_folder(&row, source),
                 NotOnDiskReadOrigin::LandedSince => {
                     let opened = self.place_changes.open_at_row_path(|| {
                         // The row the path is read with, in one read: it must still say

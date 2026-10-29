@@ -1,5 +1,7 @@
 //! Access tokens for Graph callers: cached, refreshed on demand, one refresh at a time.
 
+// test: cached_content_is_disabled_and_cleared_on_sign_out_and_invalid_grant
+
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -72,6 +74,26 @@ struct Slots {
     read_only: Option<Cached>,
 }
 
+/// Called when cached content must be discarded. Held weakly by a token source.
+pub type InvalidateHook = dyn Fn() + Send + Sync;
+
+#[derive(Default)]
+struct InvalidateHooks(std::sync::Mutex<Vec<std::sync::Weak<InvalidateHook>>>);
+
+impl InvalidateHooks {
+    fn add(&self, hook: &Arc<InvalidateHook>) {
+        let mut hooks = crate::lock(&self.0);
+        hooks.retain(|hook| hook.strong_count() > 0);
+        hooks.push(Arc::downgrade(hook));
+    }
+
+    fn clear(&self) {
+        for hook in crate::lock(&self.0).iter().filter_map(std::sync::Weak::upgrade) {
+            hook();
+        }
+    }
+}
+
 pub struct TokenManager {
     secrets: Arc<dyn SecretStore>,
     state: Box<dyn RefreshReport>,
@@ -86,6 +108,7 @@ pub struct TokenManager {
     cached: std::sync::Mutex<Slots>,
     /// Called, with the refresh lock held, after every refresh of the account's token.
     on_granted: std::sync::Mutex<Option<GrantedHook>>,
+    on_invalidate: InvalidateHooks,
 }
 
 impl TokenManager {
@@ -97,6 +120,7 @@ impl TokenManager {
             refreshing: tokio::sync::Mutex::new(()),
             cached: std::sync::Mutex::new(Slots::default()),
             on_granted: std::sync::Mutex::new(None),
+            on_invalidate: InvalidateHooks::default(),
         }
     }
 
@@ -135,6 +159,7 @@ impl TokenManager {
 
     fn clear(&self) {
         *crate::lock(&self.cached) = Slots::default();
+        self.on_invalidate.clear();
     }
 
     /// The account's own cached token and its scope, if it is fresh and was asked for under
@@ -303,10 +328,25 @@ impl TokenManager {
 pub trait TokenSource: Send + Sync {
     async fn access_token(&self) -> Result<String, AuthError>;
     async fn invalidate(&self);
+    /// Whether cached content may bypass an authenticated request, without loading a
+    /// secret or refreshing. Sources without this check keep using authenticated reads.
+    fn cached_content_allowed(&self) -> bool { false }
+    /// Register a weak callback, run on sign-out, grant revocation or invalidation.
+    /// The caller keeps it alive; it must not call back into this token source.
+    fn on_invalidate(&self, _hook: &Arc<InvalidateHook>) {}
 }
 
 #[async_trait::async_trait]
 impl TokenSource for TokenManager {
+    fn cached_content_allowed(&self) -> bool {
+        let asked = self.asked();
+        crate::lock(&self.cached).own.as_ref().is_some_and(|cached| cached.fresh() && cached.asked == asked)
+    }
+
+    fn on_invalidate(&self, hook: &Arc<InvalidateHook>) {
+        self.on_invalidate.add(hook);
+    }
+
     async fn access_token(&self) -> Result<String, AuthError> {
         TokenManager::access_token(self).await
     }
@@ -321,16 +361,25 @@ impl TokenSource for TokenManager {
 pub struct StaticToken {
     token: String,
     refused: std::sync::atomic::AtomicBool,
+    on_invalidate: InvalidateHooks,
 }
 
 impl StaticToken {
     pub fn new(token: impl Into<String>) -> Self {
-        Self { token: token.into(), refused: std::sync::atomic::AtomicBool::new(false) }
+        Self { token: token.into(), refused: std::sync::atomic::AtomicBool::new(false), on_invalidate: InvalidateHooks::default() }
     }
 }
 
 #[async_trait::async_trait]
 impl TokenSource for StaticToken {
+    fn cached_content_allowed(&self) -> bool {
+        !self.refused.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn on_invalidate(&self, hook: &Arc<InvalidateHook>) {
+        self.on_invalidate.add(hook);
+    }
+
     async fn access_token(&self) -> Result<String, AuthError> {
         if self.refused.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(AuthError::SignedOut);
@@ -340,6 +389,7 @@ impl TokenSource for StaticToken {
 
     async fn invalidate(&self) {
         self.refused.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.on_invalidate.clear();
     }
 }
 

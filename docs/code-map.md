@@ -115,7 +115,8 @@ The directories below are in layer order: a directory uses only the directories 
   wiremock server, for the tests of every layer that talks to OneDrive and for the VM suite
   (built for tests and with `fault-injection` only). Its folders answer as OneDrive
   personal's: no cTag, an eTag only their own rename or move changes, and a recursive
-  `DELETE` refused `412` without their current eTag.
+  `DELETE` refused `412` without their current eTag; their children in pages with download
+  URLs that answer a `Range` with `206`, `Content-Range` and the item's eTag.
 - `tests/fake_onedrive/sockets.rs` — the fake's notification socket.
 
 ### `crates/konedrived/src/config/`
@@ -227,8 +228,16 @@ Where a download gets its bytes from, and the download of a whole file.
 - `source/guards.rs` — fail-closed remote hash verification and what every download checks: the source's answer, the breaks tried
   again, the checkpoint a download continues from, the hash at the end. `[tests]`
 - `source/target.rs` — the file a download writes, and its blocking sections. `[tests]`
-- `graph_source.rs` — fresh Graph metadata around every range, first-range version and endpoint
-  ETag retention, and whole-download metadata. `[tests]`
+- `graph_source.rs` — a range by the listed eTag and size in one request, else by fresh
+  Graph metadata around it; first-range version and endpoint ETag retention; whole-download
+  metadata. `[tests]`
+- `graph_source/links.rs` — the download URLs of a folder's files from one listing of it,
+  kept 40 minutes with a 10,000-entry cap; pages release readers as they arrive, and one
+  background listing per folder is cancelled on token invalidation or drop. `[tests]`
+- `graph_source/links/tests.rs` — URL expiry pruning, the entry cap and background cancellation.
+- `graph_source/small_files.rs` — the whole bytes of small files read as ranges, held in
+  memory a short while, freed on expiry lookup, insertion, forget or token invalidation. `[tests]`
+- `graph_source/small_files/tests.rs` — expired bytes are pruned on lookup and insertion.
 - `tracked.rs` — `Tracked`: a content source that reports what it fetches to `Transfers`.
   `[tests]`
 
@@ -715,11 +724,13 @@ Integration tests: the compiled binary against a daemon on a private bus.
 - `oauth.rs` — the authorization URL and the token endpoint; the scopes. `[tests]`
 - `pkce.rs` — PKCE and random `state` values. `[tests]`
 - `loopback.rs` — the one-shot listener for the OAuth redirect. `[tests]`
-- `token.rs` — access tokens: cached, refreshed on demand, one refresh at a time. `[tests]`
+- `token.rs` — access tokens: cached, refreshed on demand, one refresh at a time; local
+  permission to use cached content and weak invalidation callbacks. `[tests]`
 - `secret.rs` — the refresh token's store, as the token manager sees it.
 - `pool.rs` — the transfer pool: how many requests an account has in flight. `[tests]`
 - `quickxor.rs` — QuickXorHash. `[tests]`
-- `drive/mod.rs` — the drive API, reading: the delta feed, one item, content. `[tests]`
+- `drive/mod.rs` — the drive API, reading: the delta feed, one item, a folder's files with
+  their download URLs, content. `[tests]`
 - `drive/error.rs` — an answer's status, what it and Graph's error code mean, a read's error.
   `[tests]`
 - `drive/send.rs` — the one way a request leaves the client: who it is authorised as, and
@@ -1326,6 +1337,10 @@ from schema 31, and atomic saves crossing upload requests, without a mount or ac
 - `crates/konedrived/src/mount/item_write_operations/write_scope.rs` — common scope admission
   used by kernel dispatch, carrying the request PID and existing containing folder into
   refusal reports; tests in `mount/item_kernel_requests/tests/write_scope.rs`.
+- `crates/konedrived/src/mount/item_kernel_requests/tests/listed_ranges.rs` — range reads of
+  a folder's small files through the Graph source over the fake OneDrive: one listing and one
+  request a file, and the download guard's counts the same as through a source that asks for
+  each range.
 - `crates/konedrived/src/onedrive_steps/write_scope.rs` — local and remote path admission for
   every outgoing step, resumed sessions and cleanup references; tests in `onedrive_steps/tests.rs`
   and `onedrive_steps/content_upload/tests.rs`. Scope-only checks also protect upload retry

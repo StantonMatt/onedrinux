@@ -202,6 +202,49 @@ async fn a_bounded_range_names_its_last_byte_and_reads_no_further() {
 }
 
 #[tokio::test]
+async fn a_download_says_the_whole_files_size_and_version_as_its_answer_does() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/dl")).and(header("range", "bytes=0-1"))
+        .respond_with(ResponseTemplate::new(206).insert_header("content-range", "bytes 0-1/10").insert_header("etag", "\"{A},2\"").set_body_bytes(b"01".to_vec()))
+        .mount(&server).await;
+    let download = client(&server).download(&format!("{}/dl", server.uri()), 0, Some(2)).await.unwrap();
+    assert_eq!((download.size, download.etag.as_deref()), (Some(10), Some("\"{A},2\"")), "a 206 says the size after its slash");
+    server.reset().await;
+    Mock::given(method("GET")).and(path("/dl")).and(header("range", "bytes=0-1"))
+        .respond_with(ResponseTemplate::new(206).insert_header("content-range", "bytes 0-1/*").set_body_bytes(b"01".to_vec()))
+        .mount(&server).await;
+    assert_eq!(client(&server).download(&format!("{}/dl", server.uri()), 0, Some(2)).await.unwrap().size, None, "a size of `*` is none said");
+    server.reset().await;
+    Mock::given(method("GET")).and(path("/dl"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"0123456789".to_vec()))
+        .mount(&server).await;
+    let download = client(&server).download(&format!("{}/dl", server.uri()), 4, Some(6)).await.unwrap();
+    assert_eq!(download.size, Some(10), "a whole body is the whole file, whatever was asked");
+    assert_eq!(read_all(download).await, b"45");
+}
+
+#[tokio::test]
+async fn a_folders_children_come_with_their_download_urls_page_by_page_up_to_a_bound() {
+    let server = MockServer::start().await;
+    let next = format!("{}/me/drive/items/F/children?page=2", server.uri());
+    let last = format!("{}/me/drive/items/F/children?page=3", server.uri());
+    Mock::given(method("GET")).and(path("/me/drive/items/F/children")).and(query_param("page", "2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": [{"id": "B", "eTag": "eb", "size": 2, "@microsoft.graph.downloadUrl": "https://dl/b"}], "@odata.nextLink": last})))
+        .mount(&server).await;
+    Mock::given(method("GET")).and(path("/me/drive/items/F/children")).and(query_param("$top", "200"))
+        .and(query_param("select", "id,eTag,cTag,size,@microsoft.graph.downloadUrl"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": [{"id": "A", "eTag": "ea", "cTag": "ca", "size": 1, "@microsoft.graph.downloadUrl": "https://dl/a"}, {"id": "S", "eTag": "es"}], "@odata.nextLink": next})))
+        .mount(&server).await;
+    let drive = client(&server);
+    let children = drive.children_with_download_urls("F", 3).await.unwrap();
+    let ids: Vec<&str> = children.iter().map(|child| child.id.as_str()).collect();
+    assert_eq!(ids, ["A", "S", "B"], "the next page is followed, and the third is not asked once the bound is reached");
+    assert_eq!(children[0].download_url.as_deref(), Some("https://dl/a"));
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    assert_eq!(drive.children_with_download_urls("F", 2).await.unwrap().len(), 2, "a folder over the bound is listed by its first pages");
+}
+
+#[tokio::test]
 async fn a_whole_body_answering_a_range_is_skipped_to_the_offset() {
     let server = MockServer::start().await;
     Mock::given(method("GET")).and(path("/dl"))
@@ -359,4 +402,18 @@ async fn a_refused_read_carries_the_status_and_graphs_code() {
     let failing = client(&server).item("Y").await.unwrap_err();
     assert!(matches!(failing, DriveError::Transient(_)), "{failing:?}");
     assert_eq!((failing.status(), failing.code()), (Some(Status::new(502)), None));
+}
+
+#[tokio::test]
+async fn a_children_listing_caps_requests_even_when_pages_are_empty_or_short() {
+    for value in [json!([]), json!([{"id": "A"}])] {
+        let server = MockServer::start().await;
+        let next = format!("{}/me/drive/items/F/children", server.uri());
+        Mock::given(method("GET")).and(path("/me/drive/items/F/children"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": value, "@odata.nextLink": next})))
+            .expect(6).mount(&server).await;
+        let children = client(&server).children_with_download_urls("F", 1000).await.unwrap();
+        assert!(children.len() <= 6, "a looping nextLink is bounded even with short pages");
+        assert_eq!(server.received_requests().await.unwrap().len(), 6);
+    }
 }

@@ -64,6 +64,21 @@ pub(crate) struct Version {
     pub(crate) quick_xor: Option<[u8; konedrive_graph::quickxor::LEN]>,
 }
 
+/// What the store's row says OneDrive listed of the content a program opened: the eTag
+/// OneDrive gave with that very content, its size, and the folder OneDrive lists the file
+/// in. Given with a range read only where the row's OneDrive version has the opened
+/// content (`mount::item_read_origin`); a source may then take an answer that says this
+/// eTag and this size for the opened content, without asking the item's metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ListedContent {
+    /// `Item::onedrive_etag`: it moves at any change of the content, and at a rename or
+    /// a move too.
+    pub(crate) etag: String,
+    pub(crate) size: u64,
+    /// The OneDrive id of the folder the file is in; `None` while the store cannot say.
+    pub(crate) folder_id: Option<String>,
+}
+
 #[async_trait]
 pub(crate) trait ContentSource: Send + Sync {
     /// Bytes of `item_id` starting at `from`, plus the item's current size and mtime.
@@ -88,8 +103,10 @@ pub(crate) trait ContentSource: Send + Sync {
     /// carries the version for comparison with `opened_as`. Remembered range identities
     /// belong to that opened content generation, not to the item id for its lifetime. A source that
     /// asks for an address before it asks for the bytes may remember the address between
-    /// reads ([`forget`](Self::forget)).
-    async fn read_range(&self, item_id: &str, _opened_as: &konedrive_tree::ContentVersion, from: u64, end: u64) -> Result<Fetched, SourceError> {
+    /// reads ([`forget`](Self::forget)). `listed` is what the store says OneDrive listed of
+    /// the opened content, when it says it ([`ListedContent`]): a source may prove an
+    /// answer's version by it instead.
+    async fn read_range(&self, item_id: &str, _opened_as: &konedrive_tree::ContentVersion, _listed: Option<&ListedContent>, from: u64, end: u64) -> Result<Fetched, SourceError> {
         self.fetch(item_id, from, Some(end)).await
     }
 

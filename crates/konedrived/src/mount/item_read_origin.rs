@@ -19,12 +19,14 @@
 // test: a_reader_whose_item_shows_another_content_by_now_is_stale
 // test: a_file_with_no_binding_and_nothing_on_disk_cannot_be_read
 // test: a_range_is_asked_of_the_drive_and_the_item_the_binding_names
+// test: a_range_carries_the_listed_etag_only_where_onedrives_version_is_the_opened_content
 // test: a_directory_and_an_item_the_folder_does_not_show_are_not_opened_to_be_read
 
 use fuser::Errno;
 use konedrive_tree::{ContentPresence, ContentVersion, Item, ItemKind, LocalItemId, OneDriveItemReference};
 
 use super::item_lookup::NodeRow;
+use crate::content_source::source::ListedContent;
 
 /// How a file is opened to be read.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +65,22 @@ pub(crate) struct RangeSource {
     /// The content the range is a part of: its size is the end of the file, and its cTag
     /// tells a download or a range of another version.
     pub(crate) content: ContentVersion,
+    /// What OneDrive listed of that content, where the row's OneDrive version is that very
+    /// content ([`decide_listed_content`]); its folder is filled in by the read
+    /// (`ItemLookup::find_listed_folder`).
+    pub(crate) listed: Option<ListedContent>,
+}
+
+/// What the row `item` says OneDrive listed of the content `opened_as`: its eTag and size,
+/// where the row's OneDrive version has that content and its eTag is said; `None`
+/// otherwise — a listing that found another content since, which the step has not taken
+/// yet, holds the eTag of that other one. A content changed here has no listed eTag.
+/// Pure. The folder is left for the caller.
+pub(super) fn decide_listed_content(item: &Item, opened_as: &ContentVersion) -> Option<ListedContent> {
+    let is_onedrives = item.onedrive.as_ref().and_then(|version| version.content.as_ref()) == Some(opened_as);
+    let etag = item.onedrive_etag.as_ref().filter(|etag| !etag.is_empty())?;
+    (is_onedrives && matches!(opened_as, ContentVersion::Hashed { .. }))
+        .then(|| ListedContent { etag: etag.clone(), size: opened_as.size(), folder_id: None })
 }
 
 /// Where a read through a handle that was opened not on disk gets its bytes.
@@ -104,7 +122,7 @@ pub(super) fn decide_not_on_disk_read_origin(row: &NodeRow, opened_as: &ContentV
         return NotOnDiskReadOrigin::Refused(Errno::ESTALE);
     }
     match &item.onedrive_item {
-        Some(onedrive_item) => NotOnDiskReadOrigin::OneDriveRange(RangeSource { onedrive_item: onedrive_item.clone(), content: opened_as.clone() }),
+        Some(onedrive_item) => NotOnDiskReadOrigin::OneDriveRange(RangeSource { onedrive_item: onedrive_item.clone(), content: opened_as.clone(), listed: decide_listed_content(item, opened_as) }),
         None => NotOnDiskReadOrigin::Refused(Errno::EIO),
     }
 }

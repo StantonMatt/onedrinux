@@ -398,3 +398,28 @@ async fn an_invalid_grant_drops_the_kept_read_only_token() {
     assert_eq!(tokens.read_only_token().await, Err(AuthError::SignedOut), "the kept token went with the sign-out");
     assert_eq!(server.received_requests().await.unwrap().len(), 2);
 }
+
+#[tokio::test]
+async fn cached_content_is_disabled_and_cleared_on_sign_out_and_invalid_grant() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let server = MockServer::start().await;
+    let (tokens, _) = manager(&server, Arc::new(MemoryStore::with_token("RT")));
+    let cleared = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&cleared);
+    let hook: Arc<InvalidateHook> = Arc::new(move || { count.fetch_add(1, Ordering::SeqCst); });
+    tokens.on_invalidate(&hook);
+    assert!(!tokens.cached_content_allowed(), "no token has authenticated this session yet");
+    tokens.seed(&response("AT", 3600)).await;
+    assert!(tokens.cached_content_allowed());
+    tokens.forget().await.unwrap();
+    assert!(!tokens.cached_content_allowed());
+    assert_eq!(cleared.load(Ordering::SeqCst), 1, "sign-out clears registered caches");
+    tokens.secrets.store("RT").await.unwrap();
+    tokens.seed(&response("AT", 60)).await;
+    assert!(!tokens.cached_content_allowed(), "an expiring token must refresh before bypassing authentication");
+    mock_refresh(&server, 400, json!({"error": "invalid_grant"}), 1).await;
+    assert_eq!(tokens.access_token().await, Err(AuthError::SignedOut));
+    assert!(!tokens.cached_content_allowed());
+    assert_eq!(cleared.load(Ordering::SeqCst), 2, "grant revocation clears registered caches too");
+    assert_eq!(server.received_requests().await.unwrap().len(), 1, "cache checks made no network requests");
+}

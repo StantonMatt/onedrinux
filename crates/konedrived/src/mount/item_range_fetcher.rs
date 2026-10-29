@@ -114,16 +114,17 @@ impl ItemRangeFetcher {
     /// throttle itself (`SourceError::Throttled`: the drive waited out as much as it
     /// does) is the same refusal.
     ///
-    /// Graph holds each buffered range against metadata before and after its body,
-    /// and retains the first range's version and optional response ETag. A range has
-    /// no independent whole-file hash; that remaining limit is F297.
+    /// Graph holds each range to the opened version: by the listed eTag and size where the
+    /// row has them (`source.listed`), else against metadata before and after its body;
+    /// and every range of an opened content to the first one's version. A range has no
+    /// independent whole-file hash; that remaining limit is F297.
     pub(super) async fn fetch_range(&self, item: LocalItemId, source: &RangeSource, from: u64, end: u64) -> Result<Vec<u8>, RangeRefusal> {
         use tokio::io::AsyncReadExt;
         let onedrive_item_id = source.onedrive_item.item_id.as_str();
         let asked = std::time::Instant::now();
         let asking = async {
             let active_read = self.range_readers.begin_read(onedrive_item_id).await;
-            (self.source.read_range(onedrive_item_id, &source.content, from, end).await, active_read)
+            (self.source.read_range(onedrive_item_id, &source.content, source.listed.as_ref(), from, end).await, active_read)
         };
         let (fetched, _active_read) = match self.throttle_wait.ask_unless_refused(ContentAsker::Program, asking).await {
             Ok(answered) => answered,

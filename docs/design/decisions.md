@@ -158,8 +158,9 @@ security](#5-account-and-security), [the desktop](#6-the-desktop), [testing](#7-
   gets it at the speed of one download, checked against its hash, and kept on disk. A read that
   waits for OneDrive can be interrupted: the workspace uses `fuser` with one change, which hands the
   kernel's `INTERRUPT` to the daemon (`vendor/fuser/README.konedrive.md`).
-- **Trade-off.** Each range needs metadata checks before and after its body. Its version is
-  checked, but it has no independent whole-file hash proof (F297). A patched copy of `fuser` is kept in the repository.
+- **Trade-off.** Each range's version is proven by the listed eTag and size or by metadata
+  checks before and after its body (§2.15), but it has no independent whole-file hash proof
+  (F297). A patched copy of `fuser` is kept in the repository.
 
 ### 2.6 A read never mixes two contents
 
@@ -259,6 +260,39 @@ security](#5-account-and-security), [the desktop](#6-the-desktop), [testing](#7-
   in OneDrive under another name. With none, KIO offers to remove the file instead.
 - **Trade-off.** With KDE Frameworks before 6.21, "Move to Trash" downloads the file into the home
   trash (K34).
+
+### 2.15 A range of a listed file is one request, proven by the listed eTag
+
+- **Decision.** Where the row's OneDrive version is the opened content, a range read asks a
+  download URL of the file for the bytes and takes them only if the answer's `ETag` is the
+  eTag the row holds with that content and the size it says is the content's size. The URLs
+  come from one listing of the file's folder with its children's download URLs, kept 40
+  minutes (at most 10,000 URLs). Each page releases readers of its items immediately; the
+  rest continues in the background, bounded to 1,000 children and six pages. A file of at
+  most 256 KiB is asked whole and its other ranges come from memory. Neither cache bypasses
+  a signed-out account: a fresh token is required locally, and token invalidation clears
+  both caches and cancels pending listings.
+  Without a URL, with no listed eTag, or with any other answer, the read asks the metadata
+  before and after the range, as before ([mount.md](mount.md) §5.1). Whole downloads still ask
+  the metadata first: they need the hash and version it gives, and a listed URL saves them
+  nothing.
+- **Why.** Measured on 2026-10-29 from Chile: a metadata request takes 0.7–2.1 s and a 16 KiB
+  range 0.35 s, so a range by the metadata took 1.3–2.1 s. Gwenview reads the head of every
+  image of a folder one after the other on its window's thread; 200 screenshots froze it for
+  about a minute. A listing of 200 children with their URLs takes about 1.6 s. A download
+  URL is not bound to a version — after an edit it serves the new content — but every answer
+  says the item's eTag as its `ETag` and the whole size in `Content-Range`, and the eTag moves
+  at every change of the content (measured the same day).
+- **Trade-off.** The proof is OneDrive's `ETag` on the answer, against the eTag the store
+  holds with the content: no stronger than the metadata's word, and still no whole-file hash
+  (F297). The eTag moves at a rename or a move too, so a file renamed elsewhere is read by the
+  metadata until a listing gives the row its new eTag. A file whose answer never says the
+  listed eTag (another kind of account) costs one extra failed fast request after a folder
+  listing, plus the listing itself on a cold folder; later reads use the usual three
+  requests. Metadata URLs are cached only when the download ETag matches the metadata's
+  eTag. A newly populated folder listing may try that fast request again after 40 minutes.
+  Small files read whole cost up to 16 MiB of memory; expired bytes are freed on lookup or
+  insertion, as well as when forgotten or signed out.
 
 ## 3. The store and the sync
 

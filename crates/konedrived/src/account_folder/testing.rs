@@ -215,8 +215,8 @@ impl ContentSource for Replaceable {
         self.now().fetch(item_id, from, end).await
     }
 
-    async fn read_range(&self, item_id: &str, opened_as: &konedrive_tree::ContentVersion, from: u64, end: u64) -> Result<Fetched, SourceError> {
-        self.now().read_range(item_id, opened_as, from, end).await
+    async fn read_range(&self, item_id: &str, opened_as: &konedrive_tree::ContentVersion, listed: Option<&crate::content_source::source::ListedContent>, from: u64, end: u64) -> Result<Fetched, SourceError> {
+        self.now().read_range(item_id, opened_as, listed, from, end).await
     }
 
     fn forget(&self, item_id: &str) {

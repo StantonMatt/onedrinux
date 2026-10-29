@@ -102,5 +102,23 @@ fn a_reader_whose_item_shows_another_content_by_now_is_stale() {
 fn a_range_is_asked_of_the_drive_and_the_item_the_binding_names() {
     let row = NodeRow::Shown(file(content("c1", 10), ContentPresence::NotOnDisk));
     let origin = decide_not_on_disk_read_origin(&row, &content("c1", 10));
-    assert_eq!(origin, NotOnDiskReadOrigin::OneDriveRange(RangeSource { onedrive_item: binding(), content: content("c1", 10) }), "the content is the one the handle was opened as: its size is the end of the file");
+    assert_eq!(origin, NotOnDiskReadOrigin::OneDriveRange(RangeSource { onedrive_item: binding(), content: content("c1", 10), listed: None }), "the content is the one the handle was opened as: its size is the end of the file");
+}
+
+#[test]
+fn a_range_carries_the_listed_etag_only_where_onedrives_version_is_the_opened_content() {
+    let listed_as = |onedrive: ContentVersion, etag: Option<&str>| {
+        let row = Item { onedrive: Some(konedrive_tree::ItemVersion { place: None, content: Some(onedrive) }), onedrive_etag: etag.map(str::to_owned), ..file(content("c1", 10), ContentPresence::NotOnDisk) };
+        match decide_not_on_disk_read_origin(&NodeRow::Shown(row), &content("c1", 10)) {
+            NotOnDiskReadOrigin::OneDriveRange(source) => source.listed,
+            other => panic!("a range was to be asked: {other:?}"),
+        }
+    };
+    assert_eq!(listed_as(content("c1", 10), Some("e1")), Some(ListedContent { etag: "e1".into(), size: 10, folder_id: None }), "the eTag OneDrive listed with the opened content, its size, and the folder left to the read");
+    assert_eq!(listed_as(content("c2", 10), Some("e2")), None, "between a listing and its step the eTag is another content's");
+    assert_eq!(listed_as(content("c1", 10), None), None, "no eTag said");
+    assert_eq!(listed_as(content("c1", 10), Some("")), None, "an empty eTag is none");
+    let changed_here = ContentVersion::ChangedHere { size: 10, mtime: 1_600_000_000, mtime_nsec: 0, change_count: 1 };
+    let row = Item { onedrive: Some(konedrive_tree::ItemVersion { place: None, content: Some(changed_here.clone()) }), onedrive_etag: Some("e1".into()), ..file(changed_here.clone(), ContentPresence::NotOnDisk) };
+    assert_eq!(decide_listed_content(&row, &changed_here), None, "a content changed here was never listed");
 }

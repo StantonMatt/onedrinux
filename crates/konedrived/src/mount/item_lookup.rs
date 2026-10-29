@@ -11,8 +11,9 @@
 //! answered from the handle's file: getattr takes the `fh`.
 //!
 //! The rows of an answer are read in ONE read closure (`ReadConnections::read`), so one
-//! read transaction; what it then stats in the backing directory it stats through
-//! `PlaceChanges::stat_at_row_path`, a second closure, which never sleeps: a lookup and a
+//! read transaction, except the folder hint of `find_listed_folder` described below. What
+//! it then stats in the backing directory it stats through `PlaceChanges::stat_at_row_path`,
+//! a second closure, which never sleeps: a lookup and a
 //! getattr wait for no place change, no listing's page and no step's commit. A stat that a
 //! change crossed twice answers `RowPathStat::Crossed`: no blocks for that one answer.
 //!
@@ -56,6 +57,7 @@ use super::access_mode_switch::AccessModeSwitch;
 use super::backing_directory::{BackingDirectory, EntryKind};
 use super::item_attributes::{to_item_attributes, to_open_file_attributes, to_vanishing_attributes, BackingFileFacts, OpenFileFacts, SizeAndTimes};
 use super::item_handles::OpenItemFile;
+use super::item_read_origin::RangeSource;
 use super::place_changes::RowPathStat;
 use crate::folder::disk::is_hidden_name;
 use super::item_download_states::ItemDownloadStates;
@@ -241,6 +243,25 @@ impl ItemLookup {
     /// the thread's connection. An error of the store is `EIO`.
     pub(super) fn find_node_row(&self, node: LocalItemId) -> Result<NodeRow, Errno> {
         self.read_connections.read(|reader| reader.find_item(node)).map(to_node_row).map_err(to_store_errno)
+    }
+
+    /// `source` with the OneDrive id of the folder its file is in (`ListedContent::folder_id`),
+    /// where it has a listed content: the folder of `row`'s OneDrive place, whose row says
+    /// its binding, of the file's drive. One more read of the store; left unsaid where the
+    /// store cannot say it. This is the exception to the module's one-transaction rule:
+    /// it is only a listing hint, and a concurrent move may choose an old or unrelated
+    /// folder. The source still requires the opened file's ETag and size on the download;
+    /// a missing link merely takes the metadata path.
+    pub(super) fn find_listed_folder(&self, row: &NodeRow, mut source: RangeSource) -> RangeSource {
+        let NodeRow::Shown(item) = row else { return source };
+        let folder = item.onedrive.as_ref().and_then(|version| version.place.as_ref()).map(|place| place.parent_local_item_id);
+        if let (Some(listed), Some(folder)) = (source.listed.as_mut(), folder) {
+            listed.folder_id = self.read_connections.read(|reader| reader.find_item(folder)).ok().flatten()
+                .and_then(|folder| folder.onedrive_item)
+                .filter(|binding| binding.drive_id == source.onedrive_item.drive_id)
+                .map(|binding| binding.item_id.as_str().to_owned());
+        }
+        source
     }
 
     /// The item the folder shows as `node`, or the errno [`decide_node_errno`] gives.

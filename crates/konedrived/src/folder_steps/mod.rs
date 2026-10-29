@@ -464,7 +464,7 @@ impl FolderSteps {
         let file = ItemToDownload { item: item.local_item_id, onedrive_item, content };
         let mut cancel = DownloadCancel { downloader: Arc::clone(&self.downloader), file: file.clone(), is_ended: false };
         let old_range = item.onedrive_item.clone().zip(item.local.as_ref().and_then(|v| v.content.clone()))
-            .map(|(onedrive_item, content)| RangeSource { onedrive_item, content });
+            .map(|(onedrive_item, content)| RangeSource { onedrive_item, content, listed: None });
         let end = self.downloader.download_and_land_with_lease(file, item, lease).await;
         cancel.is_ended = true;
         if matches!(end, Ok(crate::mount::ItemLandingOutcome::Landed { .. })) {
@@ -783,7 +783,7 @@ impl FolderSteps {
     fn forget_content(&self, row: &Item) {
         self.download_states.forget_item(row.local_item_id);
         if let (Some(onedrive_item), Some(content)) = (row.onedrive_item.clone(), row.local.as_ref().and_then(|local| local.content.clone())) {
-            self.range_fetcher.forget_ranges(&RangeSource { onedrive_item, content });
+            self.range_fetcher.forget_ranges(&RangeSource { onedrive_item, content, listed: None });
         }
     }
 }

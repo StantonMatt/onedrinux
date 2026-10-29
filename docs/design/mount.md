@@ -368,10 +368,53 @@ A read through a handle opened not on disk is decided on the mount's thread
   kernel's interrupt aborts it.
 
 A range asks the content source for exactly those bytes (`ItemRangeFetcher::fetch_range`). Over
-Graph it is a `Range` request to an address from fresh metadata. The source buffers that
-range and checks metadata again after the body, retaining the first range's metadata version
-and any download response ETag (`graph_source.rs`). A changed version is `ESTALE`. An answer that starts elsewhere than
-asked, or ends early, fails the read with `EIO`. While a file is read as ranges it holds one slot
+Graph (`graph_source.rs`) it is asked one of two ways:
+
+- **By the listed version, in one request.** Where the row's OneDrive version is the opened
+  content, the read carries the eTag and size OneDrive listed with it, and the OneDrive id of
+  its folder (`decide_listed_content`, `ItemLookup::find_listed_folder`). The source asks the
+  range of a download URL of the file and takes the answer only if its `ETag` is that eTag and
+  the whole size it says (`Content-Range`, or a `200`'s length) is that size. The URLs come from
+  one listing of the folder's children with their download URLs (`graph_source/links.rs`: up
+  to 1,000 children and at most six pages, kept 40 minutes, at most 10,000 URLs). Each page
+  publishes its links at once: a read waits only until its item arrives or the listing ends,
+  while remaining pages continue in the background, one listing per folder. A failed listing
+  is not asked again for a minute. URLs also come from earlier metadata reads, only where
+  the download ETag matched that metadata's eTag. A file of at most 256 KiB is asked whole,
+  and its other ranges of the same opened content are served from memory for five minutes
+  (`graph_source/small_files.rs`: at most 16 MiB). Expired URLs and bytes are freed on cache
+  lookup or insertion; bytes are also dropped when the item is forgotten. This is no
+  download and changes nothing on disk.
+- **By the metadata, in three.** The item's metadata, the range from the address it gives, and
+  the metadata again, which must not have changed. Whenever the first way cannot be taken: no
+  listed eTag (a listing found another content the step has not taken yet, a content changed
+  here), no folder, no URL, an expired URL, an answer with another `ETag` or size or none said.
+  A URL that expired, failed with an invalid response, or answered another version is
+  dropped; the metadata's URL replaces it only if its download ETag matches the metadata.
+  Network failures retain their usual retry behavior.
+
+Before either cached URLs or cached bytes are used, the source checks that the account has
+an authenticated, fresh access token, in memory without a secret lookup or network call.
+Otherwise it takes the authenticated metadata path. Token invalidation, sign-out and detected
+grant revocation immediately clear both caches and cancel background listings. A refused
+opened-generation binding fails before any request, including a folder listing.
+
+A download URL is the item's, not one version's: after an edit it serves the new content, with
+the new eTag as its `ETag` (measured on OneDrive personal, 2026-10-29). The eTag moves at a
+rename or move too, so such a file is read by the metadata until the row has its new eTag.
+Every range of one opened content is held to the version the first was, by whichever way it
+came: its `ETag`, or its metadata version and response `ETag`. A changed version is `ESTALE`.
+An answer that starts elsewhere than asked, or ends early, fails the read with `EIO`. A listing
+moves no content; the download guard counts the bytes each read asks, also those served from
+memory, as before.
+
+Measured on 2026-10-29 from Chile on a personal account (read-only): a metadata request took
+0.7–2.1 s, a 16 KiB range through a download URL about 0.35 s, and a listing of 200 children
+with their URLs about 1.6 s. Gwenview, opening one screenshot of a folder of 200, reads the
+first 16 KiB of every image in the folder one after the other on its window's thread: by the
+metadata each took 1.3–2.1 s and the window froze for about a minute (its crash on close that
+day was its own, set off by the slow reads). By the listed version the folder costs one
+listing and one range request an image. While a file is read as ranges it holds one slot
 of the transfer pool as a file being opened does, until two seconds after its last read
 (`range_readers.rs`): what a program reads goes before the background downloads.
 
@@ -460,8 +503,9 @@ OneDrive has another content than the one it was opened as:
   another content again: `ESTALE`, remembered again. Stated the asked one: it lands, and the read
   gets its range. A file OneDrive does not have, and an answer that says no size, are failures of
   that one asking and are not remembered.
-- **A range** carries metadata checked before and after its body, and is held against the
-  opened content and the first range's version. A changed cTag/eTag or supplied hash is `ESTALE`.
+- **A range** carries the listed eTag and size its answer must say, or metadata checked before
+  and after its body, and is held against the opened content and the first range's version. A
+  changed cTag/eTag or supplied hash is `ESTALE`.
   Individual ranges have no whole-file hash proof ([F297](../limitations/F297.md)).
 
 ### 5.6 The transfer pool, a throttle, a pause
@@ -675,8 +719,9 @@ mark says ([desktop.md](desktop.md)).
 - **No folder while no daemon runs.** The folder is the backing directory then, without write bits,
   and a program that held a file open gets an error ([F296](../limitations/F296.md)). Only the user
   who runs the daemon reaches the folder, root included ([F301](../limitations/F301.md)).
-- **Ranges have no independent whole-file hash.** Their metadata version is checked before
-  and after the response, and changes fail the read ([F297](../limitations/F297.md)); a
+- **Ranges have no independent whole-file hash.** Their version is proven by the listed eTag
+  and size, or by the metadata before and after the response, and changes fail the read
+  ([F297](../limitations/F297.md)); a
   file without a hash is downloaded unverified ([F34](../limitations/F34.md)).
 - **Programs that read to look download.** A file read whole, or past the threshold, is downloaded;
   Dolphin reads some files to find their type or draw a preview ([K1](../limitations/K1.md)).

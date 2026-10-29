@@ -7,7 +7,9 @@
 //! `If-Match` of its eTag and with everything below it, deletes to a recycle bin, upload
 //! sessions with `Content-Range` — a new file's
 //! session holding its name with an empty file until it completes or
-//! is cancelled, as OneDrive's does. It serves the drive's notification
+//! is cancelled, as OneDrive's does —, a folder's children in pages with their download
+//! URLs, and download URLs of the item rather than of one version, answering a `Range`
+//! with `206` and `Content-Range` and every download with the item's eTag as its `ETag`. It serves the drive's notification
 //! endpoint and a local Engine.IO / Socket.IO websocket that sends a `notification` event
 //! whenever the drive changes. Never a real network.
 
@@ -524,10 +526,7 @@ impl Cloud {
             },
             ("PATCH", ["me", "drive", "items", id]) => self.patch(id, if_match.as_deref(), &body),
             ("DELETE", ["me", "drive", "items", id]) => self.delete(id, if_match.as_deref()),
-            ("GET", ["me", "drive", "items", id, "children"]) => {
-                let value: Vec<Value> = self.items.values().filter(|i| i.parent.as_deref() == Some(*id)).map(|i| self.json(i)).collect();
-                ResponseTemplate::new(200).set_body_json(json!({ "value": value }))
-            }
+            ("GET", ["me", "drive", "items", id, "children"]) => self.children(id, request),
             ("POST", ["me", "drive", "items", id, "children"]) => self.mkdir(id, &body),
             ("POST", ["me", "drive", "items", id, "createUploadSession"]) => self.session_existing(id, if_match.as_deref(), &body),
             ("PUT", ["me", "drive", "items", id, "content"]) => self.put_existing(id, if_match.as_deref()),
@@ -572,7 +571,7 @@ impl Cloud {
                 ResponseTemplate::new(200).set_body_json(body)
             }
             ("GET", ["dl", id]) => match self.items.get(*id) {
-                Some(item) => ResponseTemplate::new(200).set_body_bytes(item.content.clone()),
+                Some(item) => Self::download(item, request.headers.get("range").and_then(|v| v.to_str().ok())),
                 None => error(404, "itemNotFound"),
             },
             _ => error(400, "invalidRequest"),
@@ -583,6 +582,41 @@ impl Cloud {
                 answer.set_delay(delay.2)
             }
             None => answer,
+        }
+    }
+
+    /// The children of `id`, every one with `$top` absent, else that many from
+    /// `$skiptoken` on and a next link while more are left, as Graph pages them.
+    fn children(&self, id: &str, request: &Request) -> ResponseTemplate {
+        let asked = |name: &str| request.url.query_pairs().find(|(key, _)| key == name).and_then(|(_, value)| value.parse::<usize>().ok());
+        let all: Vec<&FakeItem> = self.items.values().filter(|i| i.parent.as_deref() == Some(id)).collect();
+        let (from, top) = (asked("$skiptoken").unwrap_or(0), asked("$top").unwrap_or(all.len().max(1)));
+        let value: Vec<Value> = all.iter().skip(from).take(top).map(|i| self.json(i)).collect();
+        let mut body = json!({ "value": value });
+        if from + top < all.len() {
+            body["@odata.nextLink"] = json!(format!("{}/me/drive/items/{id}/children?$top={top}&$skiptoken={}", self.base, from + top));
+        }
+        ResponseTemplate::new(200).set_body_json(body)
+    }
+
+    /// A file's bytes as its download URL answers them (measured on OneDrive personal,
+    /// 2026-10-29): whatever content the item has by now, with its eTag as the `ETag`; a
+    /// `Range` with `206` and `Content-Range: bytes <first>-<last>/<size>`, one from the
+    /// end on with `416`.
+    fn download(item: &FakeItem, range: Option<&str>) -> ResponseTemplate {
+        let size = item.content.len() as u64;
+        let asked = range.and_then(|range| range.strip_prefix("bytes=")).and_then(|range| range.split_once('-')).and_then(|(first, last)| {
+            let first: u64 = first.parse().ok()?;
+            let last = if last.is_empty() { u64::MAX } else { last.parse().ok()? };
+            Some((first, last.min(size.saturating_sub(1))))
+        });
+        match asked {
+            Some((first, _)) if first >= size => ResponseTemplate::new(416).insert_header("Content-Range", format!("bytes */{size}").as_str()),
+            Some((first, last)) => ResponseTemplate::new(206)
+                .insert_header("ETag", item.etag.as_str())
+                .insert_header("Content-Range", format!("bytes {first}-{last}/{size}").as_str())
+                .set_body_bytes(item.content[first as usize..=last as usize].to_vec()),
+            None => ResponseTemplate::new(200).insert_header("ETag", item.etag.as_str()).set_body_bytes(item.content.clone()),
         }
     }
 
