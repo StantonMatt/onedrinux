@@ -98,6 +98,7 @@ fn the_reasons_the_worker_writes_have_sentences() {
         "name-held-by-an-upload",
         "changed in OneDrive again and again",
         "the upload session ended twice",
+        "folder-not-described",
         "not allowed now",
         "blocked",
     ];
@@ -137,6 +138,7 @@ fn spelled(reason: &Reason) -> (&'static str, bool) {
         Reason::NameHeld => ("name-held-by-an-upload", true),
         Reason::ChangedAgain => ("changed in OneDrive again and again", true),
         Reason::SessionEnded => ("the upload session ended twice", true),
+        Reason::FolderNotDescribed => ("folder-not-described", true),
         Reason::NotAllowed(_) => ("not allowed now", true),
         Reason::Blocked => ("blocked", true),
         Reason::NotReadOnDisk => ("not-read-on-disk", true),
@@ -161,7 +163,7 @@ fn spelled(reason: &Reason) -> (&'static str, bool) {
 /// stored where it has no sentence yet. A reworded key fails here.
 #[test]
 fn every_reason_is_stored_under_its_spelling_and_is_worded() {
-    assert_eq!(Reason::ALL.len(), 32);
+    assert_eq!(Reason::ALL.len(), 33);
     let mut seen = std::collections::BTreeSet::new();
     for reason in Reason::ALL {
         let (spelling, worded) = spelled(&reason);

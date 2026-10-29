@@ -33,7 +33,7 @@ fn what_of_the_account_holds_the_sending_is_the_first_cause_that_holds() {
     // The recorded drive is said as a drive id is kept: one spelling whatever the case of its letters.
     let mismatch = || Some(ModeNote::DriveMismatch { live: "D9".into(), recorded: "d1".into() });
     // (the snapshot, what config.toml says, signed out, the refusal)
-    let cases: [(AccountSnapshot, Option<WriteStanding>, bool, Option<ModeNote>); 11] = [
+    let cases: [(AccountSnapshot, Option<WriteStanding>, bool, Option<ModeNote>); 12] = [
         (snapshot(SignInState::SignedIn, READ_WRITE, "D1"), Some(read_write_d1.clone()), false, None),
         (snapshot(SignInState::SignedOut, "", ""), Some(standing(Mode::ReadOnly, None)), true, None),
         (snapshot(SignInState::SigningIn, READ_WRITE, "D1"), Some(read_write_d1.clone()), true, None),
@@ -41,6 +41,8 @@ fn what_of_the_account_holds_the_sending_is_the_first_cause_that_holds() {
         // A read-only account: nothing of it refuses, whatever else is amiss.
         (snapshot(SignInState::SignedIn, READ, ""), Some(standing(Mode::ReadOnly, None)), false, None),
         (snapshot(SignInState::SignedIn, READ, "D9"), Some(standing(Mode::ReadOnly, Some("D1"))), false, None),
+        // Switched back from read-write: Microsoft grants the write permission it keeps.
+        (snapshot(SignInState::SignedIn, "Files.Read User.Read Files.ReadWrite", "D1"), Some(standing(Mode::ReadOnly, Some("D1"))), false, None),
         (snapshot(SignInState::SignedIn, READ_WRITE, "D1"), Some(standing(Mode::ReadWrite, None)), false, Some(ModeNote::NoDriveRecorded)),
         // The drive not seen yet is said as that, not as a drive "" that differs.
         (snapshot(SignInState::SignedIn, READ_WRITE, ""), Some(read_write_d1.clone()), false, Some(ModeNote::DriveNotSeen)),

@@ -458,7 +458,8 @@ impl AccountService {
             let same_drive = recorded.as_ref().is_some_and(|drive| *drive == s.live_drive);
             s.mode = if configured == Mode::ReadWrite && same_drive && granted { Mode::ReadWrite } else { Mode::ReadOnly };
             let signed_in = s.state == SignInState::SignedIn;
-            let why = if signed_in && !s.wider_grant.is_empty() {
+            // Microsoft may keep granting writes after a switch to read-only; that is expected.
+            let why = if signed_in && configured == Mode::ReadWrite && !s.wider_grant.is_empty() {
                 Some(ModeNote::WiderGrant(s.wider_grant.clone()))
             } else if signed_in && unreadable {
                 Some(ModeNote::ConfigUnreadable)
@@ -496,8 +497,9 @@ impl AccountService {
 
     /// Keeps what a token may be used for in the state and in `account.json`: what it was
     /// granted, but never more than was asked for. A read-only request answered
-    /// with a token that can write — consent Microsoft still holds — is logged, shown in
-    /// `LastError`, and used to read only; `TokenExport` hands such a token to nobody.
+    /// with a token that can write — consent Microsoft still holds — is logged and used
+    /// to read only; `LastError` says so only when config.toml asks for read-write.
+    /// `TokenExport` hands such a token to nobody.
     fn record_granted(&self, asked: &str, granted: &str) {
         let wider = is_read_only(asked) && !is_read_only(granted);
         let usable = if wider { asked } else { granted };

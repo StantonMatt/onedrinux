@@ -32,6 +32,7 @@
 //! | `Failed(Store)` | `remember_failed_try(Store, next)` | the journal |
 //! | `Failed(Disk)` | `remember_failed_try(LocalIo, next)` | the journal |
 //! | `Failed(AnswerUnreadable)` | `remember_failed_try(Failed, next)` | the journal |
+//! | `Failed(FolderNotDescribed)` | `remember_failed_try(FolderNotDescribed, next)` | the journal |
 //! | `Failed(RunnerPanicked)` | `remember_failed_try(Failed, next)` | the journal; towards OneDrive a cycle asked for |
 //!
 //! **Whose the failed tries are.** `remember_failed_try` in the table is two things, by
@@ -292,6 +293,7 @@ pub(crate) fn decide_step_settlement(step: &SyncStep, outcome: &StepOutcome, tri
         StepOutcome::Failed(StepFailure::Store { .. }) => count_failed_try(&mut settlement, Reason::Store),
         StepOutcome::Failed(StepFailure::Disk { .. }) => count_failed_try(&mut settlement, Reason::LocalIo),
         StepOutcome::Failed(StepFailure::AnswerUnreadable { .. }) => count_failed_try(&mut settlement, Reason::Failed),
+        StepOutcome::Failed(StepFailure::FolderNotDescribed) => count_failed_try(&mut settlement, Reason::FolderNotDescribed),
         StepOutcome::Failed(StepFailure::RunnerPanicked { .. }) => {
             count_failed_try(&mut settlement, Reason::Failed);
             // Whether the request of a step towards OneDrive left is not known.

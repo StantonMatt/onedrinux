@@ -18,7 +18,7 @@ fn retained_verification_leaves_the_write_thread_available_and_revalidates_ident
         let fixture = ItemFixture::with_change_guard(Some(Arc::clone(&guard)));
         let row = fixture.show_onedrive_file("doc", b"cloud bytes");
         fixture.land_copy(row.local_item_id, b"cloud bytes");
-        let retained = guard.prepare_removal(&row, "doc", 100).unwrap();
+        let retained = guard.prepare_removal(&row, "doc", 100, false).unwrap().unwrap();
         std::fs::create_dir_all(fixture.disk_path(retained.parent().unwrap().to_str().unwrap()))
             .unwrap();
         std::fs::rename(

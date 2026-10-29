@@ -32,7 +32,7 @@ pub struct AccountSnapshot {
     /// [`set_error`](Self::set_error) and [`clear_error`](Self::clear_error); `LastError` is
     /// [`published_error`](Self::published_error).
     pub trouble: Option<AccountTrouble>,
-    /// Why the account runs read-only against `config.toml`, or holds more than it asked
+    /// Why an account configured read-write runs read-only, or holds more than it asked
     /// for: `recompute_mode`'s alone to set and to take back. It stands in `LastError`
     /// where an error would, so one takes the other's place.
     pub mode_note: Option<ModeNote>,
@@ -61,7 +61,8 @@ pub struct AccountSnapshot {
     pub granted_scopes: String,
     /// What the last token was valid for when that was more than a read-only request asked
     /// for: consent Microsoft still holds (limitations log F66). Such a token is used to read
-    /// only, `TokenExport` hands it out to nobody, and `LastError` says so. Empty otherwise.
+    /// only, and `TokenExport` hands it out to nobody. `LastError` says so only for an
+    /// account configured read-write; a configured read-only account expects it. Empty otherwise.
     pub wider_grant: String,
     /// The drive the account's token was last seen to reach (`GET /me/drive` at a sign-in,
     /// at `RefreshInfo`, or for `TokenExport.ReadWrite`). The account is
@@ -143,12 +144,12 @@ pub struct ReadOnlyWish {
     pub unsent: u64,
 }
 
-/// Why an account runs read-only against `config.toml`, or holds more than it asked for
+/// Why an account configured read-write runs read-only, or holds more than it asked for
 /// (`AccountService::recompute_mode`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModeNote {
     /// A read-only request was answered with a token that can change files; what it was
-    /// granted.
+    /// granted. Only a note when config.toml asks for read-write.
     WiderGrant(String),
     /// `config.toml` cannot be read now.
     ConfigUnreadable,

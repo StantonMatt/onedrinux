@@ -12,10 +12,13 @@ pub const SCOPES: &str = "Files.Read User.Read offline_access";
 pub const READ_WRITE_SCOPES: &str = "Files.ReadWrite User.Read offline_access";
 
 /// The scope an account signs in and refreshes with: `read_write` says whether its mode is
-/// read-write. A read-only account keeps
-/// asking for `Files.Read` at every refresh, so its access tokens cannot write even when
-/// its grant is wider (`docs/design/writes.md` §2.1): Microsoft allows a refresh to ask for "equivalent to or
-/// a subset of" what was granted, and so keeps enforcing that nothing is written.
+/// read-write. A read-only account asks for `Files.Read` at every refresh, but that does not
+/// make its tokens read-only: once an account has consented to `Files.ReadWrite`, Microsoft
+/// keeps that permission until it is removed at <https://account.live.com/consent/Manage>,
+/// and the consumer endpoint answers a refresh for `Files.Read` with every scope consented
+/// (measured 2026-10-29). Consumer tokens are opaque, so such a token very likely writes. A
+/// read-only account is kept from writing by KOneDrive's own refusal
+/// (`docs/design/writes.md` §2.1).
 pub fn scopes_for(read_write: bool) -> &'static str {
     if read_write {
         READ_WRITE_SCOPES

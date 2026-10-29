@@ -65,6 +65,9 @@ pub(super) struct RemoveCase {
     /// in it were removed as asked, each by its own unlink, and those removals are none
     /// of this. `Nothing` for a file.
     pub(super) onedrive_items_never_shown: ItemsNeverShown,
+    /// Whether the upload rules leave the item here (`ItemReader::is_ignored`): the
+    /// change guard keeps nothing of such a file OneDrive never had.
+    pub(super) is_left_here: bool,
 }
 
 /// What a removal that goes ahead does on disk before the row.
@@ -139,7 +142,7 @@ impl ItemWriteOperations {
             let items = store.item_store();
             let reader = items.reader();
             let Some(shown) = reader.find_item(directory)?.filter(|row| row.kind == ItemKind::Directory && row.local.is_some()) else {
-                return Ok(RemoveCase { directory: None, item: None, path: None, asked_kind, is_empty: true, onedrive_items_never_shown: ItemsNeverShown::Nothing });
+                return Ok(RemoveCase { directory: None, item: None, path: None, asked_kind, is_empty: true, onedrive_items_never_shown: ItemsNeverShown::Nothing, is_left_here: false });
             };
             let item = reader.find_item_at(directory, &name)?;
             let (path, is_empty) = match &item {
@@ -151,7 +154,11 @@ impl ItemWriteOperations {
                 Some(item) if item.kind == ItemKind::Directory && is_empty => reader.find_onedrive_items_never_shown_below(item.local_item_id)?,
                 _ => ItemsNeverShown::Nothing,
             };
-            Ok(RemoveCase { directory: Some(shown), item, path, asked_kind, is_empty, onedrive_items_never_shown })
+            let is_left_here = match &item {
+                Some(item) => reader.is_ignored(item.local_item_id)?,
+                None => false,
+            };
+            Ok(RemoveCase { directory: Some(shown), item, path, asked_kind, is_empty, onedrive_items_never_shown, is_left_here })
         })
     }
 
@@ -195,8 +202,7 @@ impl ItemWriteOperations {
                     if row.kind == ItemKind::File {
                         let directory = guard.aside_directory(&self.backing_directory.resolve_root_path());
                         std::fs::create_dir_all(&directory).map_err(|_| Errno::EIO)?;
-                        let aside = guard.prepare_removal(row, &path.display().to_string(), crate::clock::unix_now()).map_err(|_| Errno::EIO)?;
-                        Some(aside)
+                        guard.prepare_removal(row, &path.display().to_string(), crate::clock::unix_now(), case.is_left_here).map_err(|_| Errno::EIO)?
                     } else { None }
                 } else { None };
                 let aside_name = retained.as_ref().map(|p| p.as_os_str().to_owned()).unwrap_or_else(|| make_aside_entry_name(item));

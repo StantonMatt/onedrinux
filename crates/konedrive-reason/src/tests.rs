@@ -99,6 +99,7 @@ fn every_key_has_the_group_it_had() {
                 "name-held-by-an-upload",
                 "changed in OneDrive again and again",
                 "the upload session ended twice",
+                "folder-not-described",
                 "not allowed now",
             ],
         ),

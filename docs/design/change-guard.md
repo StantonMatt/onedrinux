@@ -100,11 +100,23 @@ place-change recovery can put an interrupted unlink back. Startup's temporary-as
 cleanup never prunes retained files. Unique unsent bytes are not evicted to free space.
 A set-aside failure refuses the local unlink rather than discarding unique bytes.
 
+A file OneDrive never had sends nothing when it is removed, and no limit counts it. A
+file left here by the upload rules (a LibreOffice `.~lock.*#`, anything ignored) keeps
+nothing: no ledger entry, no retained copy. Any other unbound file is set aside like a
+resident one and waits with the removals around it. If their hold trips meanwhile, or
+its own upload was held, it joins the hold and Restore can put it back. Otherwise
+startup or the next plan retires it once the removals' quiet time is over, and its
+retained copy goes. The same retirement settles pending removals whose rows are gone,
+except those with bound copies awaiting remote confirmation, and the retained copy
+of an unbound file whose removal no entry records any more. A missing bound row after
+a store rebuild proves no remote deletion: its entry and bytes stay. Keeping that
+pending entry neither counts it again nor restarts its original quiet time.
+
 A successful remote removal records durable retained-cleanup ownership before the
 SQL commit. Startup and every plan retry cleanup on the mutation thread once the row
 confirms absence, syncing the retained directory even when an earlier unlink succeeded
-but its sync failed. Allow also cleans retained bytes of unbound files whose rows went
-on unlink; unapproved unique bytes stay retained. Restore can run
+but its sync failed. Allow also cleans retained bytes of held unbound files whose rows
+went on unlink; unapproved unique bytes stay retained. Restore can run
 without a network connection, while the account's folder is mounted:
 
 - A removal restores the row from the known cloud version and renames its retained

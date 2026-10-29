@@ -1,5 +1,5 @@
 use konedrive_dbus::overall::{Overall, Reason};
-use super::{decide_read_only_asked, mode_shown_text, read_only_asked_text, status_text, AccountStatus, ReadOnlyAsked};
+use super::{decide_read_only_asked, mode_shown_text, read_only_asked_text, read_only_switch_text, status_text, AccountStatus, ReadOnlyAsked, WRITE_PERMISSION_KEPT};
 
 /// `sync status` says whether changes from OneDrive arrive live, and nothing
 /// while the socket is off (the pause or the hold says why).
@@ -257,4 +257,19 @@ fn the_wait_onedrive_asked_for_is_said_with_the_time_left_and_the_file_refused()
 
     let account = super::AccountStatus { state: Some("signed-in".into()), overall: Some(Reason::Throttled.into()), retry_after: 240, ..Default::default() };
     assert!(super::status_text(&account, None).contains("Overall:    paused — OneDrive asked to wait: 4 min left\n"));
+}
+
+/// A switch from read-write says, in one sentence, where Microsoft's permission to write is
+/// removed; a read-only account asked again says nothing of it.
+#[test]
+fn a_switch_from_read_write_says_where_the_permission_is_removed() {
+    let switched = read_only_switch_text("", "konedrivectl", ReadOnlyAsked::Switched, true);
+    assert!(switched.starts_with("Read-only: ") && switched.ends_with(WRITE_PERMISSION_KEPT), "{switched}");
+    assert!(WRITE_PERMISSION_KEPT.contains("https://account.live.com/consent/Manage") && WRITE_PERMISSION_KEPT.matches(". ").count() == 0);
+    let waits = read_only_switch_text("", "konedrivectl", ReadOnlyAsked::Waits { unsent: 2 }, true);
+    assert!(waits.ends_with(WRITE_PERMISSION_KEPT), "{waits}");
+    for (asked, was_read_write) in [(ReadOnlyAsked::Switched, false), (ReadOnlyAsked::NotSaid, true)] {
+        let said = read_only_switch_text("", "konedrivectl", asked.clone(), was_read_write);
+        assert_eq!(said, read_only_asked_text("", "konedrivectl", asked), "{said}");
+    }
 }

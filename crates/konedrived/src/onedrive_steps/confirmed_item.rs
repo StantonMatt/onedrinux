@@ -19,6 +19,7 @@
 // test: an_item_with_neither_has_no_guard
 // test: the_guard_of_a_content_is_the_ctag_of_onedrives_content_else_the_synced_ones_else_the_etag
 // test: the_guard_of_a_directorys_removal_is_its_etag_alone
+// test: a_folder_with_no_etag_is_not_described_yet
 // test: a_guard_matches_an_item_by_the_tag_it_names
 // test: the_guard_of_an_answer_is_its_etag_else_its_ctag
 // test: a_name_that_is_not_utf8_is_refused_for_good_and_any_other_is_given_as_it_is
@@ -28,7 +29,7 @@ use std::ffi::OsStr;
 use konedrive_graph::drive::DriveItem;
 use konedrive_tree::{ConfirmedItem, ContentVersion, DriveId, ItemVersions, OneDriveItemId, OneDriveItemReference};
 
-use crate::sync_parts::step_outcome::{StepFailure, StepRefusal};
+use crate::sync_parts::step_outcome::{StepFailure, StepOutcome, StepRefusal};
 
 /// The `If-Match` value of a guarded request, and which of the item's two tags it is.
 /// OneDrive takes either (measured on OneDrive personal, 2026-10-14).
@@ -81,6 +82,17 @@ pub(crate) fn decide_guard(item: &ItemVersions) -> Option<RequestGuard> {
 /// it (measured 2026-10-29). `None` for a directory with no eTag, or an empty one. Pure.
 pub(crate) fn decide_folder_guard(item: &ItemVersions) -> Option<RequestGuard> {
     item.onedrive_etag.clone().filter(|tag| !tag.is_empty()).map(RequestGuard::ETag)
+}
+
+/// What a directory's removal that found no guard (`find_guarded_item` with
+/// [`decide_folder_guard`]) answers: `StepFailure::FolderNotDescribed` for a directory
+/// bound in the folder's drive `drive` with no eTag, whose removal waits for a listing to
+/// describe it; `outcome` for anything else (no item of OneDrive, another drive). Pure.
+pub(crate) fn refuse_without_folder_guard(item: &ItemVersions, drive: &DriveId, outcome: StepOutcome) -> StepOutcome {
+    match item.onedrive_item.as_ref().is_some_and(|reference| reference.drive_id == *drive) && decide_folder_guard(item).is_none() {
+        true => StepOutcome::Failed(StepFailure::FolderNotDescribed),
+        false => outcome,
+    }
 }
 
 /// What a request that sends a content into `item`'s item of OneDrive is guarded with:

@@ -57,6 +57,7 @@ bool takesDetail(QStringView key)
         QLatin1String("name-held-by-an-upload"),
         QLatin1String("changed in OneDrive again and again"),
         QLatin1String("the upload session ended twice"),
+        QLatin1String("folder-not-described"),
         QLatin1String("not allowed now"),
         QLatin1String("blocked"),
         QLatin1String("not-read-on-disk"),
@@ -194,6 +195,12 @@ QString reasonSentence(const ReasonParts &parts, const QString &needs, const QSt
     if (parts.key == QLatin1String("the upload session ended twice")) {
         if (!parts.hasDetail) {
             return i18n("OneDrive ended the upload twice: tried again later.");
+        }
+        return QString();
+    }
+    if (parts.key == QLatin1String("folder-not-described")) {
+        if (!parts.hasDetail) {
+            return i18n("Waits for OneDrive to describe this folder before removing it.");
         }
         return QString();
     }

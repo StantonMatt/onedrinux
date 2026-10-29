@@ -7,7 +7,7 @@ use konedrivectl::choice::{choose, Source};
 use konedrivectl::text::accounts::{account_list_text, removed_text};
 use konedrivectl::text::formats::warning_text;
 use konedrivectl::text::refusals::{explain_account_error, explain_sync_error, AccountAction, Context, SyncAction};
-use konedrivectl::text::status::{decide_read_only_asked, mode_shown_text, read_only_asked_text, SWITCH_CANCELLED};
+use konedrivectl::text::status::{decide_read_only_asked, mode_shown_text, read_only_switch_text, SWITCH_CANCELLED};
 
 use super::browser::{open_browser, spawn_browser};
 use crate::cli::{AccountCmd, WriteScopeCmd};
@@ -99,7 +99,7 @@ async fn account_mode(daemon: &Daemon, option: Option<&str>, mode: Option<&str>,
         return Ok(());
     };
     // Read before the call: read-write asked of an account that waits to switch cancels the switch.
-    let was_switching = proxy.read_only_wanted().await?;
+    let (was_switching, was_read_write) = (proxy.read_only_wanted().await?, proxy.mode().await? == "read-write");
     let result = proxy.set_mode(mode, force).await;
     let url = result.map_err(|e| anyhow!(explain_account_error(AccountAction::SetMode(&label, mode, &prefix), &e)))?;
     if mode == "read-only" {
@@ -111,7 +111,7 @@ async fn account_mode(daemon: &Daemon, option: Option<&str>, mode: Option<&str>,
             .build()
             .await?;
         let asked = decide_read_only_asked(&after.mode().await?, crate::read::read_only_wish(&after).await?);
-        print!("{}", read_only_asked_text(&tag, &prefix, asked));
+        print!("{}", read_only_switch_text(&tag, &prefix, asked, was_read_write));
         return Ok(());
     }
     if url.is_empty() {

@@ -278,6 +278,10 @@ Turning **Two-way sync** off does not drop what is still to be sent.
 
 The wish survives a restart of the service.
 
+Microsoft keeps the permission to change files that the account gave. KOneDrive changes nothing
+while the account is read-only; to remove the permission too, remove KOneDrive at
+<https://account.live.com/consent/Manage>.
+
 ## Using another folder
 
 **Use Another Folder…** on OneDrive Settings stops keeping the folder in step, and Status then has

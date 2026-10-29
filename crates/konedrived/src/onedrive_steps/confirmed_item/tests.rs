@@ -149,6 +149,18 @@ fn the_guard_of_a_directorys_removal_is_its_etag_alone() {
     assert_eq!(decide_folder_guard(&versions(Some(""), None)), None);
 }
 
+/// A bound folder with no eTag waits to be described; any other failure to find a guard
+/// is answered as it was.
+#[test]
+fn a_folder_with_no_etag_is_not_described_yet() {
+    let unreadable = || StepOutcome::Failed(StepFailure::AnswerUnreadable { detail: "no guard".to_owned() });
+    let bound = |etag| ItemVersions { onedrive_item: Some(OneDriveItemReference { drive_id: drive(), item_id: OneDriveItemId::new("D7") }), ..versions(etag, None) };
+    assert_eq!(refuse_without_folder_guard(&bound(None), &drive(), unreadable()), StepOutcome::Failed(StepFailure::FolderNotDescribed));
+    assert_eq!(refuse_without_folder_guard(&bound(Some("")), &drive(), unreadable()), StepOutcome::Failed(StepFailure::FolderNotDescribed));
+    assert_eq!(refuse_without_folder_guard(&bound(None), &DriveId::new("other").unwrap(), unreadable()), unreadable(), "another drive");
+    assert_eq!(refuse_without_folder_guard(&versions(None, None), &drive(), unreadable()), unreadable(), "no item of OneDrive");
+}
+
 /// The guard of a request that follows a read: the eTag just read, else the cTag, else
 /// empty.
 #[test]

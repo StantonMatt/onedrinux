@@ -107,6 +107,9 @@ pub enum Reason {
     /// The upload session ended under the upload twice in one run: in
     /// backoff.
     SessionEnded,
+    /// A folder removed here has no eTag to guard its removal with: it waits for a
+    /// listing that writes one, in backoff.
+    FolderNotDescribed,
     /// Sending is not allowed now: `not allowed now: <why>` (the folder is read-only).
     /// Waiting until it is; an upload session is kept.
     NotAllowed(Option<String>),
@@ -152,7 +155,7 @@ const TOO_BIG_KEY: &str = "too-big";
 
 impl Reason {
     /// Every variant but [`Reason::Other`], those with a detail without it.
-    pub const ALL: [Reason; 32] = [
+    pub const ALL: [Reason; 33] = [
         Self::OpenForWriting,
         Self::NameCharacters,
         Self::NameSpaces,
@@ -172,6 +175,7 @@ impl Reason {
         Self::NameHeld,
         Self::ChangedAgain,
         Self::SessionEnded,
+        Self::FolderNotDescribed,
         Self::NotAllowed(None),
         Self::Blocked,
         Self::NotReadOnDisk,
@@ -211,6 +215,7 @@ impl Reason {
             Self::NameHeld => "name-held-by-an-upload",
             Self::ChangedAgain => "changed in OneDrive again and again",
             Self::SessionEnded => "the upload session ended twice",
+            Self::FolderNotDescribed => "folder-not-described",
             Self::NotAllowed(_) => "not allowed now",
             Self::Blocked => "blocked",
             Self::NotReadOnDisk => "not-read-on-disk",
@@ -307,6 +312,7 @@ impl Reason {
             | Self::NameHeld
             | Self::ChangedAgain
             | Self::SessionEnded
+            | Self::FolderNotDescribed
             | Self::NotAllowed(_) => Group::Waiting,
             Self::Other(stored) => return known_group(key_of(stored)),
         })

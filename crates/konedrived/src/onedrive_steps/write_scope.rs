@@ -3,10 +3,11 @@
 // test: write_scope_sender_checks_every_step_and_remote_rename_sources
 // test: write_scope_sender_allows_in_scope_steps_and_checks_the_actual_destination
 // test: write_scope_rechecks_current_locations_after_a_step_was_planned
+// test: a_read_only_account_sends_nothing_whatever_its_token_was_granted
 
 use super::OneDriveSteps;
 use crate::config::{WriteScope, WriteScopeSource};
-use crate::sync_parts::step_outcome::{StepOutcome, StepRefusal};
+use crate::sync_parts::step_outcome::{StepObstacle, StepOutcome, StepRefusal};
 use konedrive_tree::{ItemPlace, ItemReader, ItemVersions, LocalItemId, OneDriveStep, TreeError};
 use std::path::PathBuf;
 
@@ -157,7 +158,13 @@ impl OneDriveSteps {
         self
     }
 
+    /// A read-only account sends nothing, whatever its token was granted: Microsoft keeps
+    /// a write permission once given, so only this refusal and the folder's hold keep a
+    /// read-only account from writing. Answered as a stop, which counts no try.
     pub(super) async fn check_write_scope(&self, step: &OneDriveStep) -> Result<(), StepOutcome> {
+        if self.write_scope.is_read_only() {
+            return Err(StepOutcome::NotRun(StepObstacle::SendingStopped));
+        }
         let scope = self.write_scope.get();
         if scope.unrestricted() {
             return Ok(());

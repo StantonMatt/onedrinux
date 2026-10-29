@@ -476,8 +476,14 @@ account's side (`account/mode.rs`, `account/state.rs`):
 - **The scope.** Read-only asks for `Files.Read User.Read offline_access`, read-write for
   `Files.ReadWrite User.Read offline_access`. A refresh asks by the mode the account runs in; the
   sign-in that adds an account asks for the selected mode, so default two-way needs one browser
-  visit. Microsoft may answer a read-only request with a token
-  that can write; it is used to read only (F66).
+  visit. Asking for `Files.Read` does not make a token read-only: Microsoft keeps
+  `Files.ReadWrite` once the account allowed it, and the consumer endpoint grants it again with
+  a read-only refresh (measured 2026-10-29). Such a token is used to read only (F66): a
+  read-only account's safety rests on KOneDrive's own refusal to write, the folder's `EROFS`,
+  its `FolderReadOnly` hold and the sender's check of `config.toml` (writes.md §2.1). A wider
+  grant is expected for an account configured read-only: it raises no mode note or `LastError`,
+  and switching the configuration to read-only clears an existing wider-grant note. The note
+  remains for an account configured read-write whose token was asked for read-only.
 - **To read-write**, `Account.SetMode("read-write", false)` answers a sign-in URL — empty when the
   account runs read-write already — whose sign-in asks for `Files.ReadWrite`, pinned to the
   account: its password asked for again, its email filled in. Only when the token response grants
@@ -486,7 +492,8 @@ account's side (`account/mode.rs`, `account/state.rs`):
   signed in.
 - **To read-only** needs no sign-in: the next refresh asks for `Files.Read`. While changes are
   unsent the switch waits for them unless forced (`ReadOnlyWanted`, `UnsentBeforeReadOnly`); nothing
-  is dropped.
+  is dropped. Microsoft's write permission stays until the user removes it at
+  <https://account.live.com/consent/Manage>; `konedrivectl account mode read-only` says so.
 - **The mode is the user's choice.** Any signed-in account can be switched to read-write, whatever
   its drive. `write_test_drive_ids` only limits a development build's `TokenExport.ReadWrite`.
 

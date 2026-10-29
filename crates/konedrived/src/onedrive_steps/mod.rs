@@ -163,7 +163,7 @@ pub(crate) mod name_holders;
 pub(crate) mod session_cancellations;
 mod write_scope;
 
-use confirmed_item::{decide_content_guard, decide_folder_guard, decide_guard, to_confirmed_item, to_graph_name, RequestGuard};
+use confirmed_item::{decide_content_guard, decide_folder_guard, decide_guard, refuse_without_folder_guard, to_confirmed_item, to_graph_name, RequestGuard};
 use content_upload::{hash_content, ContentTarget, ContentUpload, NewFilePlace, SendContentError, SentContent};
 use graph_refusal::{decide_plain_refusal, decide_read_refusal, decide_refusal, RefusedRequest};
 use lost_answers::{FailedRead, LostAnswerFate, LostAnswers, SentRequest};
@@ -944,8 +944,8 @@ impl OneDriveSteps {
     /// a file (`decide_guard`). OneDrive personal gives a folder no cTag, and moves its
     /// eTag at its own rename or move and at nothing below it (measured 2026-10-29): what
     /// is below is checked by the rows, after a listing. A directory with no eTag is
-    /// `StepFailure::AnswerUnreadable`, as a file with no guard is: the step waits for a
-    /// listing that writes one, and nothing is sent.
+    /// `StepFailure::FolderNotDescribed` (`refuse_without_folder_guard`): the step waits
+    /// for a listing that writes one, and nothing is sent.
     /// Before the request every attempt waits for a listing cycle of its own. Its first
     /// look notes the count of listings begun and asks for a cycle
     /// (`RowsChanged(CycleWanted)`); a look while it waits is
@@ -971,7 +971,7 @@ impl OneDriveSteps {
     /// below, and an item moved out of the directory meanwhile is listed again.
     async fn run_send_directory_removal(&self, item: &ItemVersions, below: &[ItemVersions]) -> StepOutcome {
         let id = item.local_item_id;
-        let (onedrive_item, guard) = match self.find_guarded_item(item, decide_folder_guard) {
+        let (onedrive_item, guard) = match self.find_guarded_item(item, decide_folder_guard).map_err(|outcome| refuse_without_folder_guard(item, &self.graph.drive_id, outcome)) {
             Ok(guarded) => guarded,
             Err(outcome) => return outcome,
         };

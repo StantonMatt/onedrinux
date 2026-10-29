@@ -6,6 +6,7 @@
 // test: concurrent_admission_cannot_spend_the_same_budget
 // test: approved_rewrites_survive_their_sent_move_but_not_a_later_edit
 // test: dont_upload_survives_an_ignored_rename_and_back_even_when_disabled
+// test: a_removal_recorded_while_its_file_is_open_stays_decidable
 
 mod batches;
 mod ledger;
@@ -270,8 +271,10 @@ impl ChangeGuard {
         for (row, path) in rows {
             if row.local.is_some() && row.content_before_write.is_some() {
                 // Invalidate an earlier approval before the first writer gets its
-                // descriptor. The final generation is counted only after close.
-                for kind in Kind::ALL {
+                // descriptor. The final generation is counted only after close. A removal
+                // is recorded just before its unlink writes the row; a writer still open
+                // then changes nothing it removes, and its row may never be read again.
+                for kind in [Kind::Rewrite, Kind::Move, Kind::Upload] {
                     let key = format!("{}:{}", row.local_item_id, kind.key());
                     if inner.ledger.current.get(&key).is_some_and(|c| !c.provisional) {
                         inner.ledger.revision += 1;
@@ -791,12 +794,19 @@ impl ChangeGuard {
         self.notify(&inner);
         Ok(())
     }
+    /// Where the removed file `row` is set aside, or `None` for a file left here that
+    /// OneDrive never had: its removal sends nothing and keeps nothing.
     pub(crate) fn prepare_removal(
         &self,
         row: &Item,
         path: &str,
         now: i64,
-    ) -> Result<PathBuf, String> {
+        left_here: bool,
+    ) -> Result<Option<PathBuf>, String> {
+        let bound = row.onedrive_item.is_some();
+        if !bound && left_here {
+            return Ok(None);
+        }
         let mut inner = crate::panic::lock(&self.inner);
         let name = format!(
             ".konedrive-change-guard/{}-{}",
@@ -812,19 +822,29 @@ impl ChangeGuard {
         // provisional observation with the committed generation before admission.
         let c = change(&removed, Kind::Removal, path.into(), now);
         let config = inner.config.clone();
-        inner.ledger.observe(c, &config, now);
+        if bound {
+            inner.ledger.observe(c, &config, now);
+        } else {
+            // Kept while its upload waits for the user: the review still owes it.
+            let upload_held = inner
+                .ledger
+                .current
+                .get(&format!("{}:{}", row.local_item_id, Kind::Upload.key()))
+                .is_some_and(|c| matches!(c.disposition, Disposition::Held | Disposition::Restoring));
+            inner.ledger.observe_unsent_removal(c, &config, now, upload_held);
+        }
         inner.ledger.retained.insert(
             row.local_item_id.as_i64(),
             ledger::Retained {
                 path: name.clone(),
                 content: row.local.as_ref().and_then(|l| l.content.clone()),
-                bound: row.onedrive_item.is_some(),
+                bound,
                 cleanup: false,
             },
         );
         self.save(&mut inner)?;
         self.notify(&inner);
-        Ok(name.into())
+        Ok(Some(name.into()))
     }
     pub(crate) fn retained(&self, item: LocalItemId) -> Option<PathBuf> {
         crate::panic::lock(&self.inner)

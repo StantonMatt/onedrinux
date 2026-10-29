@@ -1,7 +1,10 @@
 //! Durable restore completion evidence and ownership of retained-copy cleanup.
 // test: committed_restore_receipts_survive_restart_without_approving_newer_work
+// test: unsent_removals_are_never_charged_and_retire_after_their_quiet_time
+// test: a_set_aside_copy_whose_unsent_removal_no_entry_records_goes
+// test: missing_bound_removals_stay_pending_without_recharging_or_extending_quiet_time
 use super::{
-    generation, ledger::RestoreReceipt, write_count, Change, ChangeGuard, Disposition, Kind,
+    generation, ledger::RestoreReceipt, write_count, Change, ChangeGuard, Disposition, Inner, Kind,
 };
 use konedrive_tree::{Item, ItemReader, ItemVersions, LocalItemId, TreeError};
 use std::path::PathBuf;
@@ -174,13 +177,19 @@ impl ChangeGuard {
         Ok(())
     }
     /// A confirmed remote removal owns retained cleanup even if the sender died
-    /// before recording Sent. Unbound unique bytes require an explicit Allow.
+    /// before recording Sent. Held unbound unique bytes require an explicit Allow; a
+    /// removal nothing is left to send for is retired here first.
     pub(crate) fn retained_cleanup(
         &self,
         items: &ItemReader<'_>,
+        now: i64,
     ) -> Result<Vec<(LocalItemId, PathBuf)>, TreeError> {
-        let inner = crate::panic::lock(&self.inner);
+        let mut inner = crate::panic::lock(&self.inner);
         let mut clean = Vec::new();
+        if inner.failed.is_some() {
+            return Ok(clean);
+        }
+        self.retire_unsent_removals(&mut inner, items, now)?;
         if inner.failed.is_some() {
             return Ok(clean);
         }
@@ -202,6 +211,49 @@ impl ChangeGuard {
             }
         }
         Ok(clean)
+    }
+    /// Once quiet without a hold, retire pending removals whose rows are gone, except
+    /// those with unconfirmed bound copies. A rebuilt store can lose a bound row without
+    /// a remote deletion: keep its entry and bytes until `confirm_removals` owns cleanup.
+    /// Keeping that entry neither charges it again nor restarts its original quiet time.
+    /// Only unbound copies gain cleanup ownership here. Held, restoring and allowed
+    /// removals stay for the user's decision. An unrecorded unbound copy whose row is
+    /// gone can no longer be held or restored and is also handed to cleanup.
+    fn retire_unsent_removals(&self, inner: &mut Inner, items: &ItemReader<'_>, now: i64) -> Result<(), TreeError> {
+        let now = now.max(inner.ledger.clock_now());
+        let pending = |c: &&Change| c.kind == Kind::Removal && c.disposition == Disposition::Pending && c.item >= 0;
+        let latest = inner.ledger.current.values().filter(pending).map(|c| c.at).max();
+        let quiet = !inner.config.enabled
+            || !(inner.ledger.latched.contains(&Kind::Removal) || latest.is_some_and(|at| now < at.saturating_add(30)));
+        let mut retired = Vec::new();
+        for c in inner.ledger.current.values().filter(pending).filter(|_| quiet) {
+            if inner.ledger.retained.get(&c.item).is_some_and(|r| r.bound && !r.cleanup) {
+                continue;
+            }
+            if items.find_item(LocalItemId::new(c.item))?.is_none() {
+                retired.push(c.item);
+            }
+        }
+        for (id, retained) in &inner.ledger.retained {
+            let unrecorded = !retained.bound && !retained.cleanup && !inner.ledger.current.contains_key(&format!("{id}:{}", Kind::Removal.key()));
+            if unrecorded && items.find_item(LocalItemId::new(*id))?.is_none() {
+                retired.push(*id);
+            }
+        }
+        if retired.is_empty() {
+            return Ok(());
+        }
+        for id in retired {
+            inner.ledger.current.remove(&format!("{id}:{}", Kind::Removal.key()));
+            if let Some(retained) = inner.ledger.retained.get_mut(&id).filter(|r| !r.bound) {
+                retained.cleanup = true;
+            }
+        }
+        inner.ledger.revision += 1;
+        if let Err(error) = self.save(inner) {
+            tracing::warn!("removals with nothing to send could not be retired: {error}");
+        }
+        Ok(())
     }
     /// A successful DELETE or authoritative 404 owns cleanup before the SQL commit.
     /// If that commit fails, cleanup still waits until the row confirms absence.

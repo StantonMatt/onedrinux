@@ -220,6 +220,22 @@ pub fn read_only_asked_text(tag: &str, prefix: &str, asked: ReadOnlyAsked) -> St
     }
 }
 
+/// Said after `account mode read-only` of an account that was read-write: Microsoft keeps
+/// the permission it gave (`docs/limitations/F66.md`).
+pub const WRITE_PERMISSION_KEPT: &str = "Microsoft keeps konedrive's permission to change this account's files until you remove it at \
+     https://account.live.com/consent/Manage; konedrive itself changes nothing while the account is read-only.\n";
+
+/// [`read_only_asked_text`], and for an account that was read-write before it was asked
+/// (`was_read_write`) and switched or waits to, [`WRITE_PERMISSION_KEPT`].
+pub fn read_only_switch_text(tag: &str, prefix: &str, asked: ReadOnlyAsked, was_read_write: bool) -> String {
+    let kept = was_read_write && asked != ReadOnlyAsked::NotSaid;
+    let mut said = read_only_asked_text(tag, prefix, asked);
+    if kept {
+        said.push_str(WRITE_PERMISSION_KEPT);
+    }
+    said
+}
+
 /// One account's folder as its interfaces' properties say it: what `sync status` shows. A
 /// value is `None` when the daemon has no such property (an older build, not restarted): its
 /// line is left out. The values whose line is printed only when they say something are read

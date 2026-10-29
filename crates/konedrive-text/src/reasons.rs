@@ -58,6 +58,7 @@ pub const REASONS: &[ReasonText] = &[
     bare("name-held-by-an-upload", "Its name in OneDrive is held by an unfinished upload (another device, or one abandoned): tried again later."),
     bare("changed in OneDrive again and again", "It keeps changing in OneDrive: tried again later."),
     bare("the upload session ended twice", "OneDrive ended the upload twice: tried again later."),
+    bare("folder-not-described", "Waits for OneDrive to describe this folder before removing it."),
     detailed("not allowed now", "Uploads are not allowed now: it goes on when they are.", "Uploads are not allowed now: it goes on when they are ({detail})."),
     bare("blocked", INCOMPLETE),
     bare("not-read-on-disk", "KOneDrive could not read this on disk when it started: nothing of it is uploaded until it can be read at a start."),

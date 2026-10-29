@@ -133,6 +133,9 @@ pub(crate) enum StepFailure {
     UndoFailed { path: PathBuf },
     /// Graph answered what cannot be read as the item asked for.
     AnswerUnreadable { detail: String },
+    /// A directory removed here has no eTag to guard its removal with: nothing is sent,
+    /// and it waits for a listing that writes one (`onedrive_steps::decide_folder_guard`).
+    FolderNotDescribed,
     /// The runner's task ended by a panic: a fault of the daemon, of no part the step
     /// went through. Answered by the plan's task for a step whose task ended so
     /// (`sync_plan_task::decide_outcome_of_ended_task`), never by a runner. Settled

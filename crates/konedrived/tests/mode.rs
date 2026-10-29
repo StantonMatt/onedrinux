@@ -283,6 +283,72 @@ async fn read_write_is_written_only_once_the_grant_arrives_and_read_only_is_a_su
     assert_eq!(s.account.state().await.unwrap(), "signed-in");
 }
 
+/// Read-write → read-only on a consumer account: Microsoft answers the read-only refresh with
+/// `Files.ReadWrite` too, the permission it keeps (measured 2026-10-29). The account runs
+/// read-only all the same: `config.toml` says so, it stays signed in, what it records it may
+/// use the token for is never more than it asked, and no error or mode note is raised.
+/// A switch to read-write still asks for the browser.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_switch_back_to_read_only_stays_read_only_when_microsoft_grants_writes_again() {
+    const READ: &str = "Files.Read User.Read offline_access";
+    let s = signed_in_with(&[], "good-code", true).await;
+    let url = s.account.set_mode("read-write", false).await.unwrap();
+    simulate_browser(&url, "code=rw-code").await;
+    let account = &s.account;
+    eventually("read-write", || async move { account.mode().await.unwrap() == "read-write" }).await;
+
+    assert_eq!(s.account.set_mode("read-only", false).await.unwrap(), "", "no sign-in");
+    eventually("read-only", || async move { account.mode().await.unwrap() == "read-only" }).await;
+    assert_eq!(s.service.tokens().access_token().await.unwrap(), "AT-WIDE", "Microsoft still grants writes");
+    assert_eq!(refreshes(&s.server).await.last().unwrap(), READ);
+    assert_eq!(s.account.last_error().await.unwrap(), "", "the retained consent is expected");
+    assert_eq!(s.service.state().get().mode_note, None);
+    assert_eq!((s.configured(), s.service.mode()), (Mode::ReadOnly, Mode::ReadOnly));
+    assert_eq!(s.account.state().await.unwrap(), "signed-in");
+    assert_eq!(s.service.state().get().granted_scopes, READ, "never more than asked");
+    assert_eq!(s.refresh_token().as_deref(), Some("RT2"), "the sign-in is kept");
+
+    let url = s.account.set_mode("read-write", false).await.unwrap();
+    assert!(url.contains("scope=Files.ReadWrite"), "the browser grants writes again: {url}");
+    assert_eq!(s.configured(), Mode::ReadOnly, "nothing is written before the grant");
+    s.account.cancel_sign_in().await.unwrap();
+}
+
+/// A wider-grant note still matters when config.toml asks for read-write but the token
+/// was asked for read-only. Switching the configuration back to read-only takes the note
+/// out of LastError, even before another refresh; a later wider grant does not restore it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_wider_grant_note_is_cleared_when_the_configuration_returns_to_read_only() {
+    let s = signed_in_with(&[], "wide-code", true).await;
+    assert_eq!(s.account.last_error().await.unwrap(), "", "read-only consent is expected");
+    assert_eq!(s.service.state().get().mode_note, None);
+    s.config()
+        .update_account(&s.id, |a| {
+            a.mode = Mode::ReadWrite;
+            Ok::<_, ConfigError>(())
+        })
+        .unwrap();
+    s.service.recheck_mode();
+    let note = ModeNote::WiderGrant(READ_WRITE.into());
+    assert_eq!(s.service.state().get().mode_note, Some(note.clone()));
+    assert_eq!(s.account.last_error().await.unwrap(), note.to_string());
+
+    s.config()
+        .update_account(&s.id, |a| {
+            a.mode = Mode::ReadOnly;
+            Ok::<_, ConfigError>(())
+        })
+        .unwrap();
+    s.service.recheck_mode();
+    assert_eq!(s.service.state().get().mode_note, None, "the previous note is cleared");
+    assert_eq!(s.account.last_error().await.unwrap(), "");
+    s.service.tokens().invalidate().await;
+    assert_eq!(s.service.tokens().access_token().await.unwrap(), "AT-WIDE");
+    assert_eq!(s.service.state().get().mode_note, None, "refresh does not restore the note");
+    assert_eq!(s.account.last_error().await.unwrap(), "");
+    assert_eq!((s.configured(), s.service.mode()), (Mode::ReadOnly, Mode::ReadOnly));
+}
+
 /// A switch to read-write that is cancelled, refused in the browser, granted without
 /// `Files.ReadWrite`, or signed in as another Microsoft account changes nothing: the account
 /// stays signed in, read-only, with its refresh token; `LastError` says why.
@@ -686,7 +752,7 @@ async fn a_read_write_account_runs_read_write_only_with_the_grant_for_its_own_dr
 async fn a_read_only_request_answered_with_write_access_stays_read_only() {
     let s = signed_in_with(&[], "wide-code", true).await;
     let account = &s.account;
-    eventually("the wider grant said", || async move { account.last_error().await.unwrap().contains("consent") }).await;
+    assert_eq!(account.last_error().await.unwrap(), "", "read-only consent is expected");
     s.config()
         .update_account(&s.id, |a| {
             a.mode = Mode::ReadWrite;

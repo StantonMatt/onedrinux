@@ -61,7 +61,7 @@ a property cannot be read one way and announced another:
 | `Id` (`s`), `Label` (`s`) | the account's id, the last element of its object path, and its name ([accounts.md](accounts.md) §2) |
 | `Mode` (`s`) | the access mode the account runs in, `read-only` or `read-write` ([accounts.md](accounts.md) §10) |
 | `State` (`s`) | `signed-out`, `signing-in` or `signed-in` |
-| `LastError` (`s`) | the reason for the last failure, a sign-in refused as another account's included; with none, why an account `config.toml` says is read-write runs read-only, or that Microsoft answered a read-only request with a token that can write (F66); empty otherwise |
+| `LastError` (`s`) | the reason for the last failure, a sign-in refused as another account's included; with none, why an account `config.toml` says is read-write runs read-only, or, for such a configured read-write account, that Microsoft answered a read-only request with a token that can write (F66); empty otherwise |
 | `ReadOnlyWanted` (`b`), `UnsentBeforeReadOnly` (`t`) | a switch to read-only that waits for the unsent changes, and how many are still to send ([writes.md](writes.md) §2.3) |
 | `DisplayName`, `Email` (`s`) | from `GET /me`; empty for a signed-out account |
 | `QuotaUsed`, `QuotaTotal`, `QuotaRemaining` (`t`), `QuotaState` (`s`) | the account's one quota, whoever reads it: the account's info (a sign-in, `RefreshInfo`) or the uploads' space check. `QuotaRemaining` is Graph's `quota.remaining`, never `total - used`; between reads the bytes uploaded come off it. Kept in `account.json` across restarts |

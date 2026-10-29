@@ -95,15 +95,15 @@ async fn a_listing_that_ended_long_before_the_look_does_not_use_the_wait_up() {
     assert_eq!(folder.count("DELETE", ""), 1);
 }
 
-/// A directory with no eTag waits as a file with no guard does, and is never answered
-/// that it changed in OneDrive.
+/// A directory with no eTag waits for a listing that describes it, with a reason of its
+/// own, and is never answered that it changed in OneDrive.
 #[tokio::test]
 async fn a_directory_without_an_etag_waits_for_a_listing_and_never_sends_a_delete() {
     let (folder, step) = stage(StagedStep::SendDirectoryRemoval).await;
     let OneDriveStep::SendDirectoryRemoval { mut item, below } = step else { unreachable!() };
     item.onedrive_etag = None;
     let outcome = folder.run(OneDriveStep::SendDirectoryRemoval { item, below }).await;
-    assert!(matches!(outcome, StepOutcome::Failed(StepFailure::AnswerUnreadable { .. })), "{outcome:?}");
+    assert_eq!(outcome, StepOutcome::Failed(StepFailure::FolderNotDescribed));
     assert_eq!(folder.count("DELETE", ""), 0);
 }
 
@@ -307,7 +307,7 @@ async fn a_folder_with_a_resident_file_set_aside_is_removed_on_its_etag_after_it
     let file = fixture.show_onedrive_file("Recipes/Pie.docx", b"13 KiB of recipe");
     fixture.land_copy(file.local_item_id, b"13 KiB of recipe");
     let now = (fixture.clock())();
-    let retained = guard.prepare_removal(&fixture.find_item(file.local_item_id).unwrap(), "Recipes/Pie.docx", now).unwrap();
+    let retained = guard.prepare_removal(&fixture.find_item(file.local_item_id).unwrap(), "Recipes/Pie.docx", now, false).unwrap().unwrap();
     let retained = fixture.disk_path(retained.to_str().unwrap());
     std::fs::create_dir_all(retained.parent().unwrap()).unwrap();
     std::fs::rename(fixture.disk_path("Recipes/Pie.docx"), &retained).unwrap();

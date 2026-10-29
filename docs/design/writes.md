@@ -27,8 +27,10 @@ document does not repeat them.
   they stay here and are listed under Issues' Can't Upload until the user renames them. Names on
   the ignore list (editors' temporary files) stay here unlisted. Links, special files and the
   user's own extended attributes are refused by the mount (F300).
-- **A removal is sent at once**, however much it removes; what was removed is in OneDrive's
-  recycle bin, and nothing of it is kept here (F302). The folder has no trash of its own (K34).
+- **A removal is sent after its quiet time**, unless it is part of a burst the change guard
+  holds ([change-guard.md](change-guard.md)); what was removed is in OneDrive's recycle bin, and
+  a removed file's bytes are kept here only while its removal waits or is held (F302). The folder
+  has no trash of its own (K34).
 - **A move out of the folder** is a copy and a removal, because the kernel refuses a rename from
   one mount to another: the program reads the file (which downloads it) and then removes it, and
   the removal is sent. A move into another account's folder is the same, with an upload there
@@ -51,9 +53,14 @@ The mode is per account: `mode` in its section of `config.toml`. New accounts us
 `Account.Mode` is the mode the account *runs* in: read-write only while `config.toml` says so,
 the token carries `Files.ReadWrite` and the token was last seen to reach the drive `config.toml`
 records ([accounts.md](accounts.md)). A read-only account asks for
-`Files.Read User.Read offline_access` at every refresh, so that Microsoft itself refuses its
-writes; a read-write one for `Files.ReadWrite User.Read offline_access`. A read-only request
-answered with a token that can write is used to read only (F66).
+`Files.Read User.Read offline_access` at every refresh, a read-write one for
+`Files.ReadWrite User.Read offline_access`. Microsoft does not enforce the narrower ask: once an
+account allowed `Files.ReadWrite`, it keeps that permission until the user removes it at
+<https://account.live.com/consent/Manage>, and the consumer endpoint answers a read-only refresh
+with every scope consented (measured 2026-10-29). Such a token very likely writes, and is used to
+read only (F66). A read-only account is kept from writing by KOneDrive alone: the mount's `EROFS`,
+the hold `FolderReadOnly`, and the sender, which stops every step of an account `config.toml`
+sets read-only before any request (`onedrive_steps/write_scope.rs`).
 
 What the mode means for the folder is two facts, each with one owner:
 
@@ -117,8 +124,8 @@ that cannot write and no 403 comes from a switch:
    across it; a file still open for writing has its last close written afterwards;
 4. the steps towards OneDrive still running are waited for, at most 30 seconds (the answer says
    when one still ran);
-5. only then the token that can write is dropped; the next refresh asks for `Files.Read`, a subset
-   of the grant, with no sign-in.
+5. only then the token that can write is dropped; the next refresh asks for `Files.Read`, with no
+   sign-in. Its answer may still grant `Files.ReadWrite` (§2.1).
 
 What was unsent stays unsent: its rows keep their versions and their stamp, the queue lists them
 as `waiting` because the folder is read-only, and they are sent when the folder is read-write
@@ -255,8 +262,8 @@ OneDrive takes either tag in `If-Match`.
   under its id, whose early pages are then as old as the interruption. What another device puts
   below the folder then goes with it, into the recycle bin inside the folder, where the
   user's Restore finds it for 30 days on a personal account. A folder row with no eTag is
-  `AnswerUnreadable`, as a file with no guard is: it waits for a listing that writes one, and
-  nothing is sent. A written removal asks for a listing cycle: a `404` says nothing of what
+  `FolderNotDescribed` (reason `folder-not-described`, "Waits for OneDrive to describe this
+  folder before removing it."): it waits for a listing that writes one, and nothing is sent. A written removal asks for a listing cycle: a `404` says nothing of what
   was below, and an item moved out of the folder meanwhile is listed again rather than
   recorded as gone. So does one whose answer was lost and that a later read finds went
   through (`SettledRecord::SettledListingWanted`). Cleanup of a newly created directory whose
@@ -467,8 +474,9 @@ writes the conflict's record in the same transaction (`item_store/step_record.rs
 copy is made that nothing knows of. `Conflicts.List()` and Issues' Kept Both Versions list the
 copies; `Dismiss` takes one off the list and leaves the file.
 
-**The mass-removal guard**: there is none. A removal is sent as any other change, however many
-items it takes; OneDrive's recycle bin is the one place it is got back from (F302).
+**The mass-removal guard** is the change guard ([change-guard.md](change-guard.md)): a burst
+of removals over its limits waits for the user. Once sent, OneDrive's recycle bin is the one
+place a removal is got back from (F302).
 
 ## 6. What holds sending back
 
@@ -647,7 +655,7 @@ What the code relies on, and the check of §8.1 that asks it of OneDrive:
 | a content guarded by its cTag passes a rename and is refused after an edit | "a content guarded by its cTag" |
 | a removal goes to the recycle bin | "a delete goes to the recycle bin" |
 | a folder has no cTag; its eTag changes at its own rename and move and at nothing below it; a folder `DELETE` honours `If-Match` with it | `--only remote`, "folder eTags and conditional folder deletes" |
-| a token refreshed after the switch back to read-only cannot write | "the token exported after the switch back" |
+| a token refreshed after the switch back to read-only cannot write, when Microsoft's answer names `Files.Read` alone; on 2026-10-29 a consumer account that had allowed writing was granted `Files.ReadWrite` again (§2.1) | "the token exported after the switch back" |
 | the delta listing returns the daemon's own changes with the eTags they were answered with | "delta returns the run's own changes" |
 | an open session holds its name with an empty file, and its cancel frees it | `--only placeholders` |
 

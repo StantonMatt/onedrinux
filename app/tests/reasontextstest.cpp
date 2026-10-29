@@ -48,6 +48,7 @@ private Q_SLOTS:
             QStringLiteral("Its name in OneDrive is held by an unfinished upload (another device, or one abandoned): tried again later."));
         row("changed in OneDrive again and again", keepsChanging);
         row("the upload session ended twice", QStringLiteral("OneDrive ended the upload twice: tried again later."));
+        row("folder-not-described", QStringLiteral("Waits for OneDrive to describe this folder before removing it."));
         row("not allowed now", QStringLiteral("Uploads are not allowed now: it goes on when they are."));
         row("not allowed now: the folder is read-only: for now",
             QStringLiteral("Uploads are not allowed now: it goes on when they are (the folder is read-only: for now)."));

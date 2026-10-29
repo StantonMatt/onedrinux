@@ -20,6 +20,13 @@ fn guarded() -> (tempfile::TempDir, Arc<ChangeGuard>, OperationsFixture) {
     );
     (dir, guard, operations)
 }
+/// Removes a resident OneDrive file: at the zero limit of [`guarded`] the removals' hold
+/// trips, and a removal that sends nothing joins it from then on.
+fn trip_removals(operations: &OperationsFixture) {
+    let tripped = operations.fixture.show_onedrive_file("tripped", b"cloud bytes").local_item_id;
+    operations.fixture.land_copy(tripped, b"cloud bytes");
+    operations.remove("tripped", ItemKind::File).unwrap();
+}
 #[test]
 fn held_removals_restore_offline_and_refuse_a_replacement() {
     let (_dir, guard, operations) = guarded();
@@ -221,6 +228,7 @@ fn restoring_a_file_changed_in_content_and_place_keeps_both_decisions_atomic() {
 #[test]
 fn unique_unsent_bytes_restore_even_after_their_unbound_rows_and_parent_are_gone() {
     let (_dir, guard, operations) = guarded();
+    trip_removals(&operations);
     operations.fixture.make_own_directory("scratch");
     let file = operations
         .fixture
@@ -232,13 +240,14 @@ fn unique_unsent_bytes_restore_even_after_their_unbound_rows_and_parent_are_gone
     assert!(guard.retained(file).is_some());
     let mount = operations.fixture.build_mount();
     let batch = guard.decide(&["removal".into()], true).unwrap();
-    assert_eq!(batch.len(), 1);
+    assert_eq!(batch.len(), 2);
+    let unique = batch.iter().find(|c| c.item == file.as_i64()).unwrap();
     assert!(operations
         .fixture
         .runtime()
-        .block_on(mount.restore_guard_change(batch[0].clone()))
+        .block_on(mount.restore_guard_change(unique.clone()))
         .unwrap());
-    guard.restored(&batch[0], true).unwrap();
+    guard.restored(unique, true).unwrap();
     assert_eq!(
         operations.fixture.read_disk_file("scratch/unique").unwrap(),
         b"never uploaded"
@@ -355,6 +364,7 @@ fn a_committed_restore_is_reconciled_after_the_ledger_completion_crash_window() 
 #[test]
 fn allowing_an_unbound_removal_cleans_only_its_approved_retained_bytes() {
     let (_dir, guard, operations) = guarded();
+    trip_removals(&operations);
     let file = operations.fixture.make_own_file("temporary", b"unique bytes").local_item_id;
     operations.remove("temporary", ItemKind::File).unwrap();
     let retained = guard.retained(file).unwrap();
@@ -385,7 +395,7 @@ fn a_sent_removals_retained_cleanup_retries_after_failure_and_restart() {
     assert!(guard.retained(file).is_some());
     std::fs::set_permissions(&retained_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     let recovered = ChangeGuard::open(dir.path().join("guard.json"), Default::default());
-    let clean = operations.fixture.store.call_blocking(move |s| recovered.retained_cleanup(&s.item_store().reader())).unwrap();
+    let clean = operations.fixture.store.call_blocking(move |s| recovered.retained_cleanup(&s.item_store().reader(), 0)).unwrap();
     assert_eq!(clean, vec![(file, retained.clone())]);
     operations.fixture.run_on_write_operation_thread({ let files = operations.fixture.make_content_files(); move || files.retry_guard_removals().unwrap() });
     assert!(!operations.fixture.disk_path(retained.to_str().unwrap()).exists());
@@ -460,4 +470,106 @@ fn deleting_a_held_never_uploaded_file_retires_only_its_upload_observation() {
     guard.restored(&batch[0], true).unwrap();
     assert_eq!(operations.fixture.read_disk_file("unique").unwrap(), b"unique bytes");
     mount.stop();
+}
+
+#[test]
+fn removing_files_onedrive_never_had_holds_nothing_and_keeps_nothing_once_quiet() {
+    let (_dir, guard, operations) = guarded();
+    guard.configure(GuardConfig { removals: 1, rewrites: 0, moves: 0, uploads: 0, ..Default::default() });
+    *crate::panic::write(&operations.fixture.ignore) = crate::local::IgnoreList::new([".~lock.*#", "cache"]);
+    // Left here, by its own name or by its directory's: nothing is set aside or recorded.
+    operations.fixture.make_own_directory("cache");
+    for path in [".~lock.Recipes.docx#", "cache/build.log"] {
+        let file = operations.fixture.make_own_file(path, b"left here").local_item_id;
+        operations.remove(path, ItemKind::File).unwrap();
+        assert!(guard.retained(file).is_none(), "{path}");
+        assert!(guard.snapshot().unwrap().1.is_empty(), "{path}");
+    }
+    // Never uploaded: not charged, and set aside while the removals around it wait.
+    let draft = operations.fixture.make_own_file("draft", b"never uploaded").local_item_id;
+    operations.remove("draft", ItemKind::File).unwrap();
+    let retained = guard.retained(draft).unwrap();
+    let on_disk = operations.fixture.disk_path(retained.to_str().unwrap());
+    assert_eq!(std::fs::read(&on_disk).unwrap(), b"never uploaded");
+    // The one removal of a OneDrive file stays below a limit of one.
+    let bound = operations.fixture.show_onedrive_file("doc", b"cloud bytes").local_item_id;
+    operations.fixture.land_copy(bound, b"cloud bytes");
+    operations.remove("doc", ItemKind::File).unwrap();
+    assert!(!guard.blocks(draft) && !guard.blocks(bound), "nothing was charged for the draft");
+    assert!(guard.snapshot().unwrap().1.is_empty());
+
+    let now = crate::clock::unix_now();
+    let cleanup = |now| {
+        let guard = Arc::clone(&guard);
+        operations.fixture.read_rows(move |items| guard.retained_cleanup(items, now))
+    };
+    assert!(cleanup(now).is_empty(), "the removals' quiet time is not over");
+    assert_eq!(cleanup(now + 31), vec![(draft, retained.clone())]);
+    operations.fixture.run_on_write_operation_thread({ let files = operations.fixture.make_content_files(); move || files.retry_guard_removals().unwrap() });
+    assert!(!on_disk.exists());
+    assert!(guard.retained(draft).is_none());
+    assert!(guard.retained(bound).is_some(), "the OneDrive file's removal is still to be sent");
+}
+
+/// The ledger the user's daemon kept after LibreOffice removed two lock files: pending
+/// removals of files OneDrive never had, each with a set-aside copy of 91 bytes.
+#[test]
+fn the_start_retires_lingering_removals_of_files_onedrive_never_had() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("change-guard.json");
+    let removal = |item: i64, path: &str, disposition: &str| serde_json::json!({
+        "item": item, "kind": "Removal", "path": path, "bytes": 0, "after_bytes": 0,
+        "old_path": "", "directory": false, "descendants": 0, "revision": item - 11850,
+        "first_held_revision": item - 11850, "at": 1_761_700_000,
+        "generation": "None|None|None|None|None|None|None", "remote_generation": "None|None|None",
+        "write_count": null, "provisional": false, "disposition": disposition,
+    });
+    let retained = |item: i64, bound: bool| serde_json::json!({
+        "path": format!(".konedrive-change-guard/{item}-1761700000000000000"),
+        "content": { "ChangedHere": { "size": 91, "mtime": 1_761_700_000, "mtime_nsec": 0, "change_count": 1 } },
+        "bound": bound, "cleanup": false,
+    });
+    let ledger = serde_json::json!({
+        "epoch": "0123456789abcdef0123456789abcdef", "revision": 7,
+        "current": {
+            "11854:removal": removal(11854, ".~lock.Formatear Archivo de Rendicion.xlsx#", "Pending"),
+            "11855:removal": removal(11855, "Documents/Recipes/.~lock.REcipes.docx#", "Pending"),
+            "11856:removal": removal(11856, "Documents/held draft", "Held"),
+            "11857:removal": removal(11857, "Documents/bound unsent edits", "Pending"),
+        },
+        "retained": { "11854": retained(11854, false), "11855": retained(11855, false), "11856": retained(11856, false), "11857": retained(11857, true) },
+        "events": [], "latched": [], "sent": [], "clock": 1_761_700_000,
+    });
+    std::fs::write(&file, serde_json::to_vec(&ledger).unwrap()).unwrap();
+    let guard = Arc::new(ChangeGuard::open(file.clone(), GuardConfig::default()));
+    assert_eq!(guard.error(), None);
+    let operations = OperationsFixture::with_report_and_guard(|_| crate::status::report::Report::nowhere(), Some(Arc::clone(&guard)));
+    std::fs::create_dir_all(operations.fixture.disk_path(".konedrive-change-guard")).unwrap();
+    for item in [11854, 11855, 11856, 11857] {
+        std::fs::write(operations.fixture.disk_path(&format!(".konedrive-change-guard/{item}-1761700000000000000")), [b'x'; 91]).unwrap();
+    }
+
+    let mount = operations.fixture.build_mount();
+    for item in [11854, 11855] {
+        let id = LocalItemId::new(item);
+        assert!(guard.retained(id).is_none(), "{item}");
+        assert!(!operations.fixture.disk_path(&format!(".konedrive-change-guard/{item}-1761700000000000000")).exists(), "{item}");
+    }
+    assert!(guard.retained(LocalItemId::new(11856)).is_some(), "held for review: kept");
+    assert!(operations.fixture.disk_path(".konedrive-change-guard/11856-1761700000000000000").exists());
+    let bound = LocalItemId::new(11857);
+    assert!(operations.fixture.find_item(bound).is_none(), "the old bound row is missing");
+    assert!(guard.retained(bound).is_some(), "missing bound rows do not authorize cleanup");
+    let bound_path = operations.fixture.disk_path(".konedrive-change-guard/11857-1761700000000000000");
+    assert_eq!(std::fs::read(&bound_path).unwrap(), [b'x'; 91]);
+    operations.fixture.run_on_write_operation_thread({ let files = operations.fixture.make_content_files(); move || files.retry_guard_removals().unwrap() });
+    assert_eq!(std::fs::read(&bound_path).unwrap(), [b'x'; 91], "the next plan also keeps the bytes");
+    assert_eq!(guard.snapshot().unwrap().1.iter().map(|c| c.item).collect::<Vec<_>>(), vec![11856]);
+    mount.stop();
+    // What the start retired stays retired.
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert!(saved["current"].get("11854:removal").is_none() && saved["current"].get("11855:removal").is_none());
+    assert!(saved["retained"].get("11854").is_none() && saved["retained"].get("11855").is_none());
+    assert_eq!(saved["current"]["11857:removal"]["disposition"], "Pending");
+    assert_eq!(saved["retained"]["11857"]["cleanup"], false);
 }

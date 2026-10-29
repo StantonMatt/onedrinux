@@ -123,6 +123,9 @@ konedrivectl sync ignore [list | add <pattern> | remove <pattern>]
   sends them first and switches by itself; the command says
   `Switching to read-only: 3 changes still to send`, and `account mode` and `status` show it
   until the switch is made.
+- `account mode read-only` of an account that was read-write also says that Microsoft keeps the
+  permission to change its files until it is removed at <https://account.live.com/consent/Manage>;
+  konedrive changes nothing while the account is read-only.
 - `account mode read-only --force` switches now. What was not sent stays on this computer and is
   sent when the account is read-write again.
 - `account mode read-write` cancels a switch to read-only that waits.

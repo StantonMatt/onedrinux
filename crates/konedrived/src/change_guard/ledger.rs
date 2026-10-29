@@ -206,6 +206,7 @@ impl Ledger {
                 previous.generation = change.generation;
                 previous.remote_generation = change.remote_generation;
                 previous.revision = change.revision;
+                previous.provisional = false;
                 previous.directory = change.directory;
                 previous.old_path = change.old_path;
                 return true;
@@ -294,6 +295,26 @@ impl Ledger {
             }
         }
         true
+    }
+
+    /// The removal of a file OneDrive never had sends nothing, so it is never charged. It
+    /// waits with the removals around it and joins their hold, or `held` when its own
+    /// upload was held, so a restore can put it back with them; otherwise the start or a
+    /// plan retires it once the removals' quiet time is over (`retire_unsent_removals`).
+    pub(super) fn observe_unsent_removal(&mut self, mut change: Change, config: &GuardConfig, now: i64, held: bool) {
+        let now = now.max(self.clock);
+        self.clock = now;
+        self.revision = self
+            .revision
+            .checked_add(1)
+            .expect("change guard sequence exhausted");
+        change.revision = self.revision;
+        change.first_held_revision = self.revision;
+        change.at = now;
+        if held || (config.enabled && self.latched.contains(&Kind::Removal)) {
+            change.disposition = Disposition::Held;
+        }
+        self.current.insert(change.key(), change);
     }
 }
 

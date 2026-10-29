@@ -88,3 +88,25 @@ async fn write_scope_source_follows_persisted_changes_and_missing_accounts_deny(
     store.remove_account(&added.id).unwrap();
     assert!(!source.get().allows(Path::new("Trial/a")));
 }
+
+/// The sender reads the mode from `config.toml` at each admission: a switch to read-only
+/// stops it at once, whatever the scope allows; a missing account is read-only.
+#[tokio::test]
+async fn a_read_only_account_is_read_only_at_the_sender_whatever_its_scope() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = crate::config::Paths::in_dir(dir.path());
+    let store = Arc::new(ConfigStore::open(&paths, async { false }).await);
+    let added = store.add_account("Test").unwrap();
+    let source = store.write_scope(&added.id);
+    assert!(!source.is_read_only() && source.get().unrestricted());
+    store
+        .update_account(&added.id, |account| {
+            account.mode = Mode::ReadOnly;
+            Ok::<_, crate::config::ConfigError>(())
+        })
+        .unwrap();
+    assert!(source.is_read_only());
+    assert!(source.get().unrestricted(), "the scope alone would allow it");
+    assert!(store.write_scope(&AccountId::new("cccccccccccc")).is_read_only());
+    assert!(!WriteScopeSource::default().is_read_only());
+}

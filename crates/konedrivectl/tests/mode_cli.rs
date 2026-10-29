@@ -52,6 +52,7 @@ async fn account_mode_shows_the_mode_and_read_write_starts_its_sign_in_for_any_a
     let out = run(bus.address(), &["account", "mode", "read-only"]);
     assert!(out.status.success(), "{out:?}");
     assert!(out_text(&out).starts_with("Read-only"), "{out:?}");
+    assert!(!out_text(&out).contains("consent/Manage"), "read-only already: no word of a permission: {out:?}");
     assert_eq!(configured(), Mode::ReadOnly);
 
     for wrong in [&["account", "mode", "--force"][..], &["account", "mode", "writable"]] {

@@ -19,7 +19,8 @@ account, uses that access token to talk to Microsoft Graph, and never writes the
 disk, to a log, or anywhere else. In a development build only (the `dev-tools` cargo feature,
 which `scripts/dev-install.sh` uses), each account's `TokenExport` D-Bus interface hands out a
 short-lived (about one hour), read-only access token of that account for test runs, whatever the
-account's mode, never the refresh token. The
+account's mode, never the refresh token; it is refused when Microsoft's answer names a write
+permission, as it does for an account that once allowed writing (below). The
 released package has neither that interface nor `konedrivectl dev`, and its build fails if the
 daemon names the interface. A token that can change files (`TokenExport.ReadWrite`) is handed out
 only for a test account whose drive is listed in `write_test_drive_ids` in `config.toml`, which is
@@ -30,6 +31,17 @@ over D-Bus, and the account's token is never sent to it. No token and no URL rea
 error message: every request error the daemon turns into text leaves its URL out, so a
 pre-authenticated download or thumbnail link (whose query lets anyone holding it read that file
 until it expires) and a redirect's `Location` never reach the journal.
+
+## Read-only accounts
+
+A read-only account is kept from writing by KOneDrive itself, not by its token. It asks Microsoft
+for `Files.Read` at every refresh, but once the account has allowed `Files.ReadWrite`, Microsoft
+keeps that permission and the consumer endpoint grants it again with every token (measured
+2026-10-29); such a token very likely can write. KOneDrive refuses to: the folder of an account
+`config.toml` sets read-only is mounted read-only, so every change gets `EROFS`, its sending is
+held, and the sender stops every step of such an account before any request. To take the
+permission away from Microsoft's side as well, remove KOneDrive at
+<https://account.live.com/consent/Manage>.
 
 ## Reporting a vulnerability
 

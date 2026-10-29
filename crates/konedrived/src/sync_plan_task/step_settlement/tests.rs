@@ -223,3 +223,13 @@ fn the_first_filling_logs_no_item_shown_and_every_other_event() {
     // The cap per listing is of what OneDrive changed alone.
     assert_eq!(decide_events_to_log(&events, crate::status::activity::PER_KIND, false), [event(ActivityKind::Downloaded), event(ActivityKind::Conflict)]);
 }
+
+/// A folder's removal with no eTag says so, and waits in backoff as any failed try.
+#[test]
+fn a_folder_removal_without_an_etag_waits_with_its_own_reason() {
+    let mut folder = unsent(2, 7);
+    folder.onedrive_etag = None;
+    let step = SyncStep::OneDrive(OneDriveStep::SendDirectoryRemoval { item: folder, below: Vec::new() });
+    let settled = decide_step_settlement(&step, &StepOutcome::Failed(StepFailure::FolderNotDescribed), 0, NOW);
+    assert_eq!(settled.memory, vec![MemoryWrite::FailedTry { reason: Reason::FolderNotDescribed, next_try_at: Some(NOW + 1) }]);
+}

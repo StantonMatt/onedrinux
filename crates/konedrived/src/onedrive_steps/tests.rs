@@ -753,6 +753,23 @@ async fn write_scope_sender_checks_every_step_and_remote_rename_sources() {
     assert_eq!(folder.count("PATCH", "items/"), 0);
 }
 
+/// Microsoft keeps a write permission once given: a read-only account's token may well
+/// write. Every step is stopped at the sender all the same, with no request sent and no
+/// try counted.
+#[tokio::test]
+async fn a_read_only_account_sends_nothing_whatever_its_token_was_granted() {
+    use crate::config::WriteScopeSource;
+    for staged in StagedStep::ALL {
+        let (mut folder, step) = stage(staged).await;
+        folder.steps = folder.steps.with_write_scope(WriteScopeSource::of_read_only_account());
+        let before = folder.cloud_paths();
+        assert_eq!(folder.run(step).await, StepOutcome::NotRun(StepObstacle::SendingStopped), "{staged:?}");
+        assert_eq!(folder.cloud_paths(), before);
+        assert_eq!(folder.count(staged.request().0, staged.request().1), 0, "{staged:?}");
+        assert!(folder.records().is_empty());
+    }
+}
+
 #[tokio::test]
 async fn write_scope_sender_allows_in_scope_steps_and_checks_the_actual_destination() {
     use crate::config::{WriteScope, WriteScopeSource};

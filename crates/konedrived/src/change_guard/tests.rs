@@ -1121,3 +1121,136 @@ fn allow_and_restore_report_an_open_provisional_file_in_plain_words() {
         assert_eq!(result.failures, [(row.local_item_id.as_i64(), "new".into(), "it is open in another program".into())]);
     }
 }
+
+#[test]
+fn missing_bound_removals_stay_pending_without_recharging_or_extending_quiet_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("ledger.json");
+    let fixture = ItemFixture::new();
+    let guard = ChangeGuard::open(file.clone(), config());
+    let doc = fixture.show_onedrive_file("doc", b"cloud");
+    let id = doc.local_item_id;
+    guard.prepare_removal(&doc, "doc", 100, false).unwrap().unwrap();
+    drop(guard);
+
+    // A rebuilt store has no old row, but that is no proof of remote deletion.
+    let rebuilt = ItemFixture::new();
+    let guard = Arc::new(ChangeGuard::open(file, config()));
+    for now in [130, 140, 10_000] {
+        guard.observe(&[], now).unwrap();
+        let recovered = Arc::clone(&guard);
+        assert!(rebuilt.read_rows(move |items| recovered.retained_cleanup(items, now)).is_empty());
+        let inner = crate::panic::lock(&guard.inner);
+        assert_eq!(inner.ledger.current[&format!("{id}:removal")].disposition, Disposition::Pending);
+        assert!(!inner.ledger.retained[&id.as_i64()].cleanup);
+        assert_eq!(inner.ledger.events.iter().map(|c| c.count).sum::<u64>(), 1);
+        drop(inner);
+        assert!(!guard.blocks(id));
+        assert!(guard.change_quiet_until(now).is_empty());
+    }
+    // Confirmation still owns cleanup, even when Sent was never recorded.
+    guard.confirm_removals(&[id]).unwrap();
+    let retained = guard.retained(id).unwrap();
+    assert_eq!(rebuilt.read_rows(move |items| guard.retained_cleanup(items, 10_001)), vec![(id, retained)]);
+}
+
+#[test]
+fn unsent_removals_are_never_charged_and_retire_after_their_quiet_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = ItemFixture::new();
+    let guard = Arc::new(ChangeGuard::open(dir.path().join("ledger.json"), GuardConfig { removals: 1, ..config() }));
+    let cleanup = |now| {
+        let guard = Arc::clone(&guard);
+        fixture.read_rows(move |items| guard.retained_cleanup(items, now))
+    };
+    let removal = |c: &Disposition, id: LocalItemId| {
+        crate::panic::lock(&guard.inner).ledger.current.get(&format!("{id}:removal")).map(|r| r.disposition) == Some(*c)
+    };
+    // Left here and never in OneDrive: nothing is recorded or kept.
+    let lock = fixture.make_own_file(".~lock.a#", b"lock");
+    assert_eq!(guard.prepare_removal(&lock, ".~lock.a#", 100, true).unwrap(), None);
+    assert!(guard.retained(lock.local_item_id).is_none());
+    // Two files never uploaded are not charged: one OneDrive removal stays below the limit.
+    let drafts: Vec<_> = ["a", "b"].into_iter().map(|name| fixture.make_own_file(name, b"draft")).collect();
+    for draft in &drafts {
+        guard.prepare_removal(draft, "draft", 100, false).unwrap().unwrap();
+        fixture.remove_here(draft.local_item_id);
+        assert!(removal(&Disposition::Pending, draft.local_item_id));
+    }
+    let doc = fixture.show_onedrive_file("doc", b"cloud");
+    guard.prepare_removal(&doc, "doc", 110, false).unwrap().unwrap();
+    assert!(!guard.blocks(doc.local_item_id));
+    // They wait with the removals around them, then go with nothing sent.
+    assert!(cleanup(139).is_empty());
+    let retired = cleanup(140);
+    assert_eq!(retired.iter().map(|(id, _)| *id).collect::<Vec<_>>(), drafts.iter().map(|d| d.local_item_id).collect::<Vec<_>>());
+    assert!(drafts.iter().all(|d| crate::panic::lock(&guard.inner).ledger.current.get(&format!("{}:removal", d.local_item_id)).is_none()));
+    assert!(removal(&Disposition::Pending, doc.local_item_id), "a row still bound keeps its removal");
+    for (id, _) in retired {
+        guard.cleaned_retained(id).unwrap();
+    }
+
+    // Once removals are held, a removal that sends nothing joins the hold and keeps its bytes.
+    let other = fixture.show_onedrive_file("other", b"cloud");
+    guard.prepare_removal(&other, "other", 150, false).unwrap().unwrap();
+    assert!(guard.blocks(other.local_item_id));
+    let held = fixture.make_own_file("held", b"draft");
+    guard.prepare_removal(&held, "held", 151, false).unwrap().unwrap();
+    fixture.remove_here(held.local_item_id);
+    assert!(removal(&Disposition::Held, held.local_item_id));
+    assert!(cleanup(10_000).is_empty(), "held bytes wait for the user's decision");
+
+    // A file whose upload is held keeps its removal held, whatever the removals do.
+    let dir = tempfile::tempdir().unwrap();
+    let guard = ChangeGuard::open(dir.path().join("ledger.json"), GuardConfig { uploads: 0, ..config() });
+    let upload = fixture.make_own_file("upload", b"new");
+    guard.observe(&[(upload.clone(), "upload".into())], 100).unwrap();
+    assert!(guard.blocks(upload.local_item_id));
+    guard.prepare_removal(&upload, "upload", 101, false).unwrap().unwrap();
+    assert_eq!(crate::panic::lock(&guard.inner).ledger.current[&format!("{}:removal", upload.local_item_id)].disposition, Disposition::Held);
+    assert!(crate::panic::lock(&guard.inner).ledger.events.iter().all(|c| c.kind != Kind::Removal), "never charged");
+}
+
+/// A plan that read the row of a file OneDrive never had just before its unlink wrote the
+/// removal drops the removal's entry: the set-aside copy can be neither held nor restored
+/// any more, and goes at the next cleanup, even within the quiet time.
+#[test]
+fn a_set_aside_copy_whose_unsent_removal_no_entry_records_goes() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = ItemFixture::new();
+    let guard = Arc::new(ChangeGuard::open(dir.path().join("ledger.json"), config()));
+    let draft = fixture.make_own_file("draft", b"draft");
+    let aside = guard.prepare_removal(&draft, "draft", 100, false).unwrap().unwrap();
+    guard.observe(&[(draft.clone(), "draft".into())], 100).unwrap();
+    assert!(crate::panic::lock(&guard.inner).ledger.current.get(&format!("{}:removal", draft.local_item_id)).is_none());
+    let cleanup = |now| {
+        let guard = Arc::clone(&guard);
+        fixture.read_rows(move |items| guard.retained_cleanup(items, now))
+    };
+    assert!(cleanup(101).is_empty(), "its row still shows it");
+    fixture.remove_here(draft.local_item_id);
+    assert_eq!(cleanup(101), vec![(draft.local_item_id, aside)]);
+}
+
+/// `git init` unlinks a probe file it still holds open. A plan that reads the open row after
+/// the removal was recorded and before the unlink wrote it must not leave the removal
+/// provisional: its row is never read again, and its hold could never be decided.
+#[test]
+fn a_removal_recorded_while_its_file_is_open_stays_decidable() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = ItemFixture::new();
+    let guard = ChangeGuard::open(dir.path().join("ledger.json"), GuardConfig { removals: 0, uploads: 0, ..config() });
+    let probe = fixture.make_own_file("probe", b"probe");
+    let id = probe.local_item_id;
+    guard.observe(&[(probe, "probe".into())], 100).unwrap();
+    assert!(guard.blocks(id), "its upload is held");
+    fixture.write_rows(move |s| s.item_store().apply(&konedrive_tree::LocalVersionChange::OpenedForWriting { item: id }));
+    let open = fixture.find_item(id).unwrap();
+    guard.prepare_removal(&open, "probe", 101, false).unwrap().unwrap();
+    guard.observe(&[(open, "probe".into())], 101).unwrap();
+    fixture.remove_here(id);
+    let removal = crate::panic::lock(&guard.inner).ledger.current[&format!("{id}:removal")].clone();
+    assert!(!removal.provisional && removal.disposition == Disposition::Held, "{removal:?}");
+    let batch = guard.decide(&["removal".into()], true).unwrap();
+    assert_eq!(batch.iter().map(|c| c.item).collect::<Vec<_>>(), vec![id.as_i64()]);
+}
