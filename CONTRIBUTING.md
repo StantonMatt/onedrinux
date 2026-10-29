@@ -74,7 +74,7 @@ These rules hold for every change:
 2. **Tests are never in a source file.** The unit tests of `x.rs` are in `x/tests.rs`, or in
    `x/tests/` by topic. Integration tests stay in `crates/*/tests/`.
 3. **Layers.** In `konedrived`, a directory of `crates/konedrived/src` uses only the
-   directories before it in this order: `download_guard/`, `config/`, `account/`, `folder/`,
+   directories before it in this order: `download_guard/`, `change_guard/`, `config/`, `account/`, `folder/`,
    `conditions/`, `status/`, `content_source/`, `local/`, `sync_parts/`, `mount/`, `folder_steps/`,
    `onedrive_steps/`, `listing/`, `desktop/`, `upload_queue/`, `sync_plan_task/`, `sync_tasks/`,
    `account_folder/`, `daemon/`, `dbus/`. And `listing/` does not use `onedrive_steps/`. Test code is exempt. What a lower

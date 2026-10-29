@@ -355,7 +355,11 @@ with Unicode's forms of one letter. The plan does not depend on knowing:
 
 ### 6.6 What is not sent
 
-Asked before any step towards OneDrive (`sync_plan/sending_obstacle.rs`), the first that holds: an
+The change guard's held set comes first: `HeldForApproval` blocks sending and any
+reconciliation that would discard the held local version. Its quiet intervals are
+waits for a time. The sender checks admission again before mutating requests.
+
+Asked before any other step towards OneDrive (`sync_plan/sending_obstacle.rs`), the first that holds: an
 item left here; a name OneDrive cannot hold, where a name is sent; what OneDrive refused of the item,
 until the user acts; content while OneDrive is full, and within the quiet time; a next try still to
 come. Moves and removals go on while OneDrive is full. A file too large for OneDrive is not foreseen:
@@ -371,10 +375,14 @@ Steps towards the folder, of the rows and the downloads of pinned files run in e
 
 ### 6.8 What a removal takes
 
-There is none. A removal is planned and sent as any other change, however many files it takes
-([F302](../limitations/F302.md)). What the plan bounds is what a removal takes with it: a directory's
-removal only what the user saw and removed (§6.4); nothing because a file is missing from the disk
-at start ([F298](../limitations/F298.md)), and nothing because a name is ignored.
+The [change guard](change-guard.md) counts each removed item, including every descendant
+of a directory, before sending. Every removal has a thirty-second batching interval;
+a tripped batch waits for the user's Allow or Restore. Resident copies remain set aside
+until their removal commits or they are restored. The plan also bounds what a removal
+takes with it: a directory's removal only what the user saw and removed (§6.4); nothing
+because a file is missing from the disk at start ([F298](../limitations/F298.md)), and
+nothing because a name is ignored. OneDrive's independent folder-delete conditions are
+separate from this local admission.
 
 ## 7. A step
 
@@ -408,7 +416,9 @@ one statement:
 - a removal: the row keeps its binding alone.
 
 Where the commit finds a new item's row gone (removed here while it was sent), the step removes what
-it made (`onedrive_steps/made_items.rs`). After a restart it does not: such a file comes back.
+it made (`onedrive_steps/made_items.rs`). A file cleanup enters the durable leftover
+queue before guard admission, so quiet time, a hold or a restart cannot lose it. Its
+conditional deletion is abandoned if a later remote version or adoption makes it another's.
 
 ### 7.3 Refusals
 

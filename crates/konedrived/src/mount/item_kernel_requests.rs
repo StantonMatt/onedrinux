@@ -749,14 +749,14 @@ impl ItemKernelRequests {
     }
 
     /// Scope-only admission: pin/free-up/download never call this.
-    pub(super) fn check_write_scope(&self, item: LocalItemId, name: Option<&OsStr>) -> Result<(), Errno> {
-        self.write_operations.check_write_scope(item, name)
+    pub(super) fn check_write_scope(&self, item: LocalItemId, name: Option<&OsStr>, pid: u32) -> Result<(), Errno> {
+        self.write_operations.check_write_scope(item, name, pid)
     }
 
     /// open for writing, without `O_TRUNC`, on the mount's thread: what must be on disk
     /// first (`ItemWriteOperations::find_file_to_fill`). `EROFS` in a read-only folder.
-    pub(super) fn decide_open_to_write(&self, node: LocalItemId) -> Result<FileToFill, Errno> {
-        self.check_write_scope(node, None)?;
+    pub(super) fn decide_open_to_write(&self, node: LocalItemId, pid: u32) -> Result<FileToFill, Errno> {
+        self.check_write_scope(node, None, pid)?;
         self.write_operations.find_file_to_fill(node, None)
     }
 
@@ -766,28 +766,28 @@ impl ItemKernelRequests {
     /// writes `OpenedForWriting` for the first writer before the file is opened and
     /// answers `reply`. With nothing to fill, the caller queues the job at once
     /// ([`queue_open_to_write`](Self::queue_open_to_write)).
-    pub(super) async fn fill_and_open_to_write(&self, node: LocalItemId, fill: ItemToDownload, reply: ReplyTo<OpenedFile>) {
+    pub(super) async fn fill_and_open_to_write(&self, node: LocalItemId, fill: ItemToDownload, pid: u32, reply: ReplyTo<OpenedFile>) {
         match self.download_to_write(fill).await {
-            Ok(()) => self.queue_open_to_write(node, reply),
+            Ok(()) => self.queue_open_to_write(node, pid, reply),
             Err(errno) => reply(Err(errno)),
         }
     }
 
     /// `open_to_write` as a job of the write-operation thread, which answers `reply`.
-    pub(super) fn queue_open_to_write(&self, node: LocalItemId, reply: ReplyTo<OpenedFile>) {
+    pub(super) fn queue_open_to_write(&self, node: LocalItemId, pid: u32, reply: ReplyTo<OpenedFile>) {
         let write_operations = Arc::clone(&self.write_operations);
         self.queue_change(reply, move || {
-            write_operations.check_write_scope(node, None)?;
+            write_operations.check_write_scope(node, None, pid)?;
             write_operations.open_to_write(node).map(|opened| OpenedFile { fh: opened.fh, keeps_cache: false, direct_io: false })
         });
     }
 
     /// open with `O_TRUNC`. `open_to_overwrite` on the write-operation thread: nothing is
     /// downloaded.
-    pub(super) fn queue_open_to_overwrite(&self, node: LocalItemId, reply: ReplyTo<OpenedFile>) {
+    pub(super) fn queue_open_to_overwrite(&self, node: LocalItemId, pid: u32, reply: ReplyTo<OpenedFile>) {
         let write_operations = Arc::clone(&self.write_operations);
         self.queue_change(reply, move || {
-            write_operations.check_write_scope(node, None)?;
+            write_operations.check_write_scope(node, None, pid)?;
             write_operations.open_to_overwrite(node).map(|opened| OpenedFile { fh: opened.fh, keeps_cache: false, direct_io: false })
         });
     }
@@ -810,7 +810,7 @@ impl ItemKernelRequests {
         }
         let (write_operations, reply_attributes, name) = (Arc::clone(&self.write_operations), Arc::clone(&self.reply_attributes), name.to_owned());
         self.queue_change(reply, move || {
-            write_operations.check_write_scope(directory, Some(&name))?;
+            write_operations.check_write_scope(directory, Some(&name), thread_id)?;
             let mut made = write_operations.make(directory, &name, kind)?;
             if is_executable && made.item.kind == ItemKind::File && write_operations.set_executable_bit(made.item.local_item_id, true).is_ok() {
                 made.item.is_executable = true;
@@ -828,7 +828,7 @@ impl ItemKernelRequests {
         }
         let (write_operations, name) = (Arc::clone(&self.write_operations), name.to_owned());
         self.queue_change(reply, move || {
-            write_operations.check_write_scope(directory, Some(&name))?;
+            write_operations.check_write_scope(directory, Some(&name), thread_id)?;
             write_operations.remove(directory, &name, asked_kind)
         });
     }
@@ -836,10 +836,10 @@ impl ItemKernelRequests {
     /// rename. `ItemWriteOperations::rename` on the write-operation thread: the disk, then
     /// `Moved` or `SavedOver`. An exchange is `EINVAL` there, and `EROFS` here in a
     /// read-only folder.
-    pub(super) fn queue_rename(&self, directory: LocalItemId, name: &OsStr, new_directory: LocalItemId, new_name: &OsStr, mode: RenameMode, reply: ReplyTo<()>) {
+    pub(super) fn queue_rename(&self, directory: LocalItemId, name: &OsStr, new_directory: LocalItemId, new_name: &OsStr, mode: RenameMode, pid: u32, reply: ReplyTo<()>) {
         let (write_operations, name, new_name) = (Arc::clone(&self.write_operations), name.to_owned(), new_name.to_owned());
         self.queue_change(reply, move || {
-            write_operations.check_write_places(&[(directory, Some(&name)), (new_directory, Some(&new_name))])?;
+            write_operations.check_write_places(&[(directory, Some(&name)), (new_directory, Some(&new_name))], pid)?;
             write_operations.rename(directory, &name, new_directory, &new_name, mode)
         });
     }
@@ -849,8 +849,8 @@ impl ItemKernelRequests {
     /// its content on disk, and is asked nothing of its row: so a truncation through the
     /// handle of a file that was removed or saved over since is not refused here
     /// (`docs/design/mount.md` §4.1). `EROFS` in a read-only folder.
-    pub(super) fn decide_truncate(&self, node: LocalItemId, size: u64) -> Result<FileToFill, Errno> {
-        self.check_write_scope(node, None)?;
+    pub(super) fn decide_truncate(&self, node: LocalItemId, size: u64, pid: u32) -> Result<FileToFill, Errno> {
+        self.check_write_scope(node, None, pid)?;
         if self.item_handles.is_open_for_writing(node) {
             self.access_mode_switch.check_read_write()?;
             return Ok(FileToFill::Nothing);
@@ -861,13 +861,13 @@ impl ItemKernelRequests {
     /// The rest of a truncation: with a download, awaited on the runtime first; then
     /// [`queue_truncate`](Self::queue_truncate). With nothing to fill, the caller queues
     /// the job at once.
-    pub(super) async fn fill_and_truncate(&self, node: LocalItemId, fh: Option<Fh>, size: u64, fill: FileToFill, reply: ReplyTo<FileAttr>) {
+    pub(super) async fn fill_and_truncate(&self, node: LocalItemId, fh: Option<Fh>, size: u64, fill: FileToFill, pid: u32, reply: ReplyTo<FileAttr>) {
         let downloaded = match fill {
             FileToFill::Nothing => Ok(()),
             FileToFill::Download(file) => self.download_to_write(file).await,
         };
         match downloaded {
-            Ok(()) => self.queue_truncate(node, fh, size, reply),
+            Ok(()) => self.queue_truncate(node, fh, size, pid, reply),
             Err(errno) => reply(Err(errno)),
         }
     }
@@ -875,10 +875,10 @@ impl ItemKernelRequests {
     /// `ItemWriteOperations::truncate`, with the `fh` the request carries, as a job of the
     /// write-operation thread; the operation answers no attributes, and `reply` is
     /// answered as getattr answers, with the `fh` ([`WriteReplyAttributes`]).
-    pub(super) fn queue_truncate(&self, node: LocalItemId, fh: Option<Fh>, size: u64, reply: ReplyTo<FileAttr>) {
+    pub(super) fn queue_truncate(&self, node: LocalItemId, fh: Option<Fh>, size: u64, pid: u32, reply: ReplyTo<FileAttr>) {
         let (write_operations, reply_attributes) = (Arc::clone(&self.write_operations), Arc::clone(&self.reply_attributes));
         self.queue_change(reply, move || {
-            write_operations.check_write_scope(node, None)?;
+            write_operations.check_write_scope(node, None, pid)?;
             write_operations.truncate(node, fh, size)?;
             reply_attributes.find_attributes(node, fh)
         });
@@ -895,7 +895,7 @@ impl ItemKernelRequests {
         }
         let (write_operations, reply_attributes) = (Arc::clone(&self.write_operations), Arc::clone(&self.reply_attributes));
         self.queue_change(reply, move || {
-            write_operations.check_write_scope(node, None)?;
+            write_operations.check_write_scope(node, None, thread_id)?;
             write_operations.set_modified_time(node, fh, mtime, mtime_nsec)?;
             reply_attributes.find_attributes(node, fh)
         });
@@ -912,7 +912,7 @@ impl ItemKernelRequests {
         }
         let (write_operations, reply_attributes) = (Arc::clone(&self.write_operations), Arc::clone(&self.reply_attributes));
         self.queue_change(reply, move || {
-            write_operations.check_write_scope(node, None)?;
+            write_operations.check_write_scope(node, None, thread_id)?;
             write_operations.set_executable_bit(node, is_executable)?;
             reply_attributes.find_attributes(node, fh)
         });
@@ -921,9 +921,9 @@ impl ItemKernelRequests {
     /// write. `ItemHandles::find_file_to_write`, `mark_written`, the bytes into the
     /// backing file, on the mount's own thread. No row is touched (`docs/design/mount.md` §3.3). `EBADF`
     /// for a handle that may not write.
-    pub(super) fn answer_write(&self, fh: Fh, offset: u64, bytes: &[u8]) -> Result<u32, Errno> {
+    pub(super) fn answer_write(&self, fh: Fh, offset: u64, bytes: &[u8], pid: u32) -> Result<u32, Errno> {
         let (item, backing_file) = self.item_handles.find_file_to_write(fh).ok_or(Errno::EBADF)?;
-        self.write_operations.check_writer_scope(item)?;
+        self.write_operations.check_writer_scope(item, pid)?;
         self.item_handles.mark_written(item);
         backing_file.write_all_at(bytes, offset).map_err(|error| to_errno(&error))?;
         Ok(bytes.len() as u32)

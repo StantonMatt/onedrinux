@@ -8,8 +8,9 @@ import org.konedrive.app
 
 /// The OneDrive chosen in the sidebar on one page, the one the window opens on. In its header
 /// Sync Now, Pause (Resume while paused) and Open Folder. Then what its folder is doing or
-/// what stops it, with the one thing to do, and one line of what Issues lists; the apps the
-/// download guard blocked, with Allow; the space it takes, with Free Up Space and Unpin All;
+/// what stops it, with the one thing to do, one line of what Issues lists, and during a trial
+/// how many folders can be changed; the changes the
+/// change guard holds, by kind, with Review…; the apps the download guard blocked, with Allow; the space it takes, with Free Up Space and Unpin All;
 /// each way's speed over the last two minutes and what is left, the transfer pool, and the
 /// files moving now; and its History, folded until it is opened, with a search. An account with no folder yet has Choose Folder… in its head,
 /// and one whose syncing stopped only why, with Try Again and Use Another Folder….
@@ -298,6 +299,20 @@ ListPage {
                                 wrapMode: Text.Wrap
                                 color: Kirigami.Theme.neutralTextColor
                             }
+                            // A trial: only the folders OneDrive Settings lists can be changed.
+                            QQC2.Label {
+                                objectName: "trialLine"
+                                Layout.fillWidth: true
+                                visible: page.working && page.account.mode === "read-write" && page.account.writeScopeEnabled
+                                text: {
+                                    const count = page.account ? page.account.writePaths.length : 0;
+                                    return count === 0 ? i18n("No folder can be changed on this computer. Add one in OneDrive Settings.")
+                                                       : i18np("Changes are allowed only in 1 folder. OneDrive Settings lists it.",
+                                                               "Changes are allowed only in %1 folders. OneDrive Settings lists them.", count);
+                                }
+                                wrapMode: Text.Wrap
+                                color: Kirigami.Theme.neutralTextColor
+                            }
                             // The check of the local files at the start of the sync, while it runs.
                             QQC2.Label {
                                 objectName: "scanLine"
@@ -368,6 +383,51 @@ ListPage {
                     description: i18n("Issues says why, and what to do.")
                     icon.name: "dialog-warning"
                     onClicked: page.window.showPage("issues")
+                }
+            }
+
+            // The changes the change guard holds, by kind, which wait for the user on On Hold.
+            FormCard.FormHeader {
+                visible: heldCard.visible
+                title: i18nc("@title:group", "On hold")
+            }
+            FormCard.FormCard {
+                id: heldCard
+                objectName: "heldCard"
+                visible: page.working && Current.item !== null && Current.item.held.count > 0
+
+                Repeater {
+                    model: Current.item ? Current.item.held.kinds : []
+                    delegate: ColumnLayout {
+                        id: heldKind
+
+                        required property var modelData
+                        required property int index
+
+                        Layout.fillWidth: true
+                        spacing: 0
+
+                        FormCard.FormDelegateSeparator {
+                            visible: heldKind.index > 0
+                        }
+                        FormCard.FormTextDelegate {
+                            objectName: "heldKindRow"
+                            text: heldKind.modelData.countText
+                            description: heldKind.modelData.statusDetail
+                            leading: Kirigami.Icon {
+                                source: heldKind.modelData.iconName
+                                implicitWidth: Kirigami.Units.iconSizes.smallMedium
+                                implicitHeight: Kirigami.Units.iconSizes.smallMedium
+                            }
+                        }
+                    }
+                }
+                FormCard.FormDelegateSeparator {}
+                FormCard.FormButtonDelegate {
+                    objectName: "reviewHeldButton"
+                    text: i18nc("@action:button", "Review…")
+                    icon.name: "view-list-details"
+                    onClicked: page.window.showPage("onHold")
                 }
             }
 

@@ -987,27 +987,36 @@ Each has its file in `crates/konedrived/src/dbus/`.
 - `CMakeLists.txt` — the build; reads the version from `Cargo.toml`.
 - `main.cpp` — the program: single instance, the window, the tray.
 - `Main.qml` — the window: pages chosen from a sidebar, each shown only while there is something
-  on it to see or do; the sidebar's foot names the build, a newer release and a daemon of another
-  build.
+  on it to see or do (On Hold while changes are held); the sidebar's foot names the build, a newer
+  release and a daemon of another build.
 - `qmlregistration.h` — what the QML finds in `org.konedrive.app`.
 - `daemoncontroller.h`, `daemoncontroller.cpp` — the manager object, `org.konedrive.Accounts`.
 - `downloadguardcontroller.h`, `downloadguardcontroller.cpp` — the download guard,
   `org.konedrive.DownloadGuard`: its switch and limits, and the apps it blocked or has a rule for.
-- `accountsmodel.h`, `accountsmodel.cpp` — the accounts, each with its controllers; Sign In and
-  its link.
+- `changeguardcontroller.h`, `changeguardcontroller.cpp` — the change guard's settings,
+  `org.konedrive.ChangeGuard`: Hold large changes and its limits, for every account.
+- `heldchanges.h`, `heldchanges.cpp` — what the change guard holds of one account, with the token
+  it was listed with: by kind in the page's words, the open group's rows, Allow and Restore and
+  what they did.
+- `changeguardtypes.h` — the structured types of `org.konedrive.ChangeGuard`.
+- `accountsmodel.h`, `accountsmodel.cpp` — the accounts, each with its controllers and what is
+  held of it; Sign In and its link, and Sign In Read-Only Instead.
 - `currentaccount.h`, `currentaccount.cpp` — the account the window shows.
 - `folderchoice.h`, `folderchoice.cpp` — what a folder picked for an account is, as its folder
   (`checkFolder`), and `FolderChoice`: a free one registered, a folder that stopped forgotten
   first; why one that is not free is refused.
 - `foldertext.h` — a folder's path as the window writes it, from `~`.
+- `writescope.h` — a trial's folders: a folder picked, relative to the OneDrive folder, and the list
+  with a folder added (one covered changes nothing; one that covers others takes their place).
 - `timetext.h` — a moment as the window writes it: the time of day today, else the date too.
-- `accountcontroller.h`, `accountcontroller.cpp` — one account's `org.konedrive.Account`.
+- `accountcontroller.h`, `accountcontroller.cpp` — one account's `org.konedrive.Account`, a trial's
+  folders and its refused changes included.
 - `synccontroller.h`, `synccontroller.cpp` — one account's folder, for QML, with the speeds and
   transfers of the last two minutes for the charts.
 - `synctypes.h` — the structured types of the folder's interfaces.
 - `skippeditem.h` — one entry of `Skipped()` and of `NotUploaded()`.
 - `accountstatus.h`, `accountstatus.cpp` — one summary of an account and its folder: the state
-  the daemon decided (`Folder.Overall`), in words by its reason.
+  the daemon decided (`Folder.Overall`), in words by its reason; "held" while changes are held.
 - `appstatus.h`, `appstatus.cpp` — the whole app's state, for the tray: the worst of the accounts'.
 - `activitymodel.h`, `activitymodel.cpp` — the activity list: as many events as the daemon keeps.
 - `conflictmodel.h`, `conflictmodel.cpp` — the "Kept Both Versions" list.
@@ -1018,9 +1027,12 @@ Each has its file in `crates/konedrived/src/dbus/`.
   sentences as `konedrivectl`'s, compared by its test.
 - `generated/reasontexts.h`, `generated/reasontexts.cpp` — generated from `konedrive-text`, not
   edited: the window's sentence for every reason, and how a reason is cut into its parts.
-- `notifier.h`, `notifier.cpp` — the notifications; `GuardNotifier`, the download guard's.
+- `notifier.h`, `notifier.cpp` — the notifications, a change refused outside a trial's folders
+  included; `GuardNotifier`, the download guard's;
+  `ChangeNotifier`, an account's changes on hold, with Review… and Restore.
 - `windowsection.h` — where a click on a notification opens the window: Status, Status with its
-  History unfolded, a section of Issues, or Settings' apps the download guard blocked.
+  History unfolded, On Hold, a section of Issues, Settings' apps the download guard blocked, or
+  OneDrive Settings' Sync card.
 - `konedrive.notifyrc` — the notification events.
 - `trayicon.h`, `trayicon.cpp` — the app in the tray: one icon for every account, or one each.
 - `trayitem.h`, `trayitem.cpp` — one tray icon and its menu.
@@ -1047,7 +1059,8 @@ Each has its file in `crates/konedrived/src/dbus/`.
 - `SignInPage.qml` — adding a OneDrive: Sign In for the first one, the wait for Microsoft's sign-in
   in the browser, its link, Cancel.
 - `StatusPage.qml` — the start page: Sync Now, Pause and Open Folder; what the folder is doing or
-  what stops it, with the one thing to do, and a line of what Issues lists; the space, with Free Up
+  what stops it, with the one thing to do, and a line of what Issues lists; what is on hold, with
+  Review…; the space, with Free Up
   Space and Unpin All; each way's card, the pool and the files moving now; History, folded, with
   its search. With no working folder, choosing one.
 - `StorageBar.qml` — the space in one bar: what is on this device and the rest of what is used in
@@ -1064,12 +1077,16 @@ Each has its file in `crates/konedrived/src/dbus/`.
 - `AnotherFolderDialog.qml` — that question before another folder is used.
 - `ListPage.qml` — a page that is one long list, drawn as a page of FormCards.
 - `FormCardRow.qml` — a row of that list, on a card-coloured band.
-- `IssuesPage.qml` — what needs the user, in one list: the changes that can't upload, the files
-  whose both versions were kept, what can't be shown in the folder.
+- `OnHoldPage.qml` — the changes the change guard holds, for review: a card per kind with its two
+  buttons, Allow All and Restore All, the open group's items, what was sent before the hold, and
+  what the decisions did.
+- `IssuesPage.qml` — what needs the user, in one list: the changes that can't upload (Upload for a
+  file Don't Upload kept here), the files whose both versions were kept, what can't be shown in the
+  folder.
 - `OneDriveSettingsPage.qml` — one OneDrive's settings: its account, two-way sync, folder,
   previews and the free space its downloads leave.
 - `SettingsPage.qml` — the whole app's settings, the download guard with its limits and its apps,
-  and Quit.
+  Hold large changes with its limits, and Quit.
 - `GuardAppRow.qml` — one app the download guard blocked or has a rule for, with its buttons; on
   Settings and Status.
 - `ServiceCard.qml` — the KOneDrive service is not running: start it, or read its log.
@@ -1089,6 +1106,12 @@ Each has its file in `crates/konedrived/src/dbus/`.
 - `notifiertest.cpp` — `Notifier`.
 - `downloadguardtest.cpp` — `DownloadGuardController`, `GuardNotifier`.
 - `guardpagestest.cpp` — the download guard on Settings, Status and OneDrive Settings.
+- `changeguardtest.cpp` — `ChangeGuardController`, `HeldChanges`, `ChangeNotifier`, and Status
+  while changes are held.
+- `onholdpagetest.cpp` — the change guard in the window: On Hold, Status' card, Settings' switch
+  and limits.
+- `trialtest.cpp` — two-way by default and a trial's folders: Sign In Read-Only Instead, OneDrive
+  Settings' Sync card, the refused-change notification and Status' line.
 - `dialogstest.cpp` — the window's pages and confirmations, against the fake daemon.
 - `serviceunittest.cpp` — `ServiceUnit`.
 - `releasechecktest.cpp` — `BuildVersion`, what a latest release is to a build, a case each, and
@@ -1166,7 +1189,7 @@ suite".
 - `file_writes.sh` — the group `file_writes`: what a program's changes become in OneDrive.
 - `file_reads.sh` — the group `file_reads`: reads, downloads, free-up.
 - `download_guard.sh` — the group `download_guard`: app-download reclamation and its keep/open skip rules, bulk and background refusals, explicit actions,
-  low-space ranges, already-open handles and mmap.
+  initial-placement readiness, missing-name accounting, low-space ranges, already-open handles and mmap.
 - `daemon_restarts.sh` — the group `daemon_restarts`: stops and kills in the middle of work.
 - `crash_consistency.sh` — by-name-only group: two boots on one disk with guest SysRq power loss, edit/rename/missing-copy recovery and a mid-migration cut.
 - `store_durability.py` — focused 10,000-create/1,000-rewrite/delete harness comparing SQLite NORMAL and FULL.
@@ -1288,8 +1311,15 @@ checks folder conditions and atomic saves crossing upload requests, without a mo
 - `crates/konedrived/src/config/write_scope.rs` — relative subtree validation and live account
   scope sources; `config/write_scope/tests.rs` checks validation, configuration round trips,
   existing mode defaults and updates.
+- `crates/konedrived/src/config/write_refusals.rs` — per-account bounded refusal channel,
+  overflow counts and 10-second coalescing; `config/write_refusals/tests.rs` checks timing,
+  saturation, final burst delivery, account isolation and weak entry cleanup.
+- `crates/konedrived/src/dbus/account/tests.rs` — actual Account exporter and generated
+  client's `WriteRefused` payload and burst contract on a private bus. The FUSE VM harness
+  serves SyncService without an Account D-Bus object, so this is its signal-test fallback.
 - `crates/konedrived/src/mount/item_write_operations/write_scope.rs` — common scope admission
-  used by kernel dispatch; tests in `mount/item_kernel_requests/tests/write_scope.rs`.
+  used by kernel dispatch, carrying the request PID and existing containing folder into
+  refusal reports; tests in `mount/item_kernel_requests/tests/write_scope.rs`.
 - `crates/konedrived/src/onedrive_steps/write_scope.rs` — local and remote path admission for
   every outgoing step, resumed sessions and cleanup references; tests in `onedrive_steps/tests.rs`
   and `onedrive_steps/content_upload/tests.rs`. Scope-only checks also protect upload retry
@@ -1299,3 +1329,26 @@ checks folder conditions and atomic saves crossing upload requests, without a mo
 - `tests/fuse-probe/file_writes.sh` — `write_scope_allows_only_the_trial_subtree`, real kernel
   refusal of outside mutations and successful inside writes; run with the `file_writes` group.
   The VM suite builds debug by default (`FUSE_PROBE_PROFILE=release` for a release build).
+### Outgoing change guard
+
+- `crates/konedrived/src/change_guard/mod.rs`: per-account mutation admission, immutable batches and retained-copy ownership.
+- `crates/konedrived/src/change_guard/batches.rs`: persistent snapshot tokens, scoped decisions, local-only Upload and restore progress.
+- `crates/konedrived/src/change_guard/rows.rs`: folded folder rows and per-kind review details.
+- `crates/konedrived/src/change_guard/ledger.rs`: durable values, time buckets, thresholds and atomic state-file writes.
+- `crates/konedrived/src/change_guard/tests.rs`: window, repeated rewrite, concurrency, restart, descendant and cleanup tests.
+- `crates/konedrived/src/config/change_guard.rs` and `config/change_guard/tests.rs`: daemon-wide settings, legacy per-account migration and the guard registry.
+- `crates/konedrive-tree/src/item_store/guard_restore.rs` and `guard_restore/tests.rs`: conditional removal/rewrite restore transactions; reserved retained paths are validated in `place_change_records.rs`.
+- `crates/konedrive-tree/src/sync_plan/tests/change_guard.rs`: outgoing and reconciliation holds, descendants and quiet time.
+- `crates/konedrived/src/mount/item_mount/guard_restore.rs`: serialized no-replace disk restoration and conflict copies.
+- `crates/konedrived/src/mount/item_write_operations/tests/change_guard.rs`: offline retained copies and collision tests.
+- `crates/konedrived/src/account_folder/change_guard/tests.rs`: offline admission, partial restore results and terminal progress.
+- `crates/konedrived/src/account_folder/change_guard.rs`: token-scoped account Allow/Restore results and progress orchestration.
+- `crates/konedrived/src/dbus/change_guard.rs`: backend interface and per-account signal tasks; contract tested in `crates/konedrived/tests/accounts.rs`.
+- `dbus/org.konedrive.ChangeGuard.xml` and `crates/konedrive-dbus/src/change_guard.rs`: checked-in contract and Rust client.
+- `crates/konedrivectl/src/commands/changes.rs`: status, held/sent history, Allow, Restore and settings commands.
+- `tests/fuse-probe/mass_changes.sh`: fake-cloud bulk mutation drills, token-scoped decisions and restore results; run through `tests/fuse-probe/run.sh mass_changes`.
+- `docs/design/change-guard.md`: thresholds, persistence, retained bytes, approval and restore semantics.
+
+- `crates/konedrived/src/change_guard/recovery.rs`: restore receipts, listing retirement and durable retained-cleanup ownership.
+- `crates/konedrived/src/mount/item_mount/guard_restore/tests.rs`: off-thread retained verification and inode revalidation.
+- `crates/konedrivectl/tests/changes_cli.rs`: account selection rejected for shared guard settings.

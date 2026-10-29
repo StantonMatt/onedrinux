@@ -36,7 +36,10 @@ pub(crate) async fn export(
     server.at(path, Conflicts::new(Arc::clone(&service))).await?;
     server.at(path, LocalScan::new(Arc::clone(&service))).await?;
     server.at(path, ActivityLog::new(Arc::clone(&service))).await?;
-    start_signals(connection, path, service).await
+    let changes = service.change_guard().ok().map(|guard| super::change_guard::start_signals(connection, service.account_id().to_owned(), guard));
+    let mut tasks = start_signals(connection, path, service).await?;
+    tasks.extend(changes);
+    Ok(tasks)
 }
 
 /// Takes one account's folder off the bus (`Accounts.Remove`, and an account whose adding
@@ -89,6 +92,7 @@ impl Bus for OnBus {
         server.at(ACCOUNTS_PATH, Files { manager: Arc::clone(manager) }).await?;
         server.at(ACCOUNTS_PATH, super::download_guard::DownloadGuard { config: Arc::clone(manager.config()), manager: Arc::clone(manager) }).await?;
         super::download_guard::start_signals(connection, manager.config());
+        server.at(ACCOUNTS_PATH, super::change_guard::ChangeGuard { manager: Arc::clone(manager) }).await?;
         #[cfg(feature = "dev-tools")]
         server.at(ACCOUNTS_PATH, crate::dbus::dev_tools::DevTools { manager: Arc::clone(manager) }).await?;
         Ok(())

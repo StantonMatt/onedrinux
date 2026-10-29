@@ -6,6 +6,7 @@ pub(crate) mod dev;
 pub(crate) mod login;
 pub(crate) mod settings;
 pub(crate) mod guard;
+pub(crate) mod changes;
 pub(crate) mod status;
 pub(crate) mod sync;
 pub(crate) mod version;

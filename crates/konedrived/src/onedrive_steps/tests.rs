@@ -777,3 +777,78 @@ async fn write_scope_rechecks_current_locations_after_a_step_was_planned() {
         assert_eq!(folder.graph.with(|cloud| cloud.at(path).unwrap().content.clone()), b"old");
     }
 }
+
+#[tokio::test]
+async fn sender_scope_precedes_guard_admission_and_a_hold_still_blocks_in_scope() {
+    use crate::config::{WriteScope, WriteScopeSource};
+    let dir = tempfile::tempdir().unwrap();
+    let guard = Arc::new(crate::change_guard::ChangeGuard::open(dir.path().join("guard.json"), crate::change_guard::GuardConfig { uploads: 0, ..Default::default() }));
+    let fixture = ItemFixture::with_change_guard(Some(Arc::clone(&guard)));
+    let file = fixture.make_own_file("new.txt", b"unique local bytes");
+    let mut folder = StepsFolder::start(fixture).await;
+    let step = OneDriveStep::SendNewFile { item: ItemVersions::of(&file), parent: StepsFolder::root(), name: "new.txt".into() };
+    folder.steps = folder.steps.with_write_scope(WriteScopeSource::new(|| WriteScope::parse(Some(&["Trial".into()])).unwrap()));
+    assert!(matches!(folder.run(step.clone()).await, StepOutcome::Refused(StepRefusal::Transient { .. })));
+    assert!(!guard.blocks(file.local_item_id), "a rejected scope check never admits the generation");
+    folder.steps = folder.steps.with_write_scope(WriteScopeSource::default());
+    assert_eq!(folder.run(step).await, StepOutcome::NotRun(StepObstacle::SendingStopped));
+    assert!(guard.blocks(file.local_item_id));
+    assert_eq!(folder.count("PUT", ""), 0);
+    assert_eq!(folder.count("POST", ""), 0);
+    assert_eq!(folder.fixture.read_disk_file("new.txt").unwrap(), b"unique local bytes");
+}
+
+#[tokio::test]
+async fn a_guard_trip_while_metadata_waits_for_a_slot_prevents_the_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let guard = Arc::new(crate::change_guard::ChangeGuard::open(dir.path().join("guard.json"), crate::change_guard::GuardConfig { enabled: false, ..Default::default() }));
+    let fixture = ItemFixture::with_change_guard(Some(Arc::clone(&guard)));
+    let row = fixture.make_own_directory("first");
+    let folder = Arc::new(StepsFolder::start(fixture).await);
+    folder.pool.set_paused(true);
+    let running = tokio::spawn({
+        let folder = Arc::clone(&folder);
+        async move { folder.run(OneDriveStep::MakeDirectory { item: ItemVersions::of(&row), parent: StepsFolder::root(), name: "first".into() }).await }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !folder.pool.waiting() { tokio::task::yield_now().await; }
+    }).await.expect("the sender waits for metadata admission");
+    guard.configure(crate::change_guard::GuardConfig { uploads: 0, ..Default::default() });
+    let later = folder.fixture.make_own_directory("later");
+    guard.observe(&[(later, "later".into())], (folder.fixture.clock())()).unwrap();
+    folder.pool.set_paused(false);
+    assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(5), running).await.unwrap().unwrap(), StepOutcome::NotRun(StepObstacle::SendingStopped));
+    assert_eq!(folder.count("POST", ""), 0);
+    assert!(folder.records().is_empty(), "a request which never left has no uncertain record");
+}
+
+#[tokio::test]
+async fn approved_rewrites_survive_their_sent_move_but_not_a_later_edit() {
+    let dir = tempfile::tempdir().unwrap();
+    let guard = Arc::new(crate::change_guard::ChangeGuard::open(
+        dir.path().join("guard.json"),
+        crate::change_guard::GuardConfig { rewrites: 0, moves: 0, ..Default::default() },
+    ));
+    let fixture = ItemFixture::with_change_guard(Some(Arc::clone(&guard)));
+    let file = fixture.show_onedrive_file("original.txt", b"cloud bytes").local_item_id;
+    fixture.land_copy(file, b"cloud bytes");
+    let folder = StepsFolder::start(fixture).await;
+    folder.fixture.change_file_here(file, b"first edit");
+    let moved = folder.fixture.move_here(file, "renamed.txt");
+    let now = (folder.fixture.clock())();
+    guard.observe(&[(moved.clone(), "renamed.txt".into())], now).unwrap();
+    assert_eq!(guard.decide(&[], false).unwrap().len(), 2);
+    assert!(matches!(folder.run(OneDriveStep::SendMove {
+        item: ItemVersions::of(&moved), parent: StepsFolder::root(), name: "renamed.txt".into(),
+    }).await, StepOutcome::Written { .. }));
+    let row = folder.fixture.find_item(file).unwrap();
+    guard.observe(&[(row.clone(), "renamed.txt".into())], now).unwrap();
+    assert!(!guard.blocks(file), "our sent move preserves the rewrite approval");
+    assert!(guard.admit(&OneDriveStep::SendContent { item: ItemVersions::of(&row) }, now).unwrap());
+    // Same size and time still has a distinct local rewrite counter.
+    let edited = folder.fixture.change_file_here(file, b"later edit");
+    guard.observe(&[(edited.clone(), "renamed.txt".into())], now).unwrap();
+    assert!(guard.blocks(file));
+    assert!(!guard.admit(&OneDriveStep::SendContent { item: ItemVersions::of(&edited) }, now).unwrap());
+    assert_eq!(folder.count("PUT", ""), 0);
+}

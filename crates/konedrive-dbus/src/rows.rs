@@ -139,3 +139,34 @@ pub struct GuardApp {
     pub files: u64,
     pub bytes: u64,
 }
+
+/// A version held by ChangeGuard, or an already-sent operation in its separate history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct HeldChange {
+    pub item: i64,
+    pub path: String,
+    pub kind: String,
+    pub bytes: u64,
+    pub since: i64,
+    pub generation: String,
+    pub state: String,
+    pub directory: bool,
+    /// Known descendants, excluding the folder itself.
+    pub descendants: u64,
+    pub after_bytes: u64,
+    /// Empty except for moves. `path` is the new path.
+    pub old_path: String,
+    pub sent: bool,
+}
+
+/// Outcome of a local guard decision. Allow's done count means released for sending,
+/// not acknowledged by Graph. Pending-offline is also released, durably queued.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct GuardResult {
+    pub done: u64,
+    pub pending_offline: u64,
+    pub failed: u64,
+    pub kept_both_versions: u64,
+    /// One (item id, relative path, plain-text reason) per failed entry.
+    pub failures: Vec<(i64, String, String)>,
+}

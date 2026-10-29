@@ -179,3 +179,14 @@ async fn a_throttled_fragment_goes_again_to_the_same_session() {
     let methods: Vec<String> = refusing.received_requests().await.unwrap().iter().map(|r| r.method.to_string()).collect();
     assert_eq!(methods, ["PUT", "GET", "PUT"], "two sends in all, and no cancel");
 }
+
+#[tokio::test]
+async fn a_single_fragment_attempt_returns_retryable_failures_to_admission() {
+    for status in [429, 503] {
+        let up = MockServer::start().await;
+        Mock::given(method("PUT")).respond_with(ResponseTemplate::new(status).insert_header("Retry-After", "0")).expect(1).mount(&up).await;
+        let drive = client(&up).with_retry(RetryPolicy { attempts: 3, default_wait: Duration::ZERO, max_wait: Duration::ZERO });
+        assert!(drive.upload_chunk_once(&format!("{}/up/session", up.uri()), 0, 1, vec![1]).await.is_err());
+        assert_eq!(up.received_requests().await.unwrap().len(), 1, "a retry must return through the sender's guard");
+    }
+}

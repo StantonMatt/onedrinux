@@ -295,6 +295,7 @@ impl ItemWriteOperations {
             RenameDiskChange::SetAside { replaced } => PlaceChangeRecord::SetAside { item: *replaced, place: to_place, aside_name: make_aside_entry_name(*replaced) },
             RenameDiskChange::Nothing => {
                 self.run_store_job("a rename could not be written", move |store| store.item_store().apply(&row_change))?;
+                self.observe_guard_item(item);
                 self.wake_plan();
                 return Ok(());
             }
@@ -314,6 +315,7 @@ impl ItemWriteOperations {
         self.reach(super::tests::OperationPoint::DiskChanged);
         let (_, undo) = self.write_row_or_undo(&change, undo, record, move |store| store.item_store().settle_place_change_record(record, &PlaceChangeRowWrite::LocalVersion(row_change)))?;
         change.end();
+        self.observe_guard_item(item);
         self.place_changes.discard(undo);
         self.mark_saved_over_file(&case, &to_path);
         Ok(())

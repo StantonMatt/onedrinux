@@ -396,6 +396,7 @@ impl LostAnswers {
         };
         let record = record.clone();
         let _tree = self.tree_lock.lock().await;
+        let guard = self.graph.change_guard.clone();
         self.graph
             .store
             .call(move |store| {
@@ -405,6 +406,13 @@ impl LostAnswers {
                     return Ok(SettledRecord::Settled);
                 }
                 if is_of_kind {
+                    if let Some(guard) = &guard {
+                        if matches!(record.request, RecordedRequest::SendFileRemoval | RecordedRequest::SendDirectoryRemoval) && confirmed.is_none() {
+                            let mut ids = vec![versions.local_item_id];
+                            if matches!(record.request, RecordedRequest::SendDirectoryRemoval) { ids.extend(store.item_store().list_below_in_onedrive(versions.local_item_id)?.iter().map(|r| r.local_item_id)); }
+                            guard.confirm_removals(&ids).map_err(|e| TreeError::Io(std::io::Error::other(e)))?;
+                        }
+                    }
                     match commit_settled_request(store, &record, &versions, confirmed.as_ref()) {
                         Ok(StepCommitOutcome::Written) => tracing::info!("the request of item {} whose answer was lost went through: its answer is written", record.item),
                         Ok(StepCommitOutcome::RowsChanged) => {}

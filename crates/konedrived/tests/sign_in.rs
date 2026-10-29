@@ -118,14 +118,15 @@ impl Setup {
     }
 
     /// The daemon has `accounts` accounts and nothing else: in `List`, in `config.toml`,
-    /// in the state directory, in the wallet, on the bus and among the folders. So a
+    /// in the live state directories, in the wallet, on the bus and among the folders.
+    /// Removed accounts' preserved archives are not live accounts. So a
     /// sign-in that is under way, or did not succeed, has made nothing.
     async fn there_are(&self, accounts: usize) {
         assert_eq!(self.manager.list().await.unwrap().len(), accounts, "List");
         let config = self.config_text();
         assert_eq!(config.matches("[[accounts]]").count(), accounts, "{config}");
         let dirs: Vec<_> = std::fs::read_dir(Paths::in_dir(self.dir.path()).state_dir.join("accounts"))
-            .map(|d| d.flatten().map(|e| e.path()).collect())
+            .map(|d| d.flatten().filter(|e| !e.file_name().to_string_lossy().contains(".removed-")).map(|e| e.path()).collect())
             .unwrap_or_default();
         assert_eq!(dirs.len(), accounts, "the state directory: {dirs:?}");
         assert_eq!(self.wallet.count(), accounts, "the stored tokens");
@@ -171,9 +172,20 @@ async fn a_sign_in_that_succeeds_makes_the_account_under_its_email() {
     s.there_are(1).await;
     s.no_more_finished().await;
 
-    // It is an account like any other: it is removed.
+    // The guard has durable state even before the first folder is mounted. Removing
+    // the account must archive this evidence just as it archives a tree store.
+    let id = id_of(&path);
+    let guard = konedrive_dbus::change_guard::ChangeGuardProxy::new(&s.client).await.unwrap();
+    guard.list_held(id.as_str()).await.unwrap();
+    let accounts_dir = Paths::in_dir(s.dir.path()).state_dir.join("accounts");
+    let ledger = std::fs::read(accounts_dir.join(id.as_str()).join("change-guard.json")).unwrap();
     s.manager.remove(&OwnedObjectPath::try_from(path).unwrap().as_ref()).await.unwrap();
     s.there_are(0).await;
+    let archives: Vec<_> = std::fs::read_dir(&accounts_dir).unwrap().flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with(&format!("{}.removed-", id.as_str())))
+        .collect();
+    assert_eq!(archives.len(), 1, "the removed account's state is preserved once");
+    assert_eq!(std::fs::read(archives[0].path().join("change-guard.json")).unwrap(), ledger);
     s.no_more_finished().await;
 }
 

@@ -129,6 +129,8 @@ use step_settlement::{CycleRequest, StepSettlement};
 
 /// The parts a plan's task is made of: each made before it by the folder's start.
 pub(crate) struct SyncPlanTaskParts {
+    pub(crate) change_guard: Option<Arc<crate::change_guard::ChangeGuard>>,
+    pub(crate) retained_cleanup: Option<(Arc<crate::mount::ItemContentFiles>, Arc<crate::mount::WriteOperationThread>)>,
     pub(crate) store: Store,
     pub(crate) sync_plan_wake: Arc<SyncPlanWake>,
     /// What runs the steps: the three runners behind one seam, or the tests' stand-in.
@@ -739,7 +741,27 @@ impl SyncPlanTask {
     /// those the round answers (`PlannedRound::local_step_tries`): the ones the rows of
     /// that reading still say.
     async fn make_plan(&self, facts: DaemonFacts) -> Result<PlannedRound, konedrive_tree::TreeError> {
-        let round = self.parts.store.read_items(move |items| plan_input::plan_next_steps(items, &facts)).await?;
+        if let Some((files, thread)) = &self.parts.retained_cleanup {
+            let files = Arc::clone(files);
+            thread.run_and_wait(move || files.retry_guard_removals()).await
+                .map_err(|e| konedrive_tree::TreeError::Io(std::io::Error::other(e)))??;
+        }
+        let guard = self.parts.change_guard.clone();
+        let round = self.parts.store.read_items(move |items| {
+            if let Some(guard) = &guard {
+                guard.reconcile_cleanups(items)?;
+                let rows = items.list_unsent(None, usize::MAX)?.into_iter().map(|row| {
+                    let path = items.find_path(row.local_item_id)?.or(items.find_synced_path(row.local_item_id)?).unwrap_or_default();
+                    Ok((row, path.display().to_string()))
+                }).collect::<Result<Vec<_>, konedrive_tree::TreeError>>()?;
+                // On persistence failure every pending row is blocked, including rows
+                // first seen in this reading. The sender independently fails closed.
+                let failed = guard.observe_items(items, &rows, facts.now).is_err();
+                let mut held = guard.held();
+                if failed { held.extend(rows.iter().map(|(r,_)| r.local_item_id)); }
+                plan_input::plan_next_steps_with_guard(items, &facts, held, guard.local_only(), guard.change_quiet_until(facts.now))
+            } else { plan_input::plan_next_steps(items, &facts) }
+        }).await?;
         *crate::panic::lock(&self.local_step_tries) = round.local_step_tries.clone();
         missing_pinned_files::log_download_news(self.missing_pinned_files.note_reading(round.pinned_files_reading), &self.parts.folder);
         Ok(round)

@@ -256,6 +256,11 @@ public:
     /// Folder.Register; a refusal is actionError. A folder that is not there yet is made
     /// first (only it, not the directories above it).
     Q_INVOKABLE void chooseFolder(const QUrl &folder);
+    /// `folder` relative to the drive root, as a trial's folders are: empty for the OneDrive
+    /// folder itself and for anything outside it.
+    Q_INVOKABLE QString folderInside(const QUrl &folder) const;
+    /// The folder as a file URL, where a folder dialog opens.
+    Q_INVOKABLE QUrl rootUrl() const { return QUrl::fromLocalFile(m_rootPath); }
     Q_INVOKABLE void forget();
     /// Folder.Unregister, and `then` once the daemon has forgotten the folder: FolderChoice
     /// gives an account whose folder stopped another one so. Not after a refusal, which is
@@ -271,6 +276,11 @@ public:
     Q_INVOKABLE void openFolder();
     /// Opens the drive on the OneDrive website (Files.WebUrl of the folder); a refusal is actionError.
     Q_INVOKABLE void openOnWeb();
+    /// Opens the drive's recycle bin on the OneDrive website, worked out from the same address.
+    Q_INVOKABLE void openRecycleBin();
+    /// The recycle bin's address for the drive at `webUrl`: a work or school drive's
+    /// RecycleBin.aspx on its SharePoint site, else OneDrive's own.
+    static QUrl recycleBinUrl(const QUrl &webUrl);
     /// ActivityLog.Recent(ActivityModel::Capacity) into `activity`.
     Q_INVOKABLE void loadActivity();
     /// Conflicts.List() into `conflicts`.

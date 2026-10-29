@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct Caller {
+pub(crate) struct Caller {
     pub identity: String,
     pub display_name: String,
     pub reader: String,
@@ -31,7 +31,7 @@ pub(super) const BACKGROUND_READERS: &[&str] = &[
 ];
 
 #[derive(Default)]
-pub(super) struct Callers(Mutex<HashMap<u32, Cached>>);
+pub(crate) struct Callers(Mutex<HashMap<u32, Cached>>);
 
 struct Cached {
     start: u64,

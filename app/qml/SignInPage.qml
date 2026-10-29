@@ -6,9 +6,11 @@ import org.konedrive.app
 
 /// Adding a OneDrive. With no account yet, what adding one means, and Sign In, which opens
 /// Microsoft's sign-in in the browser; one more is added from the switcher, which opens it at
-/// once (Main.addOneDrive). While it waits, its link can be copied and the sign-in given up;
-/// a sign-in that adds nothing says why, with Sign In to try again. Once the account is
-/// added, the window shows its Status and the dialog that picks its folder.
+/// once (Main.addOneDrive). Either signs in two-way, the daemon's default. While it waits, its
+/// link can be copied, the sign-in given up, or, while Microsoft asks to allow changes, a
+/// read-only one asked for instead; a sign-in that adds nothing says why, with Sign In to try
+/// again. Once the account is added, the window shows its Status and the dialog that picks its
+/// folder.
 FormCard.FormCardPage {
     id: page
 
@@ -22,7 +24,7 @@ FormCard.FormCardPage {
             objectName: "addIntro"
             visible: Accounts.count === 0 && !Accounts.adding
             text: i18n("Add your OneDrive")
-            explanation: i18n("Sign in with your Microsoft account in the browser, then choose an empty folder: your OneDrive shows up in it, and files download when you open them.")
+            explanation: i18n("Sign in with your Microsoft account in the browser, then choose an empty folder: your OneDrive shows up in it. Files download when you open them, and what you change there changes in OneDrive too.")
             icon.name: "folder-cloud"
         }
         FormCard.FormDelegateSeparator {
@@ -53,6 +55,9 @@ FormCard.FormCardPage {
             textItem.wrapMode: Text.Wrap
             icon.name: "view-refresh"
         }
+        FormCard.FormDelegateSeparator {
+            visible: Accounts.adding
+        }
         FormCard.FormButtonDelegate {
             objectName: "copySignInLink"
             visible: Accounts.adding
@@ -60,6 +65,16 @@ FormCard.FormCardPage {
             text: i18nc("@action:button", "Copy Sign-In Link")
             icon.name: "edit-copy"
             onClicked: Accounts.copySignInUrl()
+        }
+        // Only while Microsoft's page asks to allow changes: a read-only sign-in asks only to read.
+        FormCard.FormButtonDelegate {
+            objectName: "signInReadOnly"
+            visible: Accounts.adding && Accounts.addingMode !== "read-only"
+            enabled: Accounts.signInUrl.length > 0
+            text: i18nc("@action:button", "Sign In Read-Only Instead")
+            description: i18n("KOneDrive can then only read your files: they can't be changed from this computer.")
+            icon.name: "object-locked"
+            onClicked: Accounts.addReadOnlyInstead()
         }
         FormCard.FormButtonDelegate {
             objectName: "cancelSignIn"

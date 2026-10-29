@@ -36,6 +36,11 @@ pub(crate) enum Cmd {
         #[command(subcommand)]
         command: StoreCmd,
     },
+    /// Inspect, allow or restore outgoing changes held for this account
+    Changes {
+        #[command(subcommand)]
+        command: ChangesCmd,
+    },
     /// Show or change the machine-wide download guard
     Guard {
         #[command(subcommand)]
@@ -394,4 +399,20 @@ pub(crate) enum StoreCmd {
         #[arg(long)]
         config: Option<std::path::PathBuf>,
     },
+}
+
+/// Outgoing changes, selected by the usual --account option.
+#[derive(Debug, clap::Subcommand)]
+pub(crate) enum ChangesCmd {
+    Status,
+    Held { #[arg(long)] sent: bool },
+    /// Allow only the immutable token printed by changes held.
+    Allow { #[arg(long)] token: String, kinds: Vec<String> },
+    /// Restore only the immutable token printed by changes held.
+    Restore { #[arg(long)] token: String, kinds: Vec<String> },
+    /// Re-admit a local-only path from Issues (relative to the account root).
+    Upload { path: String },
+    Thresholds { values: Vec<String> },
+    Enable,
+    Disable,
 }

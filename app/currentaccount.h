@@ -19,7 +19,7 @@ class CurrentAccount : public QObject
     Q_PROPERTY(SyncController *sync READ sync NOTIFY changed)
     Q_PROPERTY(AccountStatus *status READ status NOTIFY changed)
     Q_PROPERTY(QString path READ path NOTIFY changed)
-    /// An account other than this one needs attention (its state is "warning").
+    /// An account other than this one needs attention (its state is "warning" or "held").
     Q_PROPERTY(bool othersNeedAttention READ othersNeedAttention NOTIFY othersNeedAttentionChanged)
 
 public:

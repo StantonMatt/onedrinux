@@ -250,7 +250,9 @@ impl ItemFixture {
     /// A folder whose store knows its drive ([`DRIVE_ID`]) and whose root a full listing
     /// told of and ended ([`ROOT_ONEDRIVE_ID`]), with nothing in it, on disk or in the
     /// rows.
-    pub fn new() -> Self {
+    pub fn new() -> Self { Self::with_change_guard(None) }
+
+    pub(crate) fn with_change_guard(guard: Option<Arc<crate::change_guard::ChangeGuard>>) -> Self {
         let directory = tempfile::tempdir().expect("a temporary directory");
         let (folder, store_path) = (directory.path().join("folder"), directory.path().join("tree.db"));
         fs::create_dir(&folder).expect("the folder");
@@ -271,7 +273,9 @@ impl ItemFixture {
         let take_downs = Arc::new(Mutex::new(Vec::new()));
         let mount_take_down = Arc::new(MountTakeDown::new(Arc::clone(&access_mode_switch), make_take_down_report(&take_downs)));
         let write_operation_thread = Arc::new(WriteOperationThread::start(Arc::clone(&tree_lock)).expect("the write-operation thread"));
-        let place_changes = Arc::new(PlaceChanges::new(Arc::clone(&backing_directory), write_operation_thread.thread_id()));
+        let mut place_changes = PlaceChanges::new(Arc::clone(&backing_directory), write_operation_thread.thread_id());
+        place_changes.change_guard = guard;
+        let place_changes = Arc::new(place_changes);
         let content_source = Arc::new(FixtureContentSource::default());
         let pool = TransferPool::new(4);
         let range_readers = Arc::new(RangeReaders::new(Arc::clone(&pool), runtime.handle().clone()));
@@ -433,7 +437,7 @@ impl ItemFixture {
     /// What every part that asks Graph is made with, over `fake_onedrive`, with the
     /// fixture's store, drive and clock.
     pub fn graph_access(&self, fake_onedrive: &FakeGraph) -> GraphAccess {
-        GraphAccess { drive: fake_onedrive.client(), drive_id: self.drive_id(), store: self.store.clone(), clock: self.clock() }
+        GraphAccess { change_guard: self.place_changes.change_guard.clone(), drive: fake_onedrive.client(), drive_id: self.drive_id(), store: self.store.clone(), clock: self.clock() }
     }
 
     /// The local contents of the folder as a step towards OneDrive reads and marks them,
@@ -441,6 +445,18 @@ impl ItemFixture {
     /// steps is made with in a test that builds no mount.
     pub(crate) fn make_content_files(&self) -> Arc<super::item_content_files::ItemContentFiles> {
         Arc::new(super::item_content_files::ItemContentFiles::new(Arc::clone(&self.place_changes), self.store_path.clone(), Arc::clone(&self.item_handles)))
+    }
+
+    /// A cloud-only reader for tests of steps that wait outside the tree lock.
+    pub(crate) fn open_cloud_reader(&self, row: &Item) -> super::item_handles::Fh {
+        self.item_handles.add_file(super::item_handles::OpenItemFile::ReadingNotOnDisk {
+            item: row.local_item_id,
+            content: row.local.as_ref().unwrap().content.clone().unwrap(),
+        })
+    }
+
+    pub(crate) fn close_reader(&self, reader: super::item_handles::Fh) {
+        self.item_handles.close_reader(reader);
     }
 
     /// A poll handle with no poller behind it (`ListingPollHandle::for_tests`), and how
@@ -489,6 +505,7 @@ impl ItemFixture {
             pool: Arc::clone(&self.pool),
             split_download_share: Arc::clone(&self.split_download_share),
             download_after: DOWNLOAD_AFTER,
+            change_guard: self.place_changes.change_guard.clone(),
             download_guard: Arc::new(crate::download_guard::DownloadGuard::default()),
             free_space_reserve: Arc::new(|| 0),
             tree_lock: Arc::clone(&self.tree_lock),

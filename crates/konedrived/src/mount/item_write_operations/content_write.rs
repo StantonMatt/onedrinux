@@ -236,6 +236,7 @@ impl ItemWriteOperations {
             self.forget_place_change_record(record);
             return Err(errno);
         }
+        self.observe_guard_item(file.row.local_item_id);
         self.wake_plan();
         #[cfg(test)]
         self.reach(super::tests::OperationPoint::RowWritten);
@@ -290,6 +291,7 @@ impl ItemWriteOperations {
                     store.sync_write_ahead_log()?;
                     Ok(item)
                 })?;
+                self.observe_guard_item(node);
                 self.wake_plan();
                 match self.open_backing_file(&file.path) {
                     Ok(backing_file) => backing_file,
@@ -397,6 +399,7 @@ impl ItemWriteOperations {
                     self.mount_take_down.ask(TakeDownCause::BackingFileBehindRow { path: file.path.clone() });
                     errno
                 })?;
+                self.observe_guard_item(node);
                 self.wake_plan();
                 backing_file
             }
@@ -525,6 +528,7 @@ impl ItemWriteOperations {
             self.mount_take_down.ask(TakeDownCause::BackingFileBehindRow { path });
         }
         self.item_handles.remove_writer(fh);
+        self.observe_guard_item(closing.item);
         self.wake_plan();
         result
     }

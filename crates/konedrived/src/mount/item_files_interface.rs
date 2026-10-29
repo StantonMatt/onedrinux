@@ -20,6 +20,7 @@
 // test: the_nearest_mark_at_a_path_or_above_it_says_whether_a_pin_holds_for_it
 // test: what_a_free_up_would_decide_is_what_the_free_up_then_does
 // test: the_unfinished_downloads_are_listed_by_path_with_their_size_and_checkpoint
+// test: a_failed_guard_never_offers_or_frees_a_clean_resident_copy
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -333,6 +334,7 @@ impl ItemFilesInterface {
             (ItemKind::Directory, _) => FreeUpDecision::NothingToFree,
             // As the free-up answers it before its decision (`ItemFreeUp::write_not_on_disk`): what is not on disk takes no space, whatever keeps it.
             (ItemKind::File, None) => FreeUpDecision::NothingToFree,
+            (ItemKind::File, Some(_)) if self.free_up.is_protected(id) => FreeUpDecision::LeaveModifiedHere,
             (ItemKind::File, Some(_)) => {
                 // As the free-up reads it: a file a step runs for is left as one that is being downloaded is.
                 let is_downloading_or_sent = self.download_states.is_downloading(id) || self.running_steps.has_running_step(id);

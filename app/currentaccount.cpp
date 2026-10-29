@@ -104,7 +104,7 @@ void CurrentAccount::updateAttention()
 {
     bool others = false;
     for (const AccountItem *item : m_model->items()) {
-        if (item != m_item && item->status()->state() == QLatin1String("warning")) {
+        if (item != m_item && (item->status()->state() == QLatin1String("warning") || item->status()->state() == QLatin1String("held"))) {
             others = true;
         }
     }

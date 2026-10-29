@@ -333,6 +333,9 @@ impl Folder {
         let items = self.store.item_store();
         let directories = || rows.iter().filter(|row| row.kind == ItemKind::Directory);
         let input = SyncPlanInput {
+            local_only: Default::default(),
+            held_for_approval: Default::default(),
+            change_quiet_until: Default::default(),
             folder_visibility: rows.iter().filter(|row| row.onedrive.is_some()).map(|row| (row.local_item_id, items.find_folder_visibility(row.local_item_id).unwrap())).collect(),
             ignored_items: rows.iter().filter(|row| items.is_ignored(row.local_item_id).unwrap()).map(|row| row.local_item_id).collect(),
             name_refusals: Default::default(),

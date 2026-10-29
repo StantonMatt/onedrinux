@@ -23,6 +23,10 @@ AppStatus::AppStatus(AccountsModel *accounts, QObject *parent)
 
 int AppStatus::rank(const QString &state)
 {
+    // Changes on hold wait for the user before anything else does.
+    if (state == QLatin1String("held")) {
+        return -1;
+    }
     if (state == QLatin1String("warning")) {
         return 0;
     }
@@ -47,7 +51,7 @@ AccountItem *AppStatus::onlyAccountNeedingAttention() const
 {
     AccountItem *found = nullptr;
     for (AccountItem *item : m_accounts->items()) {
-        if (item->status()->state() == QLatin1String("warning")) {
+        if (item->status()->state() == QLatin1String("warning") || item->status()->state() == QLatin1String("held")) {
             if (found) {
                 return nullptr;
             }

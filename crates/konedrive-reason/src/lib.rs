@@ -121,6 +121,10 @@ pub enum Reason {
     /// The file's content was changed a moment ago: it is sent once its quiet time has
     /// ended, so that a program that saves in several writes is not sent half-way.
     QuietTime,
+    /// Outgoing changes are held until the user allows or restores their batch.
+    HeldForApproval,
+    /// The user chose Don't Upload; the Issues Upload action re-admits it.
+    LocalOnly,
     /// OneDrive could not be reached. In backoff; the error's
     /// own text is in the journal only.
     Network,
@@ -148,7 +152,7 @@ const TOO_BIG_KEY: &str = "too-big";
 
 impl Reason {
     /// Every variant but [`Reason::Other`], those with a detail without it.
-    pub const ALL: [Reason; 30] = [
+    pub const ALL: [Reason; 32] = [
         Self::OpenForWriting,
         Self::NameCharacters,
         Self::NameSpaces,
@@ -173,6 +177,8 @@ impl Reason {
         Self::NotReadOnDisk,
         Self::BeingChecked,
         Self::QuietTime,
+        Self::HeldForApproval,
+        Self::LocalOnly,
         Self::Network,
         Self::LocalIo,
         Self::Store,
@@ -210,6 +216,8 @@ impl Reason {
             Self::NotReadOnDisk => "not-read-on-disk",
             Self::BeingChecked => "being-checked",
             Self::QuietTime => "quiet-time",
+            Self::HeldForApproval => "held-for-approval",
+            Self::LocalOnly => "local-only",
             Self::Network => "network",
             Self::LocalIo => "local-error",
             Self::Store => "index-error",
@@ -279,6 +287,8 @@ impl Reason {
             // Beside those, what no step can work with: an item the start-up check could not
             // read on disk, and `Blocked`, no reason at all.
             Self::NotReadOnDisk
+            | Self::HeldForApproval
+            | Self::LocalOnly
             | Self::Blocked => Group::PerFile,
             Self::OpenForWriting
             | Self::BeingChecked

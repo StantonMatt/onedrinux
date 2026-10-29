@@ -24,7 +24,7 @@
 //! A record does not follow its item: no trigger takes it when a row of `items` goes, and
 //! the one who reads a record asks the rows what they say now.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 
 use rusqlite::types::Value;
 use rusqlite::{params_from_iter, Connection};
@@ -191,7 +191,16 @@ impl ItemStore<'_> {
     /// names of the backing directory, before it does it. Its id, by which it is taken
     /// again. Refused for a name that is no name of a directory entry.
     pub fn record_place_change(&mut self, record: &PlaceChangeRecord) -> Result<PlaceChangeRecordId, TreeError> {
-        list_names(record).into_iter().try_for_each(|name| check_name(name))?;
+        let retained_aside = match record {
+            PlaceChangeRecord::SetAside { aside_name, .. } => aside_name.to_str().and_then(|s| s.strip_prefix(".konedrive-change-guard/")),
+            _ => None,
+        };
+        for name in list_names(record) {
+            match (record, retained_aside) {
+                (PlaceChangeRecord::SetAside { aside_name, .. }, Some(entry)) if name == aside_name => check_name(OsStr::new(entry))?,
+                _ => check_name(name)?,
+            }
+        }
         self.write(|tx| {
             tx.prepare_cached(&format!("INSERT INTO place_change_records ({RECORD_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)"))?.execute(params_from_iter(values_of(record)))?;
             Ok(PlaceChangeRecordId(tx.last_insert_rowid()))

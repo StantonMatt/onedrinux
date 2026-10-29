@@ -263,12 +263,16 @@ impl SessionCancellations {
                 Err(error) => Err(WriteError::from(error)),
                 // Another changed it since the upload: theirs now.
                 Ok(found) if !left.is_unchanged_since_upload(found.c_tag.as_deref(), found.e_tag.as_deref()) => Ok(false),
-                Ok(found) => match self.graph.drive.delete_item(id, to_guard_of_answer(&found).as_str()).await {
+                Ok(found) => {
+                    if !self.graph.admit_cleanup(&left.item, found.size.unwrap_or(u64::MAX), to_guard_of_answer(&found).as_str()) {
+                        return CleanedOutcome::Failed { retry_after: None };
+                    }
+                    match self.graph.drive.delete_item(id, to_guard_of_answer(&found).as_str()).await {
                     Ok(()) | Err(WriteError::NotFound) => Ok(true),
                     // A 412: changed between the read and the removal.
                     Err(WriteError::Changed) => Ok(false),
                     Err(error) => Err(error),
-                },
+                }},
             }
         };
         let is_gone = match removed {
@@ -278,6 +282,10 @@ impl SessionCancellations {
                 return CleanedOutcome::Failed { retry_after: Self::find_retry_after(&error) };
             }
         };
+        if let Err(error) = self.graph.settle_cleanup(&left.item, is_gone) {
+            tracing::warn!("cannot settle cleanup admission: {error}");
+            return CleanedOutcome::Failed { retry_after: None };
+        }
         let forgotten = left.item.clone();
         // Removed or gone: the row a listing made of it loses its OneDrive version in the same transaction.
         let forget = move |store: &mut konedrive_tree::TreeStore| if is_gone { store.step_memory().forget_removed_mismatched_item(&forgotten) } else { store.step_memory().forget_mismatched_item(&forgotten) };

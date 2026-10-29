@@ -257,7 +257,7 @@ pub(crate) fn count_unsent_not_to_send(input: &SyncPlanInput, plan: &SyncPlan, m
     let waits: BTreeMap<LocalItemId, &WaitReason> = plan.waits.iter().map(|wait| (wait.item, &wait.reason)).collect();
     let is_not_to_send = |item: LocalItemId| match find_wait_end(&waits, item) {
         Some((_, WaitReason::StartUpCheck)) => true,
-        Some((refused, WaitReason::User(_))) => memories.get(&refused).is_some_and(|memory| memory.refusal.is_some()),
+        Some((refused, WaitReason::User(reason))) => matches!(*reason, Reason::HeldForApproval | Reason::LocalOnly) || memories.get(&refused).is_some_and(|memory| memory.refusal.is_some()),
         Some((_, WaitReason::AnotherItem(_) | WaitReason::ItemNotGiven(_) | WaitReason::Time { .. } | WaitReason::RunningStep | WaitReason::Listing | WaitReason::ItemsInDirectoryNotGiven(_))) | None => false,
     };
     input.items.iter().filter(|item| item.unsent_since.is_some() && is_not_to_send(item.local_item_id)).count() as u64
@@ -346,8 +346,16 @@ pub(crate) fn count_unsent_waiting_for_user(unsent: &[LocalItemId], plan: &SyncP
 /// and reads nothing but the store. Bounded: the doubling ends when everything that
 /// differs was read.
 pub(crate) fn plan_next_steps(items: &ItemReader<'_>, facts: &DaemonFacts) -> Result<PlannedRound, TreeError> {
+    plan_next_steps_with_guard(items, facts, BTreeSet::new(), BTreeSet::new(), BTreeMap::new())
+}
+
+/// The same bounded reading with durable outgoing holds supplied by its owner.
+pub(crate) fn plan_next_steps_with_guard(items: &ItemReader<'_>, facts: &DaemonFacts, held: BTreeSet<LocalItemId>, local_only: BTreeSet<LocalItemId>, quiet: BTreeMap<LocalItemId, i64>) -> Result<PlannedRound, TreeError> {
     let local_step_tries = void_local_step_tries(items, &facts.local_step_tries)?;
-    let folder_input = describe_folder(items, facts)?;
+    let mut folder_input = describe_folder(items, facts)?;
+    folder_input.held_for_approval = held;
+    folder_input.local_only = local_only;
+    folder_input.change_quiet_until = quiet;
     let item_counts = items.count_items()?;
     let unsent_count = items.count_unsent()?.count;
     let items_read_at_once = facts.settings.items_read_at_once.max(1);
@@ -579,6 +587,9 @@ pub(crate) fn describe_folder(items: &ItemReader<'_>, facts: &DaemonFacts) -> Re
         now: facts.now,
         next_tries: BTreeMap::new(),
         sending_refusals: BTreeMap::new(),
+        local_only: Default::default(),
+        held_for_approval: BTreeSet::new(),
+        change_quiet_until: BTreeMap::new(),
         items_left_by_start_up_check: BTreeSet::new(),
         onedrive_item_count_below: BTreeMap::new(),
         shown_item_count_in: BTreeMap::new(),

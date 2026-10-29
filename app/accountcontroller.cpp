@@ -1,6 +1,7 @@
 #include "accountcontroller.h"
 
 #include "accountinterface.h"
+#include "writescope.h"
 
 #include <KLocalizedString>
 
@@ -39,6 +40,7 @@ AccountController::AccountController(const QDBusConnection &bus, const QString &
                   QStringLiteral("PropertiesChanged"),
                   this,
                   SLOT(onPropertiesChanged(QString, QVariantMap, QStringList)));
+    m_bus.connect(ServiceName, m_path, InterfaceName, QStringLiteral("WriteRefused"), this, SLOT(onWriteRefused(QString, QString, QString, qulonglong)));
     connect(m_watcher, &QDBusServiceWatcher::serviceOwnerChanged, this, [this](const QString &, const QString &, const QString &newOwner) {
         if (newOwner.isEmpty()) {
             setServiceAvailable(false);
@@ -119,6 +121,12 @@ void AccountController::applyProperties(const QVariantMap &properties)
     }
     if (const auto it = properties.constFind(QStringLiteral("UnsentBeforeReadOnly")); it != properties.constEnd()) {
         m_unsentCount = it->toULongLong();
+    }
+    if (const auto it = properties.constFind(QStringLiteral("WriteScopeEnabled")); it != properties.constEnd()) {
+        m_writeScopeEnabled = it->toBool();
+    }
+    if (const auto it = properties.constFind(QStringLiteral("WritePaths")); it != properties.constEnd()) {
+        m_writePaths = it->toStringList();
     }
     // A switch to read-write ends as the command line's does: granted, or LastError
     // saying why not (SetMode cleared it before it answered), or no longer signed in.
@@ -262,6 +270,83 @@ void AccountController::cancelModeSwitch()
     ++m_modeCall;
     endModeSwitch();
     call(m_iface->CancelSignIn());
+}
+
+void AccountController::onWriteRefused(const QString &path, const QString &folder, const QString &app, qulonglong count)
+{
+    Q_EMIT writeRefused(path, folder, app, count);
+}
+
+AccountController::WriteScope AccountController::writeScope() const
+{
+    return m_scopeCall ? *m_scopeCall : WriteScope{m_writeScopeEnabled, m_writePaths};
+}
+
+void AccountController::allowFolder(const QString &folder)
+{
+    if (folder.isEmpty()) {
+        return;
+    }
+    const WriteScope now = writeScope();
+    if (!now.enabled) {
+        changeWriteScope({true, {folder}});
+        return;
+    }
+    const QStringList paths = writeScopeWith(now.paths, folder);
+    if (paths != now.paths) {
+        changeWriteScope({true, paths});
+    }
+}
+
+void AccountController::removeFolder(const QString &folder)
+{
+    const WriteScope now = writeScope();
+    QStringList paths = now.paths;
+    if (!now.enabled || !paths.removeAll(folder) || paths.isEmpty()) {
+        return;
+    }
+    changeWriteScope({true, paths});
+}
+
+void AccountController::clearWriteScope()
+{
+    if (writeScope().enabled) {
+        changeWriteScope({});
+    }
+}
+
+void AccountController::changeWriteScope(const WriteScope &scope)
+{
+    const quint64 number = ++m_scopeCalls;
+    const bool wasChanging = writeScopeChanging();
+    m_scopeCall = scope;
+    if (!wasChanging) {
+        Q_EMIT writeScopeChangingChanged();
+    }
+    setActionError(QString());
+    const auto ended = [this, number] {
+        if (number == m_scopeCalls && m_scopeCall) {
+            m_scopeCall.reset();
+            Q_EMIT writeScopeChangingChanged();
+        }
+    };
+    auto *watcher = new QDBusPendingCallWatcher(scope.enabled ? m_iface->SetWriteScope(scope.paths) : m_iface->ClearWriteScope(), this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, scope, ended](QDBusPendingCallWatcher *w) {
+        w->deleteLater();
+        if (w->isError()) {
+            const QString why = w->error().message().isEmpty() ? w->error().name() : w->error().message();
+            setActionError(scope.enabled ? i18n("The folders that can be changed were not saved: %1", why) : i18n("Changes were not allowed everywhere: %1", why));
+            ended();
+            return;
+        }
+        // What the daemon saved, shown now rather than once its PropertiesChanged has come;
+        // read again all the same.
+        m_writeScopeEnabled = scope.enabled;
+        m_writePaths = scope.paths;
+        ended();
+        Q_EMIT accountChanged();
+        fetchAll();
+    });
 }
 
 QString AccountController::modeRefusalText(const QString &mode, const QString &errorName, const QString &message)

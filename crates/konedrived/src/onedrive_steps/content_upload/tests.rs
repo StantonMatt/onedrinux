@@ -77,7 +77,7 @@ fn cancellation_count(folder: &StepsFolder) -> usize {
 /// Runs `step` with its second fragment throttled at both of the client's sends: the
 /// upload stops with its session kept, one fragment in OneDrive.
 async fn run_stopped_after_the_first_fragment(folder: &StepsFolder, step: &OneDriveStep) -> StepOutcome {
-    folder.graph.with(|cloud| cloud.throttle("PUT", "upload/", 1, 0, 2));
+    folder.graph.with(|cloud| cloud.throttle("PUT", "upload/", 1, 0, 1));
     let outcome = folder.run(step.clone()).await;
     assert!(matches!(outcome, StepOutcome::Refused(StepRefusal::Throttled { .. })), "{outcome:?}");
     assert_eq!(folder.memory(step.item().local_item_id).upload_session.map(|session| session.next_offset), Some(FRAGMENT_UNIT));
@@ -134,7 +134,7 @@ async fn an_opening_is_kept_before_the_request_and_the_session_before_its_first_
     // The opening's request is held in flight: the opening is on record while it is.
     folder.graph.with(|cloud| cloud.delay("POST", "createUploadSession", Duration::from_millis(300), 1));
     // Both sends of the first fragment are throttled: no byte reaches the session.
-    folder.graph.with(|cloud| cloud.throttle("PUT", "upload/", 0, 0, 2));
+    folder.graph.with(|cloud| cloud.throttle("PUT", "upload/", 0, 0, 1));
     let running = tokio::spawn({
         let (folder, step) = (Arc::clone(&folder), step.clone());
         async move { folder.run(step).await }
@@ -160,7 +160,7 @@ async fn a_session_of_the_same_content_is_gone_on_with_from_where_onedrive_says_
     assert!(matches!(folder.run(step).await, StepOutcome::Written { .. }));
     // The hash sent is that of the whole file, though the first fragment went in an earlier run: the answer's hash was asked.
     assert_eq!(cloud_content(&folder, "a.txt"), Some(content));
-    assert_eq!((folder.count("POST", "createUploadSession"), folder.count("PUT", "upload/") - sent_before, folder.count("GET", "upload/")), (1, 2, 2), "one status read by the client's retry, one by the next run");
+    assert_eq!((folder.count("POST", "createUploadSession"), folder.count("PUT", "upload/") - sent_before, folder.count("GET", "upload/")), (1, 2, 1), "the next run reads session progress after returning through admission");
 }
 
 #[tokio::test]
@@ -649,4 +649,24 @@ async fn an_acknowledged_upload_with_unreadable_metadata_keeps_its_completion_ma
     assert!(matches!(folder.run(step).await, StepOutcome::Refused(StepRefusal::Transient { .. })));
     assert_eq!(folder.count("PUT", "upload/"), puts, "the acknowledged upload is never restarted");
     assert_eq!(folder.fixture.read_disk_file("a.txt"), Some(content));
+}
+
+#[tokio::test]
+async fn a_retryable_final_fragment_returns_through_guard_admission() {
+    let dir = tempfile::tempdir().unwrap();
+    let guard = Arc::new(crate::change_guard::ChangeGuard::open(dir.path().join("guard.json"), crate::change_guard::GuardConfig { uploads: 1, ..Default::default() }));
+    let fixture = ItemFixture::with_change_guard(Some(Arc::clone(&guard)));
+    let row = fixture.make_own_file("a.txt", b"new bytes");
+    guard.observe(&[(row.clone(), "a.txt".into())], (fixture.clock())() - 3).unwrap();
+    let step = OneDriveStep::SendNewFile { item: fixture.versions_of(row.local_item_id), parent: StepsFolder::root(), name: "a.txt".into() };
+    let folder = StepsFolder::start(fixture).await;
+    folder.graph.with(|cloud| cloud.throttle("PUT", "upload/", 0, 0, 1));
+    assert!(matches!(folder.run(step.clone()).await, StepOutcome::Refused(StepRefusal::Throttled { .. })), "a retryable final fragment must return to the guarded sender");
+    assert_eq!(folder.count("PUT", "upload/"), 1);
+    let later = folder.fixture.make_own_file("later.txt", b"burst");
+    guard.observe(&[(later, "later.txt".into())], (folder.fixture.clock())()).unwrap();
+    assert!(guard.blocks(row.local_item_id));
+    assert_eq!(folder.run(step).await, StepOutcome::NotRun(StepObstacle::SendingStopped));
+    assert_eq!(folder.count("PUT", "upload/"), 1, "the retry cannot commit a held generation");
+    assert!(folder.memory(row.local_item_id).upload_session.is_some());
 }

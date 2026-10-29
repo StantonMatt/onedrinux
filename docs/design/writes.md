@@ -78,7 +78,12 @@ The sender checks local paths and cloud paths independently before any step
 starts, including removals whose local path is gone. A step outside scope keeps its local
 version and retries with backoff. Pin, download and free-up are independent. A scope change
 controls new admissions; already admitted operations may finish. Set it before starting the
-trial. [accounts.md](accounts.md) §10.1 gives validation and cleanup behavior.
+trial. Scope refusals also enqueue `Account.WriteRefused(path, folder, app, count)` without
+waiting for the bus or procfs: first immediately, then counts coalesced every 10 seconds.
+The existing containing folder is the action's target; empty means the drive root, where
+Allow This Folder must be omitted. The app adds it through `SetWriteScope`, and merges
+notifications over its separate 10-minute window. [accounts.md](accounts.md) §10.1 gives the
+signal contract, validation and cleanup behavior.
 
 ### 2.2 To read-write
 
@@ -251,9 +256,10 @@ included (`decide_upload_start`); the bytes before the offset are read again, so
 sent is that of the bytes read here. A session of a new file goes on at the place of its empty
 file, wherever the file is here by now.
 
-**A fragment refused for now** (`429`, `503`, a dropped connection, a timeout) goes again to the
-same session, after `Retry-After` or 10 seconds and a look at where the session stands, five sends
-in all (`DriveClient::upload_chunk`); refused still, the step ends with the session kept.
+**A fragment refused for now** (`429`, `503`, a dropped connection, a timeout) ends the
+step with its session kept. The sender uses `DriveClient::upload_chunk_once`: every
+later attempt passes scope and change-guard admission again, then reads the session's
+progress. A lost final-fragment answer still uses the ordinary completion verification.
 
 **A session that ended** (its URL answers `404`, `410`, `401` or `403`) is forgotten. When the
 content sent is in OneDrive by its hash, the upload went through and is committed; when the
@@ -334,8 +340,9 @@ answer lost to the opening or to a fragment is `Transient` at once.
 A step whose commit finds the rows changed after it made a directory or a file
 (`onedrive_steps/made_items.rs`): when the item's row is gone, what was made is removed in
 OneDrive; when it is still there, a listing brings the made item and the plan compares the two.
-After a restart nothing of this is done: a file uploaded and then removed here before its commit
-comes back from OneDrive.
+A file cleanup is persisted in the leftover queue before guard admission, and is retried
+after deferral or restart. Success, disappearance or a newer remote version settles its
+synthetic guard entry too. A directory without its original folder cTag stays for listing.
 
 ### 4.6 What the answers mean
 

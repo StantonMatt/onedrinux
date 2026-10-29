@@ -74,6 +74,8 @@ fn every_key_has_the_group_it_had() {
                 "too-large",
                 "refused",
                 "blocked",
+                "held-for-approval",
+                "local-only",
                 "not-read-on-disk",
             ],
         ),

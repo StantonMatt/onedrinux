@@ -2,6 +2,7 @@
 
 #include "accountcontroller.h"
 #include "accountstatus.h"
+#include "heldchanges.h"
 #include "synccontroller.h"
 
 #include <QAbstractListModel>
@@ -18,7 +19,8 @@
 
 class DaemonController;
 
-/// One account: its object path and the controllers that present it.
+/// One account: its object path and the controllers that present it, with what the change
+/// guard holds of it.
 /// AccountsModel owns it; what else hangs on an account (its notifier, its
 /// download progress) is parented to it and goes when the account goes.
 class AccountItem : public QObject
@@ -29,6 +31,7 @@ class AccountItem : public QObject
     Q_PROPERTY(AccountController *account READ account CONSTANT)
     Q_PROPERTY(SyncController *sync READ sync CONSTANT)
     Q_PROPERTY(AccountStatus *status READ status CONSTANT)
+    Q_PROPERTY(HeldChanges *held READ held CONSTANT)
 
 public:
     AccountItem(const QDBusConnection &bus, const QString &path, const AccountStatus::Clock &clock, QObject *parent);
@@ -38,11 +41,13 @@ public:
     AccountController *account() const { return m_account; }
     SyncController *sync() const { return m_sync; }
     AccountStatus *status() const { return m_status; }
+    HeldChanges *held() const { return m_held; }
 
 private:
     QString m_path;
     AccountController *m_account;
     SyncController *m_sync;
+    HeldChanges *m_held;
     AccountStatus *m_status;
 };
 
@@ -64,6 +69,11 @@ class AccountsModel : public QAbstractListModel
     /// The address of Sign In's sign-in, from SignIn's answer until the adding ends; empty
     /// otherwise.
     Q_PROPERTY(QString signInUrl READ signInUrl NOTIFY addingChanged)
+    /// The mode the account being added asks for: empty for the daemon's default (two-way),
+    /// "read-only" once addReadOnlyInstead() was asked.
+    Q_PROPERTY(QString addingMode READ addingMode NOTIFY addingChanged)
+    /// The changes the change guard holds, every account's: what turning it off leaves on hold.
+    Q_PROPERTY(int heldCount READ heldCount NOTIFY heldCountChanged)
 
 public:
     enum Roles {
@@ -91,6 +101,8 @@ public:
     bool adding() const { return m_adding; }
     QString addError() const { return m_addError; }
     QString signInUrl() const { return m_signInUrl; }
+    QString addingMode() const { return m_addMode; }
+    int heldCount() const;
 
     DaemonController *daemon() const { return m_daemon; }
     const QList<AccountItem *> &items() const { return m_items; }
@@ -119,6 +131,10 @@ public:
     Q_INVOKABLE void addAccount(const QString &clientId = QString());
     /// Gives up the sign-in under way, if any (Accounts.CancelSignIn).
     Q_INVOKABLE void cancelAdd();
+    /// While a two-way sign-in waits in the browser: gives it up and starts a read-only one
+    /// (Accounts.Add("read-only")), whose URL comes out of openUrlRequested. One the browser
+    /// has finished already is made read-only before onboarding completes.
+    Q_INVOKABLE void addReadOnlyInstead();
     /// Forgets the last Sign In's failure (the page shows it clean).
     Q_INVOKABLE void clearAddError();
     /// Puts signInUrl on the clipboard, for a browser that did not open.
@@ -132,6 +148,7 @@ Q_SIGNALS:
     void countChanged();
     void summaryChanged();
     void addingChanged();
+    void heldCountChanged();
     /// The account Sign In added is signed in, named, and shown; the window
     /// selects it, shows its Status and opens the dialog that picks its folder.
     void accountAdded(const QString &path);
@@ -142,6 +159,10 @@ Q_SIGNALS:
 
 private:
     void follow(const QStringList &paths);
+    /// Add(addingMode) for the adding `attempt`, unless that has ended.
+    void startSignIn(quint64 attempt);
+    /// A call of the adding `attempt` failed: it ends, saying why unless it was cancelled.
+    void addFailed(quint64 attempt, const QString &error);
     void handleSignInFinished(uint number, const QString &outcome, const QString &message, const QString &account);
     void handleServiceChanged();
     void signInEnded(const QString &outcome, const QString &message, const QString &account);
@@ -157,10 +178,14 @@ private:
     QList<AccountItem *> m_items;
     std::vector<std::function<void(AccountItem *)>> m_setUps;
     bool m_adding = false;
+    bool m_finishingAdd = false;
     QString m_addError;
     QString m_signInUrl;
+    QString m_addMode;
     /// The number of this Sign In's sign-in, from SignIn's answer until it has ended.
     std::optional<uint> m_signIn;
+    /// The two-way sign-in addReadOnlyInstead() is cancelling, until CancelSignIn answers.
+    std::optional<uint> m_replacing;
     /// Which Sign In the answers of SetClientId and SignIn belong to: one that
     /// comes after its adding has ended is dropped.
     quint64 m_attempt = 0;

@@ -133,6 +133,11 @@ impl ItemFreeUp {
         self
     }
 
+    /// The same external holds apply to an offered free-up and its commit.
+    pub(super) fn is_protected(&self, item: LocalItemId) -> bool {
+        (self.protected)(item) || self.place_changes.change_guard.as_ref().is_some_and(|guard| guard.blocks(item) || guard.error().is_some())
+    }
+
     /// Frees the copy of the file `item`: one job of the store reads the row, its pin and
     /// its path; [`decide_item_free_up`]; `ItemStore::commit_freed_content` with the
     /// content it decided on; and only then the backing file removed, as a place change
@@ -170,7 +175,7 @@ impl ItemFreeUp {
     }
 
     fn write_not_on_disk_if(&self, item: LocalItemId, expected: Option<&ContentVersion>) -> Result<FreedRow, FreedCopy> {
-        if (self.protected)(item) { return Err(FreedCopy::Left(FreeUpDecision::LeaveModifiedHere)); }
+        if self.is_protected(item) { return Err(FreedCopy::Left(FreeUpDecision::LeaveModifiedHere)); }
         let fail = |error: TreeError| {
             tracing::warn!("the copy of item {item} is not freed: {error}");
             FreedCopy::RowsChanged
@@ -199,9 +204,16 @@ impl ItemFreeUp {
             Ok(RowPathStat::Facts { facts, .. }) => facts.blocks * 512,
             _ => 0,
         };
-        if !can_free || (self.protected)(item) { return Err(FreedCopy::Left(FreeUpDecision::LeaveModifiedHere)); }
+        if !can_free || self.is_protected(item) { return Err(FreedCopy::Left(FreeUpDecision::LeaveModifiedHere)); }
         let decided = content.clone();
-        match self.store.call_blocking(move |store| store.item_store().commit_freed_content(item, &decided)).map_err(fail)? {
+        let guard = self.place_changes.change_guard.clone();
+        match self.store.call_blocking(move |store| {
+            let mut commit = || store.item_store().commit_freed_content(item, &decided);
+            match &guard {
+                Some(guard) => guard.while_unheld(&[item], commit).unwrap_or(Ok(StepCommitOutcome::RowsChanged)),
+                None => commit(),
+            }
+        }).map_err(fail)? {
             StepCommitOutcome::Written => Ok(FreedRow { item, place, path, content, bytes }),
             StepCommitOutcome::RowsChanged => Err(FreedCopy::RowsChanged),
         }

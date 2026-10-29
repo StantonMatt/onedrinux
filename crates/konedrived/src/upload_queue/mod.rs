@@ -277,6 +277,13 @@ pub(crate) fn decide_queue_state(entry: &UnsentEntry, sending: &QueueConditions)
     })
 }
 
+fn guard_reason(entry: &UnsentEntry) -> Option<Reason> {
+    match &entry.answer {
+        Some(ItemAnswer::Waiting(WaitReason::User(reason @ (Reason::HeldForApproval | Reason::LocalOnly)))) => Some(reason.clone()),
+        _ => None,
+    }
+}
+
 /// The reason an entry of `state` carries and the time of its next try (0 for none).
 /// Pure. Nothing and 0 for `paused`, `running` and a `ready` that waits for no space.
 /// Otherwise, the first that holds:
@@ -299,7 +306,10 @@ pub(crate) fn decide_queue_state(entry: &UnsentEntry, sending: &QueueConditions)
 /// an item the check at start left reads "could not be read on disk", an item the plan is
 /// at fault about "being checked" (the daemon asks a full listing by itself): the two
 /// reasons above, whose state reads `waiting`, not `blocked`.
+
 pub(crate) fn decide_queue_reason(kind: UnsentKind, state: QueueState, entry: &UnsentEntry, sending: &QueueConditions) -> (Option<Reason>, i64) {
+    // A new ledger choice takes precedence over an older Graph refusal.
+    if let Some(reason) = guard_reason(entry) { return (Some(reason), 0); }
     if matches!(state, QueueState::Paused | QueueState::Running) {
         return (None, 0);
     }
@@ -412,8 +422,11 @@ pub struct QueueTotals {
 /// waits for space is counted through a pause as before it.
 pub fn count_queue(totals: &QueueTotals, sending: &QueueConditions) -> QueueCounts {
     let sending = &describe_conditions_without_pause(sending);
-    let refused_for_good: BTreeSet<LocalItemId> = totals.refused_for_good.iter().copied().collect();
-    let refused_for_space: BTreeSet<LocalItemId> = totals.refused_for_space.iter().map(|(item, _)| *item).collect();
+    let approval_held: BTreeSet<_> = totals.answered.iter().filter(|entry| guard_reason(entry) == Some(Reason::HeldForApproval)).map(|entry| entry.item.local_item_id).collect();
+    let guarded: BTreeSet<_> = totals.answered.iter().filter(|entry| guard_reason(entry).is_some()).map(|entry| entry.item.local_item_id).collect();
+    let refused_for_good: BTreeSet<LocalItemId> = totals.refused_for_good.iter().filter(|id| !approval_held.contains(id)).copied().collect();
+    let refused_space_rows: Vec<_> = totals.refused_for_space.iter().filter(|(id,_)| !guarded.contains(id)).collect();
+    let refused_for_space: BTreeSet<LocalItemId> = refused_space_rows.iter().map(|(item, _)| *item).collect();
     let (mut blocked, mut space_waiting, mut space_waiting_bytes) = (refused_for_good.len() as u64, 0u64, 0u64);
     // What is in the store's sum and is not pending: the items, and the bytes of their contents.
     let (mut not_pending, mut not_pending_bytes) = (refused_for_good.len() as u64, 0u64);
@@ -430,7 +443,8 @@ pub fn count_queue(totals: &QueueTotals, sending: &QueueConditions) -> QueueCoun
         match state {
             QueueState::Blocked => {
                 if !refused_for_good.contains(&item) {
-                    blocked = blocked.saturating_add(1);
+                    let (reason, _) = decide_queue_reason(kind, state, entry, sending);
+                    if reason != Some(Reason::HeldForApproval) { blocked = blocked.saturating_add(1); }
                     not_pending = not_pending.saturating_add(1);
                 }
                 not_pending_bytes = not_pending_bytes.saturating_add(size);
@@ -444,14 +458,14 @@ pub fn count_queue(totals: &QueueTotals, sending: &QueueConditions) -> QueueCoun
             }
         }
     }
-    let too_big_bytes = totals.refused_for_space.iter().fold(0u64, |sum, (_, size)| sum.saturating_add(*size));
+    let too_big_bytes = refused_space_rows.iter().fold(0u64, |sum, (_, size)| sum.saturating_add(*size));
     QueueCounts {
         pending: saturate(totals.unsent.count.saturating_sub(not_pending)),
         pending_bytes: totals.unsent.bytes.saturating_sub(not_pending_bytes),
         blocked: saturate(blocked),
         space_waiting: saturate(space_waiting),
         space_waiting_bytes,
-        too_big: saturate(totals.refused_for_space.len() as u64),
+        too_big: saturate(refused_space_rows.len() as u64),
         too_big_bytes,
     }
 }
@@ -465,7 +479,7 @@ pub fn count_queue(totals: &QueueTotals, sending: &QueueConditions) -> QueueCoun
 pub(crate) fn decide_kept_back_reason(kind: UnsentKind, state: QueueState, entry: &UnsentEntry, sending: &QueueConditions) -> Option<Reason> {
     let (reason, _) = decide_queue_reason(kind, state, entry, sending);
     match state {
-        QueueState::Blocked => Some(reason.unwrap_or(Reason::Blocked)),
+        QueueState::Blocked => reason.or(Some(Reason::Blocked)).filter(|r| *r != Reason::HeldForApproval),
         QueueState::Waiting | QueueState::Retry => reason,
         QueueState::Ready => reason.filter(Reason::waits_for_space),
         QueueState::Running | QueueState::Paused => None,
@@ -493,7 +507,7 @@ pub(crate) fn summarize_kept_back(entries: &[UnsentEntry], sending: &QueueCondit
 /// The entries of `entries` that `NotUploaded()` lists: those whose state is `blocked`.
 /// Pure. What the thin part reads the paths of.
 pub(crate) fn list_blocked_entries<'a>(entries: &'a [UnsentEntry], sending: &QueueConditions) -> Vec<&'a UnsentEntry> {
-    entries.iter().filter(|entry| decide_unsent_kind(&entry.item).is_some() && decide_queue_state(entry, sending) == Some(QueueState::Blocked)).collect()
+    entries.iter().filter(|entry| decide_unsent_kind(&entry.item).is_some() && decide_queue_state(entry, sending) == Some(QueueState::Blocked) && find_kept_back(entry, sending).is_some()).collect()
 }
 
 /// The entries of `entries` kept back for the reason of key `reason`

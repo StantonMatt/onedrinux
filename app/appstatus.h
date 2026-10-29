@@ -7,14 +7,14 @@ class AccountItem;
 class AccountsModel;
 
 /// The whole app's state, for the tray: the worst state across the accounts
-/// — needs attention ("warning"), then signed out ("offline"), then paused,
+/// — changes on hold ("held"), then needs attention ("warning"), then signed out ("offline"), then paused,
 /// then syncing, then synced ("ok") — and a tooltip with one line per
 /// account. With no account it is "offline". It reads only the accounts'
 /// AccountStatus.
 class AppStatus : public QObject
 {
     Q_OBJECT
-    /// "offline", "warning", "paused", "syncing" or "ok".
+    /// "offline", "held", "warning", "paused", "syncing" or "ok".
     Q_PROPERTY(QString state READ state NOTIFY changed)
     Q_PROPERTY(QString iconName READ iconName NOTIFY changed)
     /// One account: its status line, and what needs attention on the next

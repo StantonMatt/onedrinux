@@ -1,22 +1,38 @@
 #include "accountsmodel.h"
 
 #include "accountcontroller.h"
+#include "accountinterface.h"
 #include "daemoncontroller.h"
 #include "synccontroller.h"
 
 #include <KLocalizedString>
 
 #include <QClipboard>
+#include <QDBusPendingCallWatcher>
+#include <QDBusPendingReply>
+#include <QDBusVariant>
 #include <QGuiApplication>
 #include <QRegularExpression>
+
+namespace
+{
+const QLatin1String ReadOnly("read-only");
+}
 
 AccountItem::AccountItem(const QDBusConnection &bus, const QString &path, const AccountStatus::Clock &clock, QObject *parent)
     : QObject(parent)
     , m_path(path)
     , m_account(new AccountController(bus, path, this))
     , m_sync(new SyncController(bus, path, this))
+    , m_held(new HeldChanges(bus, path, this))
     , m_status(new AccountStatus(m_account, m_sync, clock, this))
 {
+    // Its rows show in Dolphin from the folder.
+    m_held->setRootPath(m_sync->rootPath());
+    connect(m_sync, &SyncController::syncChanged, m_held, [this] {
+        m_held->setRootPath(m_sync->rootPath());
+    });
+    m_status->setHeld(m_held);
 }
 
 QString AccountItem::id() const
@@ -91,6 +107,15 @@ QHash<int, QByteArray> AccountsModel::roleNames() const
     };
 }
 
+int AccountsModel::heldCount() const
+{
+    int count = 0;
+    for (const AccountItem *item : m_items) {
+        count += item->held()->count();
+    }
+    return count;
+}
+
 bool AccountsModel::anySignedIn() const
 {
     for (const AccountItem *item : m_items) {
@@ -161,6 +186,7 @@ AccountItem *AccountsModel::insert(int row, const QString &path)
     connect(item->sync(), &SyncController::syncChanged, this, changed);
     connect(item->sync(), &SyncController::serviceAvailableChanged, this, changed);
     connect(item->status(), &AccountStatus::changed, this, changed);
+    connect(item->held(), &HeldChanges::changed, this, &AccountsModel::heldCountChanged);
     connect(item->account(), &AccountController::openUrlRequested, this, &AccountsModel::openUrlRequested);
 
     beginInsertRows(QModelIndex(), row, row);
@@ -181,6 +207,7 @@ void AccountsModel::removeAt(int row)
     m_items.removeAt(row);
     endRemoveRows();
     Q_EMIT countChanged();
+    Q_EMIT heldCountChanged();
     Q_EMIT summaryChanged();
     Q_EMIT accountRemoved(item);
     // Later: QML may still hold it for the rest of this event.
@@ -235,54 +262,106 @@ void AccountsModel::addAccount(const QString &clientId)
     }
     m_adding = true;
     m_addError.clear();
+    m_addMode.clear();
     Q_EMIT addingChanged();
 
     // An answer that comes once this adding has ended (the daemon went away
     // in the middle) is not this adding's, nor a later one's.
     const quint64 attempt = ++m_attempt;
-    const auto failed = [this, attempt](const QString &error) {
-        if (!m_adding || attempt != m_attempt) {
-            return;
-        }
-        if (m_cancelRequested) {
-            // Cancel was pressed first: there is nothing to cancel, and nothing to say.
-            finishAdding(QString());
-        } else {
-            finishAdding(error.isEmpty() ? i18n("The account could not be added.") : error);
-        }
-    };
-    const auto signIn = [this, attempt, failed] {
-        if (!m_adding || attempt != m_attempt) {
-            return;
-        }
-        m_daemon->signIn(
-            [this, attempt](uint number, const QString &url) {
-                if (!m_adding || attempt != m_attempt) {
-                    return;
-                }
-                m_signIn = number;
-                // The daemon may have said how the sign-in ended before this
-                // answer was handled.
-                const QStringList early = m_early.take(number);
-                m_early.clear();
-                if (!early.isEmpty()) {
-                    signInEnded(early.at(0), early.at(1), early.at(2));
-                } else if (m_cancelRequested) {
-                    cancelSignIn();
-                } else {
-                    m_signInUrl = url;
-                    Q_EMIT addingChanged();
-                    Q_EMIT openUrlRequested(url);
-                }
-            },
-            failed);
-    };
     const QString id = clientId.trimmed();
     if (!id.isEmpty() && id != m_daemon->clientId()) {
-        m_daemon->setClientId(id, signIn, failed);
+        m_daemon->setClientId(
+            id,
+            [this, attempt] {
+                startSignIn(attempt);
+            },
+            [this, attempt](const QString &error) {
+                addFailed(attempt, error);
+            });
     } else {
-        signIn();
+        startSignIn(attempt);
     }
+}
+
+void AccountsModel::startSignIn(quint64 attempt)
+{
+    if (!m_adding || attempt != m_attempt) {
+        return;
+    }
+    m_daemon->add(
+        m_addMode,
+        [this, attempt](uint number, const QString &url) {
+            if (!m_adding || attempt != m_attempt) {
+                return;
+            }
+            m_signIn = number;
+            // The daemon may have said how the sign-in ended before this
+            // answer was handled.
+            const QStringList early = m_early.take(number);
+            m_early.clear();
+            if (!early.isEmpty()) {
+                signInEnded(early.at(0), early.at(1), early.at(2));
+            } else if (m_cancelRequested) {
+                cancelSignIn();
+            } else {
+                m_signInUrl = url;
+                Q_EMIT addingChanged();
+                Q_EMIT openUrlRequested(url);
+            }
+        },
+        [this, attempt](const QString &error) {
+            addFailed(attempt, error);
+        });
+}
+
+void AccountsModel::addFailed(quint64 attempt, const QString &error)
+{
+    if (!m_adding || attempt != m_attempt) {
+        return;
+    }
+    if (m_cancelRequested) {
+        // Cancel was pressed first: there is nothing to cancel, and nothing to say.
+        finishAdding(QString());
+    } else {
+        finishAdding(error.isEmpty() ? i18n("The account could not be added.") : error);
+    }
+}
+
+void AccountsModel::addReadOnlyInstead()
+{
+    if (!m_adding || !m_signIn || m_cancelRequested || !m_awaitedPath.isEmpty() || m_addMode == ReadOnly) {
+        return;
+    }
+    // Cancel first; if the browser finished meanwhile, make its account read-only instead.
+    const uint number = *m_signIn;
+    const quint64 attempt = ++m_attempt;
+    m_addMode = ReadOnly;
+    m_replacing = number;
+    m_signInUrl.clear();
+    Q_EMIT addingChanged();
+    m_daemon->cancelSignIn(
+        number,
+        [this, attempt](const QString &error) {
+            addFailed(attempt, error);
+        },
+        [this, attempt, number](bool cancelled) {
+            if (!m_adding || attempt != m_attempt) {
+                return;
+            }
+            m_replacing.reset();
+            if (!cancelled) {
+                // It ended by itself meanwhile; its SignInFinished says how.
+                return;
+            }
+            if (m_signIn == number) {
+                m_signIn.reset();
+            }
+            if (m_cancelRequested) {
+                finishAdding(QString());
+                return;
+            }
+            startSignIn(attempt);
+        });
 }
 
 void AccountsModel::handleSignInFinished(uint number, const QString &outcome, const QString &message, const QString &account)
@@ -293,6 +372,10 @@ void AccountsModel::handleSignInFinished(uint number, const QString &outcome, co
     if (!m_signIn) {
         // SignIn has not answered: which sign-in is this window's is not known yet.
         m_early.insert(number, {outcome, message, account});
+        return;
+    }
+    // The two-way sign-in given up for a read-only one: its "cancelled" ends nothing.
+    if (m_replacing == number && outcome == QLatin1String("cancelled")) {
         return;
     }
     // Another number is another client's sign-in.
@@ -331,9 +414,49 @@ void AccountsModel::signInEnded(const QString &outcome, const QString &message, 
 
 void AccountsModel::showAdded()
 {
+    if (m_finishingAdd) {
+        return;
+    }
     const QString path = m_awaitedPath;
-    finishAdding(QString());
-    Q_EMIT accountAdded(path);
+    if (m_addMode != ReadOnly) {
+        finishAdding(QString());
+        Q_EMIT accountAdded(path);
+        return;
+    }
+    // Cancellation can lose to browser completion. Enforce the choice even then, before
+    // onboarding can pick a folder. Force keeps any unsent work here and stops uploads now.
+    m_finishingAdd = true;
+    const quint64 attempt = m_attempt;
+    OrgKonedriveAccountInterface account(DaemonController::ServiceName, path, m_daemon->bus());
+    auto *watcher = new QDBusPendingCallWatcher(account.SetMode(ReadOnly, true), this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, attempt, path](QDBusPendingCallWatcher *w) {
+        w->deleteLater();
+        if (!m_adding || attempt != m_attempt) {
+            return;
+        }
+        const QDBusPendingReply<QString> reply = *w;
+        if (reply.isError()) {
+            finishAdding(i18n("The account could not be made read-only: %1", reply.error().message()));
+            return;
+        }
+        auto get = QDBusMessage::createMethodCall(DaemonController::ServiceName, path,
+                                                 QStringLiteral("org.freedesktop.DBus.Properties"), QStringLiteral("Get"));
+        get << AccountController::InterfaceName << QStringLiteral("Mode");
+        auto *check = new QDBusPendingCallWatcher(m_daemon->bus().asyncCall(get), this);
+        connect(check, &QDBusPendingCallWatcher::finished, this, [this, attempt, path](QDBusPendingCallWatcher *w) {
+            w->deleteLater();
+            if (!m_adding || attempt != m_attempt) {
+                return;
+            }
+            const QDBusPendingReply<QDBusVariant> reply = *w;
+            if (reply.isError() || reply.value().variant().toString() != ReadOnly) {
+                finishAdding(i18n("The account's read-only mode could not be verified. Check OneDrive Settings before choosing a folder."));
+                return;
+            }
+            finishAdding(QString());
+            Q_EMIT accountAdded(path);
+        });
+    });
 }
 
 void AccountsModel::cancelAdd()
@@ -371,7 +494,10 @@ void AccountsModel::cancelSignIn()
 
 void AccountsModel::finishAdding(const QString &error)
 {
+    m_finishingAdd = false;
     m_signIn.reset();
+    m_replacing.reset();
+    m_addMode.clear();
     m_cancelRequested = false;
     m_awaitedPath.clear();
     m_early.clear();

@@ -74,6 +74,10 @@ impl SyncService {
             split_download_share: Arc::clone(&self.parts),
             download_after: self.wiring.transfers.download_after,
             download_guard: Arc::clone(&self.wiring.persist.store.download_guard),
+            change_guard: match self.wiring.persist.store.change_guard(&self.wiring.persist.account) {
+                Ok(guard) => Some(guard),
+                Err(error) => return self.refuse_start(stopped, StartRefusal::Store(error.to_string()), &root),
+            },
             tree_lock,
             lease: Lease::on(&self.folder),
             ignore: Arc::clone(&self.ignore),

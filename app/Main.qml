@@ -11,13 +11,16 @@ import org.konedrive.app
 /// below them, is the whole app's. A page shows only when there is something
 /// on it to see or do: with no account, adding one; with no service, its
 /// Status; with no folder, its Status, where the folder is chosen, and its
-/// OneDrive Settings. Adding a OneDrive opens the browser at once, and the
+/// OneDrive Settings; On Hold while the change guard holds changes of it (and, once they are
+/// resolved there, until another page is shown). Adding a OneDrive opens the browser at once, and the
 /// dialog that picks its folder once it is added.
 Kirigami.ApplicationWindow {
     id: root
 
-    /// The page shown: signIn, status, issues, oneDriveSettings or settings.
+    /// The page shown: signIn, status, onHold, issues, oneDriveSettings or settings.
     property string currentPage: "status"
+    /// The account On Hold was shown for: the page stays for it once nothing is held.
+    property var onHoldShownFor: null
     /// Wide enough for the sidebar beside a page.
     readonly property bool sidebarFits: width >= Kirigami.Units.gridUnit * 36
     readonly property bool hasService: Daemon.serviceAvailable
@@ -41,6 +44,9 @@ Kirigami.ApplicationWindow {
             return hasService;
         case "status":
             return !hasService || hasAccount;
+        case "onHold":
+            return hasService && hasFolder && Current.item !== null
+                && (Current.item.held.count > 0 || (currentPage === "onHold" && onHoldShownFor === Current.item));
         case "issues":
             return hasService && hasFolder;
         case "oneDriveSettings":
@@ -58,6 +64,7 @@ Kirigami.ApplicationWindow {
         const pages = {
             "signIn": signInPage,
             "status": statusPage,
+            "onHold": onHoldPage,
             "issues": issuesPage,
             "oneDriveSettings": oneDriveSettingsPage,
             "settings": settingsPage,
@@ -67,6 +74,9 @@ Kirigami.ApplicationWindow {
         }
         if (!pageShows(name)) {
             name = hasService && !hasAccount ? "signIn" : "status";
+        }
+        if (name === "onHold") {
+            onHoldShownFor = Current.item;
         }
         if (name !== currentPage || pageStack.depth === 0) {
             currentPage = name;
@@ -79,8 +89,8 @@ Kirigami.ApplicationWindow {
     }
 
     /// Shows where a notification leads, by its name (sectionName() of a WindowSection):
-    /// Status, Status with its History opened, a section of Issues brought to the top, or
-    /// Settings' apps the download guard blocked.
+    /// Status, Status with its History opened, On Hold, a section of Issues brought to the top,
+    /// Settings' apps the download guard blocked, or OneDrive Settings' Sync card (writeScope).
     function showSection(name) {
         if (name === "history") {
             showPage("status");
@@ -92,6 +102,13 @@ Kirigami.ApplicationWindow {
         if (name === "guardApps") {
             showPage("settings");
             settingsPage.showGuardApps();
+            return;
+        }
+        if (name === "writeScope") {
+            showPage("oneDriveSettings");
+            if (currentPage === "oneDriveSettings") {
+                oneDriveSettingsPage.showSyncSettings();
+            }
             return;
         }
         const issuesSections = ["cantUpload", "keptBothVersions", "notInFolder"];
@@ -243,6 +260,7 @@ Kirigami.ApplicationWindow {
         Repeater {
             model: [
                 { name: "status", text: i18nc("@title sidebar", "Status"), icon: "" },
+                { name: "onHold", text: i18nc("@title sidebar", "On Hold"), icon: "security-medium" },
                 { name: "issues", text: i18nc("@title sidebar", "Issues"), icon: "dialog-warning" },
                 { name: "oneDriveSettings", text: i18nc("@title sidebar", "OneDrive Settings"), icon: "folder-cloud" },
             ]
@@ -253,8 +271,10 @@ Kirigami.ApplicationWindow {
                 // Status's icon is the account's state.
                 icon.name: modelData.name === "status" ? (Current.status ? Current.status.iconName : "state-offline") : modelData.icon
                 visible: root.pageShows(modelData.name)
-                // Both versions kept, and the changes that need the user to go up.
-                badge: modelData.name === "issues" && Current.sync ? Current.sync.conflictCount + Current.sync.blockedCount : 0
+                // Both versions kept, and the changes that need the user to go up; the changes on hold.
+                badge: modelData.name === "issues" && Current.sync ? Current.sync.conflictCount + Current.sync.blockedCount
+                     : modelData.name === "onHold" && Current.item ? Current.item.held.count
+                     : 0
             }
         }
         Kirigami.Separator {
@@ -343,6 +363,9 @@ Kirigami.ApplicationWindow {
         }
         StatusPage {
             id: statusPage
+        }
+        OnHoldPage {
+            id: onHoldPage
         }
         IssuesPage {
             id: issuesPage

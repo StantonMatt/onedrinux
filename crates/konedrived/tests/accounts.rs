@@ -436,3 +436,43 @@ async fn download_guard_contract_settings_and_app_rules() {
     let xml = include_str!("../../../dbus/org.konedrive.DownloadGuard.xml");
     assert_eq!(signature_lines(&live, "org.konedrive.DownloadGuard"), signature_lines(xml, "org.konedrive.DownloadGuard"));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn change_guard_interface_matches_its_xml() {
+    use konedrive_dbus::change_guard::ChangeGuardProxy;
+    let d = Daemon::start().await;
+    let path = d.add("Guarded").await;
+    let id = d.account(&path).id.as_str().to_owned();
+    let guard = ChangeGuardProxy::builder(&d.client).cache_properties(zbus::proxy::CacheProperties::No).build().await.unwrap();
+    let (enabled, thresholds) = guard.get_settings().await.unwrap();
+    assert!(enabled);
+    assert!(guard.get_error(&id).await.unwrap().is_empty());
+    assert_eq!((thresholds["removals"], thresholds["removal-bytes"], thresholds["daily-removals"]), (20,1<<30,100));
+    assert_eq!((thresholds["rewrites"], thresholds["moves"], thresholds["uploads"]), (50,200,500));
+    let (token, rows) = guard.list_held(&id).await.unwrap();
+    assert!(rows.is_empty());
+    assert_eq!(guard.allow_held(&id, &token, &[]).await.unwrap(), konedrive_dbus::rows::GuardResult::default());
+    assert!(guard.allow_held(&id, "wrong-token", &[]).await.is_err());
+    assert!(guard.restore_held(&id, "wrong-token", &[]).await.is_err());
+    let mut progress = guard.receive_restore_progress().await.unwrap();
+    assert_eq!(guard.restore_held(&id, &token, &[]).await.unwrap().failed, 0);
+    let message = tokio::time::timeout(Duration::from_secs(3), progress.next()).await.unwrap().unwrap();
+    let args = message.args().unwrap();
+    assert_eq!((args.account(), args.token(), *args.done(), *args.total()), (&id, &token, 0, 0));
+    assert!(guard.upload_local(&id, "absent").await.is_err());
+    guard.set_thresholds([("removals".into(), 0), ("removal-bytes".into(), 17), ("daily-removals".into(), 3)].into()).await.unwrap();
+    guard.set_enabled(false).await.unwrap();
+    assert!(!guard.enabled().await.unwrap());
+    let limits = guard.thresholds().await.unwrap();
+    assert_eq!((limits["removals"], limits["removal-bytes"], limits["daily-removals"]), (0,17,3));
+    assert!(guard.allow_held(&id, &token, &["unknown".into()]).await.is_err());
+    assert!(guard.list_held("missing-account").await.is_err());
+    let second = d.add("Second").await;
+    assert_eq!(guard.get_settings().await.unwrap().1["removal-bytes"], 17);
+    let second_id = d.account(&second).id.as_str().to_owned();
+    let other_token = guard.list_held(&second_id).await.unwrap().0;
+    assert!(guard.allow_held(&id, &other_token, &[]).await.is_err());
+    let live = introspect(&d.client, ACCOUNTS_PATH).await;
+    let xml = include_str!("../../../dbus/org.konedrive.ChangeGuard.xml");
+    assert_eq!(signature_lines(&live, "org.konedrive.ChangeGuard"), signature_lines(xml, "org.konedrive.ChangeGuard"));
+}

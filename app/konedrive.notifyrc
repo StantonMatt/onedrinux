@@ -58,3 +58,13 @@ Action=Popup
 Name=App's downloads blocked
 Comment=An app downloaded many files from OneDrive in a short time; its downloads are blocked until you allow them
 Action=Popup
+
+[Event/changesHeld]
+Name=Changes on hold
+Comment=Many changes were made in the OneDrive folder in a short time; they are not sent to OneDrive until you review them
+Action=Popup
+
+[Event/writeRefused]
+Name=Change refused outside the allowed folders
+Comment=A program tried to change something outside the folders that can be changed on this computer
+Action=Popup

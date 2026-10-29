@@ -277,22 +277,27 @@ impl NameHolders {
                 false
             }
             NameHolder::OwnEmptyFile(empty_file) => {
-                let allowed = match facts.holder.as_ref().map(|holder| super::confirmed_item::to_confirmed_item(holder, &self.graph.drive_id)) {
-                    Some(Ok(confirmed)) => super::write_scope::allows_confirmed(&self.graph, &self.write_scope, &confirmed).await,
-                    _ => self.write_scope.get().unrestricted(),
-                };
-                if !allowed { return Err(StepOutcome::Refused(StepRefusal::NameHeldByUploadSession)); }
                 let guard = facts.holder.as_ref().map(to_guard_of_answer);
                 let removed = {
                     let _slot = self.graph.drive.pool().acquire(Class::Metadata).await;
+                    let allowed = match facts.holder.as_ref().map(|holder| super::confirmed_item::to_confirmed_item(holder, &self.graph.drive_id)) {
+                        Some(Ok(confirmed)) => super::write_scope::allows_confirmed(&self.graph, &self.write_scope, &confirmed).await,
+                        _ => self.write_scope.get().unrestricted(),
+                    };
+                    if !allowed { return Err(StepOutcome::Refused(StepRefusal::NameHeldByUploadSession)); }
+                    if !self.graph.admit_cleanup(empty_file, 0, guard.as_ref().map_or("", |g| g.as_str())) {
+                        return Err(StepOutcome::Refused(StepRefusal::NameHeldByUploadSession));
+                    }
                     self.graph.drive.delete_item(empty_file.item_id.as_str(), guard.as_ref().map_or("", |guard| guard.as_str())).await
                 };
                 match removed {
                     Ok(()) | Err(WriteError::NotFound) => {
+                        self.graph.settle_cleanup(empty_file, true).map_err(store_failure)?;
                         tracing::info!("the name of item {} was held in OneDrive by the empty file of an upload session this folder opened: removed", item.local_item_id);
                         true
                     }
                     Err(error) => {
+                        if matches!(error, WriteError::Changed) { self.graph.settle_cleanup(empty_file, false).map_err(store_failure)?; }
                         return Err(StepOutcome::Refused(match decide_refusal(&error) {
                             // Refused for now: said as it is, and the openings stay.
                             RefusedRequest::Settled(refusal @ (StepRefusal::Throttled { .. } | StepRefusal::SignedOut)) => refusal,

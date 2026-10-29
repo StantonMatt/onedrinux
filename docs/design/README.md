@@ -20,6 +20,7 @@ holds between them, and why.
 | [store.md](store.md) | Store admission, quarantine, migrations, snapshots and durability |
 | [mount.md](mount.md) | The mount and the backing directory: what each request of the kernel does, reading a file that is not on disk, downloads, freeing up space, the start-up check, the mount's end |
 | [download-guard.md](download-guard.md) | Caller identities, background refusals, app budgets, disk reserves and the UI bus contract |
+| [change-guard.md](change-guard.md) | Outgoing thresholds, immutable approvals and offline Restore |
 | [writes.md](writes.md) | Uploads: the access mode, what a program's change does, the requests to OneDrive, conflicts, what holds sending back (pausing, the automatic hold, throttling), what the bus shows of what waits, the test account |
 | [pinning.md](pinning.md) | "Always keep on this device": the pin, what a pin downloads and keeps, freeing up around pins, and how the bus, the command line and Dolphin show it |
 | [accounts.md](accounts.md) | Several accounts, each with its own folder: what an account is, the configuration and each account's files, keeping accounts apart, adding and removing |

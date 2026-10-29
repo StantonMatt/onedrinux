@@ -116,12 +116,16 @@ seed_large_directory() {
     for n in 1 2 3 4 5; do seed_file K$n R keep$n.txt 'kept'; done
 }
 
-# A removal made here is sent as any other change, however much it removes: nothing is held
-# and nothing is asked. What protects the user is OneDrive's own recycle bin.
+# Ordinary write scenarios disable the change guard; mass_changes exercises the holds.
+# The completed cloud listing can precede the folder's ShowItem jobs. Wait for every
+# seeded child before rm reads the directory, as the mass-change drills do.
+large_directory_is_shown() { [ "$(user 'find many -type f | wc -l')" -eq 30 ] 2>/dev/null; }
 removing_a_large_directory_sends_every_removal() {
     begin_folder
     seed_large_directory
     register_folder
+    echo "    note  initially shown: $(user 'find many -type f | wc -l') of 30 files"
+    check_within 30 "all thirty files are shown before removal" large_directory_is_shown
     user "rm -r many"
     check "the folder lacks the directory at once" "$(user "test -e many && echo there || echo gone")" gone
     check_within 30 "OneDrive lacks the directory" onedrive_lacks many

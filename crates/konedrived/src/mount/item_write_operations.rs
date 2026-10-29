@@ -311,6 +311,25 @@ impl ItemWriteOperations {
         decide_place_errno(refusal)
     }
 
+    /// Mount events feed the same admission ledger as plans. A failed ledger keeps
+    /// outgoing requests stopped; the local operation already succeeded and is retained.
+    fn observe_guard_item(&self, item: LocalItemId) {
+        let Some(guard) = &self.place_changes.change_guard else { return };
+        let guard = Arc::clone(guard);
+        let observed = self.store.call_blocking(move |store| {
+            let items = store.item_store();
+            let reader = items.reader();
+            let Some(row) = reader.find_item(item)? else {
+                return guard.retire_upload(item).map_err(|e| TreeError::Io(std::io::Error::other(e)));
+            };
+            let path = reader.find_path(item)?.or(reader.find_synced_path(item)?).unwrap_or_default();
+            guard.observe_items(&reader, &[(row, path.display().to_string())], crate::clock::unix_now())
+        });
+        if let Err(error) = observed {
+            tracing::error!("cannot observe local change: {error}");
+        }
+    }
+
     /// The plan is made again: a local version was written.
     fn wake_plan(&self) {
         self.sync_plan_wake.wake(WakeCause::LocalVersionWritten);

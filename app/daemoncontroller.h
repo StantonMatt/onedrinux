@@ -92,10 +92,13 @@ public:
     /// SignIn: `done` gets the sign-in's number and the URL to open, `failed` the
     /// daemon's reason. How the sign-in ends comes out of signInFinished.
     void signIn(std::function<void(uint, const QString &)> done, std::function<void(const QString &)> failed);
+    /// Add(mode), as signIn(): an account added "read-only" or "read-write"; empty is the
+    /// daemon's default, asked with SignIn.
+    void add(const QString &mode, std::function<void(uint, const QString &)> done, std::function<void(const QString &)> failed);
     /// CancelSignIn for the sign-in `number`. The daemon never refuses it: it answers whether
-    /// it cancelled, which is not read here, since signInFinished says how the sign-in ended
-    /// either way. `failed` only when the call got no answer.
-    void cancelSignIn(uint number, std::function<void(const QString &)> failed);
+    /// it cancelled, to `answered`; signInFinished says how the sign-in ended either way.
+    /// `failed` only when the call got no answer.
+    void cancelSignIn(uint number, std::function<void(const QString &)> failed, std::function<void(bool)> answered = {});
     /// Remove(path). Like Unregister it waits as long as it takes: it
     /// forgets the folder first. One at a time: asked
     /// while another is under way, it does nothing.

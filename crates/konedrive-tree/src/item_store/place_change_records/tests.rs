@@ -172,3 +172,16 @@ fn a_record_outlives_the_row_of_its_item() {
     store.item_store().apply(&LocalVersionChange::Removed { item: file }).unwrap();
     assert_eq!(store.item_store().list_place_change_records().unwrap(), vec![(id, record)]);
 }
+
+#[test]
+fn retained_removal_names_are_confined_to_the_guard_directory() {
+    let mut store = crate::TreeStore::in_memory().unwrap();
+    let item = crate::LocalItemId::new(2);
+    let place = crate::ItemPlace { parent_local_item_id: crate::LocalItemId::ROOT, name: "file".into() };
+    for aside in [".konedrive-change-guard/2-123", ".konedrive-aside-2"] {
+        assert!(store.item_store().record_place_change(&PlaceChangeRecord::SetAside { item, place: place.clone(), aside_name: aside.into() }).is_ok());
+    }
+    for aside in [".konedrive-change-guard/../escape", ".konedrive-change-guard/..", ".konedrive-change-guard/", "other/path", "/absolute"] {
+        assert!(store.item_store().record_place_change(&PlaceChangeRecord::SetAside { item, place: place.clone(), aside_name: aside.into() }).is_err());
+    }
+}

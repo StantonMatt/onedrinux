@@ -167,7 +167,7 @@ impl Requests {
     fn rename_as(&self, from: &str, to: &str, mode: RenameMode) -> Result<(), Errno> {
         let ((directory, name), (new_directory, new_name)) = (split(from), split(to));
         let (directory, name, new_directory, new_name) = (self.id(directory), OsString::from(name), self.id(new_directory), OsString::from(new_name));
-        self.queue(move |requests, reply| requests.queue_rename(directory, &name, new_directory, &new_name, mode, reply))
+        self.queue(move |requests, reply| requests.queue_rename(directory, &name, new_directory, &new_name, mode, A_PROGRAM, reply))
     }
 
     fn rename(&self, from: &str, to: &str) -> Result<(), Errno> {
@@ -190,17 +190,17 @@ impl Requests {
     /// An open for writing as `kernel_requests` makes it: decided on the mount's thread, then
     /// queued at once or after the download.
     fn open_to_write(&self, node: LocalItemId) -> Result<OpenedFile, Errno> {
-        match self.ask(move |requests| requests.decide_open_to_write(node))? {
-            FileToFill::Nothing => self.queue(move |requests, reply| requests.queue_open_to_write(node, reply)),
-            FileToFill::Download(file) => self.fill(|requests, reply| async move { requests.fill_and_open_to_write(node, file, reply).await }),
+        match self.ask(move |requests| requests.decide_open_to_write(node, A_PROGRAM))? {
+            FileToFill::Nothing => self.queue(move |requests, reply| requests.queue_open_to_write(node, A_PROGRAM, reply)),
+            FileToFill::Download(file) => self.fill(|requests, reply| async move { requests.fill_and_open_to_write(node, file, A_PROGRAM, reply).await }),
         }
     }
 
     /// A truncation as `kernel_requests` makes it.
     fn truncate(&self, node: LocalItemId, fh: Option<Fh>, size: u64) -> Result<FileAttr, Errno> {
-        match self.ask(move |requests| requests.decide_truncate(node, size))? {
-            FileToFill::Nothing => self.queue(move |requests, reply| requests.queue_truncate(node, fh, size, reply)),
-            fill => self.fill(|requests, reply| async move { requests.fill_and_truncate(node, fh, size, fill, reply).await }),
+        match self.ask(move |requests| requests.decide_truncate(node, size, A_PROGRAM))? {
+            FileToFill::Nothing => self.queue(move |requests, reply| requests.queue_truncate(node, fh, size, A_PROGRAM, reply)),
+            fill => self.fill(|requests, reply| async move { requests.fill_and_truncate(node, fh, size, fill, A_PROGRAM, reply).await }),
         }
     }
 
@@ -213,7 +213,7 @@ impl Requests {
     }
 
     fn write(&self, fh: Fh, offset: u64, bytes: &'static [u8]) -> Result<u32, Errno> {
-        self.ask(move |requests| requests.answer_write(fh, offset, bytes))
+        self.ask(move |requests| requests.answer_write(fh, offset, bytes, A_PROGRAM))
     }
 
     /// A release, and the job it queued run.
@@ -366,10 +366,10 @@ fn a_request_by_a_node_whose_row_is_gone_is_stale() {
     assert_eq!(mount.ask(|requests| requests.answer_listxattr(LocalItemId::new(NO_ITEM_ID))).err(), stale);
     assert_eq!(mount.open_to_read(LocalItemId::new(NO_ITEM_ID)).err(), stale);
     assert_eq!(mount.open_to_write(LocalItemId::new(NO_ITEM_ID)).err(), stale);
-    assert_eq!(mount.queue(|requests, reply| requests.queue_open_to_write(LocalItemId::new(NO_ITEM_ID), reply)).err(), stale);
-    assert_eq!(mount.queue(|requests, reply| requests.queue_open_to_overwrite(LocalItemId::new(NO_ITEM_ID), reply)).err(), stale);
+    assert_eq!(mount.queue(|requests, reply| requests.queue_open_to_write(LocalItemId::new(NO_ITEM_ID), A_PROGRAM, reply)).err(), stale);
+    assert_eq!(mount.queue(|requests, reply| requests.queue_open_to_overwrite(LocalItemId::new(NO_ITEM_ID), A_PROGRAM, reply)).err(), stale);
     assert_eq!(mount.truncate(LocalItemId::new(NO_ITEM_ID), None, 0).err(), stale);
-    assert_eq!(mount.queue(|requests, reply| requests.queue_truncate(LocalItemId::new(NO_ITEM_ID), None, 0, reply)).err(), stale);
+    assert_eq!(mount.queue(|requests, reply| requests.queue_truncate(LocalItemId::new(NO_ITEM_ID), None, 0, A_PROGRAM, reply)).err(), stale);
     assert_eq!(mount.set_time_as(LocalItemId::new(NO_ITEM_ID), None, 5, A_PROGRAM).err(), stale);
 
     // An item of OneDrive that was removed here keeps its row, which shows nothing.
@@ -413,11 +413,11 @@ fn assert_every_change_is_refused(mount: &Requests, file: LocalItemId, not_on_di
     assert_eq!(mount.remove("a.txt", ItemKind::File).err(), read_only);
     assert_eq!(mount.rename("a.txt", "b.txt").err(), read_only);
     assert_eq!(mount.rename_as("a.txt", "b.txt", RenameMode::Exchange).err(), read_only, "read-only before the mode is looked at");
-    assert_eq!(mount.ask(move |requests| requests.decide_open_to_write(not_on_disk)).err(), read_only);
-    assert_eq!(mount.queue(move |requests, reply| requests.queue_open_to_write(file, reply)).err(), read_only);
-    assert_eq!(mount.queue(move |requests, reply| requests.queue_open_to_overwrite(file, reply)).err(), read_only);
-    assert_eq!(mount.ask(move |requests| requests.decide_truncate(not_on_disk, 3)).err(), read_only);
-    assert_eq!(mount.queue(move |requests, reply| requests.queue_truncate(file, None, 0, reply)).err(), read_only);
+    assert_eq!(mount.ask(move |requests| requests.decide_open_to_write(not_on_disk, A_PROGRAM)).err(), read_only);
+    assert_eq!(mount.queue(move |requests, reply| requests.queue_open_to_write(file, A_PROGRAM, reply)).err(), read_only);
+    assert_eq!(mount.queue(move |requests, reply| requests.queue_open_to_overwrite(file, A_PROGRAM, reply)).err(), read_only);
+    assert_eq!(mount.ask(move |requests| requests.decide_truncate(not_on_disk, 3, A_PROGRAM)).err(), read_only);
+    assert_eq!(mount.queue(move |requests, reply| requests.queue_truncate(file, None, 0, A_PROGRAM, reply)).err(), read_only);
     assert_eq!(mount.set_time_as(file, None, 5, A_PROGRAM).err(), read_only);
     assert_eq!(mount.fixture.write_operation_thread.count_queued_jobs(), 0, "nothing was queued");
     assert!(mount.list_fetched_ranges().is_empty(), "nothing was downloaded for a write the folder will not take");
@@ -570,14 +570,14 @@ fn a_file_not_on_disk_is_downloaded_before_it_is_opened_for_writing() {
     let mount = Requests::new();
     let row = mount.fixture.show_onedrive_file("w.txt", b"0123456789");
     let file = row.local_item_id;
-    assert_eq!(mount.ask(move |requests| requests.decide_open_to_write(file)), Ok(FileToFill::Download(ItemToDownload { item: file, onedrive_item: row.onedrive_item.clone().unwrap(), content: local_content(&row) })));
+    assert_eq!(mount.ask(move |requests| requests.decide_open_to_write(file, A_PROGRAM)), Ok(FileToFill::Download(ItemToDownload { item: file, onedrive_item: row.onedrive_item.clone().unwrap(), content: local_content(&row) })));
 
     let opened = mount.open_to_write(file).unwrap();
     assert!(!opened.keeps_cache);
     assert_eq!(mount.fixture.read_disk_file("w.txt").as_deref(), Some(&b"0123456789"[..]), "downloaded first");
     let open_row = mount.row(file);
     assert_eq!((open_row.content_presence, open_row.content_before_write.as_ref()), (ContentPresence::OnDisk, Some(&local_content(&row))), "the first writer's open is in the row");
-    assert_eq!(mount.ask(move |requests| requests.decide_open_to_write(file)), Ok(FileToFill::Nothing), "on disk now");
+    assert_eq!(mount.ask(move |requests| requests.decide_open_to_write(file, A_PROGRAM)), Ok(FileToFill::Nothing), "on disk now");
 
     mount.release(opened.fh);
     let closed = mount.row(file);
@@ -629,7 +629,7 @@ fn an_append_is_put_at_the_size_the_writers_file_has() {
 fn a_truncation_to_nothing_of_a_file_not_on_disk_downloads_nothing() {
     let mount = Requests::new();
     let file = mount.fixture.show_onedrive_file("t.txt", b"content").local_item_id;
-    assert_eq!(mount.ask(move |requests| requests.decide_truncate(file, 0)), Ok(FileToFill::Nothing));
+    assert_eq!(mount.ask(move |requests| requests.decide_truncate(file, 0, A_PROGRAM)), Ok(FileToFill::Nothing));
     assert_eq!(mount.truncate(file, None, 0).unwrap().size, 0);
     assert!(mount.list_fetched_ranges().is_empty());
     let row = mount.row(file);
@@ -643,7 +643,7 @@ fn a_truncation_to_nothing_of_a_file_not_on_disk_downloads_nothing() {
 fn a_truncation_of_a_file_not_on_disk_downloads_it_first() {
     let mount = Requests::new();
     let file = mount.fixture.show_onedrive_file("t.txt", b"content").local_item_id;
-    assert!(matches!(mount.ask(move |requests| requests.decide_truncate(file, 3)), Ok(FileToFill::Download(to_download)) if to_download.item == file));
+    assert!(matches!(mount.ask(move |requests| requests.decide_truncate(file, 3, A_PROGRAM)), Ok(FileToFill::Download(to_download)) if to_download.item == file));
     assert_eq!(mount.truncate(file, None, 3).unwrap().size, 3);
     assert_eq!(mount.fixture.read_disk_file("t.txt").as_deref(), Some(&b"con"[..]));
     assert_eq!(local_content(&mount.row(file)).size(), 3);
@@ -654,7 +654,7 @@ fn a_truncation_of_a_file_not_on_disk_downloads_it_first() {
 fn a_file_opened_to_be_overwritten_is_cut_and_nothing_is_downloaded() {
     let mount = Requests::new();
     let file = mount.fixture.show_onedrive_file("o.txt", b"the old content").local_item_id;
-    let opened = mount.queue(move |requests, reply| requests.queue_open_to_overwrite(file, reply)).unwrap();
+    let opened = mount.queue(move |requests, reply| requests.queue_open_to_overwrite(file, A_PROGRAM, reply)).unwrap();
     assert!(!opened.keeps_cache);
     assert!(mount.list_fetched_ranges().is_empty());
     assert_eq!(mount.getattr(file, None).unwrap().size, 0);

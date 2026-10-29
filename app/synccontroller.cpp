@@ -7,6 +7,7 @@
 #include "generated/reasontexts.h"
 #include "skipreasons.h"
 #include "uploadqueueinterface.h"
+#include "writescope.h"
 
 #include <QDBusArgument>
 #include <QDBusError>
@@ -378,6 +379,11 @@ QString SyncController::rootPathText() const
     return folderText(m_rootPath);
 }
 
+QString SyncController::folderInside(const QUrl &folder) const
+{
+    return ::folderInside(m_rootPath, folder.toLocalFile());
+}
+
 void SyncController::chooseFolder(const QUrl &folder)
 {
     const QString path = folder.toLocalFile();
@@ -469,6 +475,34 @@ void SyncController::openOnWeb()
     call(m_bus.asyncCall(message), [](const QDBusPendingCall &pending) {
         const QDBusPendingReply<QString> reply = pending;
         QDesktopServices::openUrl(QUrl(reply.value()));
+    });
+}
+
+QUrl SyncController::recycleBinUrl(const QUrl &webUrl)
+{
+    // https://contoso-my.sharepoint.com/personal/ann_contoso_com/Documents: the site is the
+    // first two parts of the path.
+    if (webUrl.host().endsWith(QLatin1String(".sharepoint.com"))) {
+        const QStringList parts = webUrl.path().split(QLatin1Char('/'), Qt::SkipEmptyParts);
+        QUrl bin = webUrl;
+        bin.setQuery(QString());
+        bin.setFragment(QString());
+        bin.setPath(QLatin1Char('/') + parts.mid(0, 2).join(QLatin1Char('/')) + QStringLiteral("/_layouts/15/RecycleBin.aspx"));
+        return bin;
+    }
+    return QUrl(QStringLiteral("https://onedrive.live.com/?v=recyclebin"));
+}
+
+void SyncController::openRecycleBin()
+{
+    if (m_rootPath.isEmpty()) {
+        return;
+    }
+    auto message = QDBusMessage::createMethodCall(ServiceName, QStringLiteral("/org/konedrive/Accounts"), QStringLiteral("org.konedrive.Files"), QStringLiteral("WebUrl"));
+    message << m_rootPath;
+    call(m_bus.asyncCall(message), [](const QDBusPendingCall &pending) {
+        const QDBusPendingReply<QString> reply = pending;
+        QDesktopServices::openUrl(recycleBinUrl(QUrl(reply.value())));
     });
 }
 

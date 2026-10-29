@@ -63,7 +63,7 @@ impl SyncService {
         let folder = self.require_record()?.root.path;
         let view = self.view();
         let Some(parts) = view.parts else { return Err(self.sync_not_running()) };
-        let sources = match (&view.sending_holds, &view.onedrive_space) {
+        let mut sources = match (&view.sending_holds, &view.onedrive_space) {
             (Some(sending_holds), Some(onedrive_space)) => {
                 QueueSources {
                     answers: parts.published_plan.list_answers(),
@@ -81,6 +81,16 @@ impl SyncService {
                 folder,
             },
         };
+        // Ledger choices are authoritative even before the next plan and while sync
+        // is stopped. Local-only state lives outside the tree schema.
+        if let Ok(guard) = self.change_guard() {
+            for id in guard.held() {
+                sources.answers.insert(id, ItemAnswer::Waiting(konedrive_tree::WaitReason::User(konedrive_tree::Reason::HeldForApproval)));
+            }
+            for id in guard.local_only() {
+                sources.answers.insert(id, ItemAnswer::Waiting(konedrive_tree::WaitReason::User(konedrive_tree::Reason::LocalOnly)));
+            }
+        }
         Ok(sources)
     }
 

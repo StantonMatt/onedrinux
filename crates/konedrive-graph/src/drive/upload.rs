@@ -214,6 +214,24 @@ impl DriveClient {
         }
     }
 
+    /// Sends at most one fragment request. Retryable failures return to the caller,
+    /// which must obtain fresh mutation admission before retrying this session.
+    /// Session progress and completed-upload verification are unchanged.
+    pub async fn upload_chunk_once(
+        &self,
+        session_url: &str,
+        offset: u64,
+        total: u64,
+        chunk: Vec<u8>,
+    ) -> Result<ChunkOutcome, WriteError> {
+        let end = fragment_end(offset, chunk.len() as u64, total)?;
+        let url = session_url_of(session_url)?;
+        match self.send_fragment(&url, session_url, offset..end, total, &Arc::new(chunk)).await {
+            Fragment::Settled(outcome) => outcome,
+            Fragment::NotTaken { refusal, .. } => Err(refusal),
+        }
+    }
+
     /// One send of the fragment `range` of a file of `total` bytes: what its answer
     /// settles, or the refusal a later send may get past.
     async fn send_fragment(&self, url: &Url, session_url: &str, range: Range<u64>, total: u64, chunk: &Arc<Vec<u8>>) -> Fragment {

@@ -50,6 +50,9 @@ pub struct Config {
     /// Mode of newly added accounts only. Existing entries keep their own mode.
     #[serde(default = "new_account_mode")]
     pub new_account_mode: Mode,
+    /// Outgoing hold settings shared by every account, including future accounts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_guard: Option<crate::change_guard::GuardConfig>,
     /// Every account, in the order it was added.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub accounts: Vec<AccountConfig>,
@@ -149,6 +152,7 @@ impl Default for Config {
             download_guard: None,
             download_guard_limits: None,
             new_account_mode: new_account_mode(),
+            change_guard: None,
             accounts: Vec::new(),
             transfers: None,
         }
@@ -158,6 +162,9 @@ impl Default for Config {
 /// One account, `[[accounts]]`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountConfig {
+    /// Legacy per-account settings, read only to migrate into the daemon setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) change_guard: Option<crate::change_guard::GuardConfig>,
     pub id: AccountId,
     /// What people see and type; see [`check_label`]. Nothing on disk is named after it.
     pub(crate) label: String,
@@ -238,6 +245,7 @@ impl AccountConfig {
             label: label.into(),
             mode: Mode::ReadOnly,
             write_paths: None,
+            change_guard: None,
             origin,
             drive_id: None,
             login_hint: String::new(),

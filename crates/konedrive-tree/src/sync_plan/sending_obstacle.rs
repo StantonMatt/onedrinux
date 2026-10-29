@@ -35,6 +35,9 @@ impl SentPart {
 /// What the plan was given about one item that says whether something of it is sent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SendingConditions {
+    pub(crate) is_held_for_approval: bool,
+    pub(crate) is_local_only: bool,
+    pub(crate) change_quiet_until: Option<i64>,
     /// The item is left here: it has no binding, and its name or that of a directory above
     /// it is ignored.
     pub(crate) is_ignored: bool,
@@ -57,6 +60,7 @@ pub(crate) struct SendingConditions {
 /// Why something of an item is not sent now.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SendingObstacle {
+    HeldForApproval,
     /// The item is left here: never sent.
     Ignored,
     /// OneDrive cannot hold the name; it is not sent and not altered.
@@ -84,6 +88,9 @@ pub(crate) enum SendingObstacle {
 /// A file larger than OneDrive takes is not foreseen: OneDrive's `413` is kept as a
 /// refusal for good (`docs/design/sync.md` §6.6).
 pub(crate) fn find_sending_obstacle(sent_part: SentPart, conditions: &SendingConditions) -> Option<SendingObstacle> {
+    if conditions.is_local_only { return Some(SendingObstacle::Refused(Reason::LocalOnly)); }
+    if conditions.is_held_for_approval { return Some(SendingObstacle::HeldForApproval); }
+    if let Some(until) = conditions.change_quiet_until.filter(|until| *until > conditions.now) { return Some(SendingObstacle::QuietTime { until }); }
     if conditions.is_ignored {
         return Some(SendingObstacle::Ignored);
     }

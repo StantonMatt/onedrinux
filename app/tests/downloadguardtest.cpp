@@ -323,8 +323,8 @@ private Q_SLOTS:
         QVERIFY(long_.endsWith(QChar(0x2026)));
     }
 
-    /// An app blocked for downloading too much: one notification, naming no account, with its
-    /// four buttons; the text says which limit it went over.
+    /// An app blocked for downloading too much: one notification, naming no account, with the
+    /// two buttons a Plasma popup has room for; the text says which limit it went over.
     void aBulkBlockNotifies()
     {
         start();
@@ -337,11 +337,8 @@ private Q_SLOTS:
         QCOMPARE(notice.title, QStringLiteral("Too many downloads by Copier"));
         QCOMPARE(notice.text, QStringLiteral("Copier downloaded 30 files from OneDrive in 10 minutes. To save space, its downloads are blocked until you allow them."));
         QCOMPARE(notice.iconName, QStringLiteral("copier-icon"));
-        QCOMPARE(buttons(notice),
-                 QStringList({QStringLiteral("Allow for This Session"),
-                              QStringLiteral("Always Allow"),
-                              QStringLiteral("Always Block"),
-                              QStringLiteral("Free Up What It Downloaded")}));
+        // Always Block and Free Up What It Downloaded are in the window's menu of the app.
+        QCOMPARE(buttons(notice), QStringList({QStringLiteral("Allow for This Session"), QStringLiteral("Always Allow")}));
 
         m_daemon->guard->block(Rg, QStringLiteral("rg"), 7, 2 * GiB - 1);
         QTRY_COMPARE(m_sink.sent.size(), 2);
@@ -370,33 +367,20 @@ private Q_SLOTS:
         QCOMPARE(m_guard->listed().size(), 2); // No AppsChanged is needed to withdraw them.
     }
 
-    /// Each button calls its method; Free Up says what it freed.
+    /// Each button calls its method.
     void eachButtonCallsItsMethod()
     {
         start();
         m_daemon->guard->block(Copier, QStringLiteral("org.example.Copier"), 30, 0);
         QTRY_COMPARE(m_sink.sent.size(), 1);
         const QList<NoticeAction> actions = m_sink.sent.constFirst().actions;
-        QCOMPARE(actions.size(), 4);
+        QCOMPARE(actions.size(), 2);
         auto &calls = m_daemon->guard->calls;
 
         actions.at(0).run();
         QTRY_VERIFY(calls.contains(QStringLiteral("AllowApp:%1:session").arg(Copier)));
         actions.at(1).run();
         QTRY_VERIFY(calls.contains(QStringLiteral("AllowApp:%1:always").arg(Copier)));
-        actions.at(2).run();
-        QTRY_VERIFY(calls.contains(QStringLiteral("BlockApp:") + Copier));
-
-        m_daemon->guard->freedFiles = 12;
-        m_daemon->guard->freedBytes = 300ULL << 20;
-        const qsizetype sent = m_sink.sent.size();
-        actions.at(3).run();
-        QTRY_VERIFY(calls.contains(QStringLiteral("FreeUpAppDownloads:") + Copier));
-        QTRY_COMPARE(m_sink.sent.size(), sent + 1);
-        const Notice freed = m_sink.sent.constLast();
-        QCOMPARE(freed.title, QStringLiteral("Freed up what Copier downloaded"));
-        QCOMPARE(freed.text, QStringLiteral("Freed 12 files (%1).").arg(QLocale().formattedDataSize(300LL << 20)));
-        QVERIFY(freed.actions.isEmpty());
     }
 
     /// A button the daemon refuses says so.
@@ -410,9 +394,6 @@ private Q_SLOTS:
         QTRY_COMPARE(m_sink.sent.size(), 2);
         QCOMPARE(m_sink.sent.at(1).title, QStringLiteral("Could not change what Copier may download"));
         QCOMPARE(m_sink.sent.at(1).text, QStringLiteral("config.toml cannot be written"));
-        m_sink.sent.constFirst().actions.at(3).run();
-        QTRY_COMPARE(m_sink.sent.size(), 3);
-        QCOMPARE(m_sink.sent.at(2).title, QStringLiteral("Could not free up what Copier downloaded"));
     }
 
     /// A reader always refused and an app always blocked are no news; a program that could not

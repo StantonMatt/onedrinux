@@ -288,7 +288,7 @@ impl Filesystem for KernelRequests {
         let node = to_local_item_id(ino);
         // Opening to write is a change of the folder.
         if flags.0 & libc::O_TRUNC != 0 {
-            return self.requests.queue_open_to_overwrite(node, reply_to_open(reply));
+            return self.requests.queue_open_to_overwrite(node, req.pid(), reply_to_open(reply));
         }
         if flags.0 & libc::O_ACCMODE == libc::O_RDONLY {
             return match self.requests.open_to_read(node, Some(req.pid())) {
@@ -302,12 +302,13 @@ impl Filesystem for KernelRequests {
                 }
             };
         }
-        match self.requests.decide_open_to_write(node) {
-            Ok(FileToFill::Nothing) => self.requests.queue_open_to_write(node, reply_to_open(reply)),
+        match self.requests.decide_open_to_write(node, req.pid()) {
+            Ok(FileToFill::Nothing) => self.requests.queue_open_to_write(node, req.pid(), reply_to_open(reply)),
             Ok(FileToFill::Download(file)) => {
                 if let Err(errno) = self.requests.admit_fill(req.pid(), &file) { return reply.error(errno); }
                 let (requests, reply) = (Arc::clone(&self.requests), reply_to_open(reply));
-                self.runtime.spawn(async move { requests.fill_and_open_to_write(node, file, reply).await });
+                let pid = req.pid();
+                self.runtime.spawn(async move { requests.fill_and_open_to_write(node, file, pid, reply).await });
             }
             Err(errno) => reply.error(errno),
         }
@@ -322,8 +323,8 @@ impl Filesystem for KernelRequests {
         }
     }
 
-    fn write(&self, _req: &Request, _ino: INodeNo, fh: FileHandle, offset: u64, data: &[u8], _write_flags: WriteFlags, _flags: OpenFlags, _lock_owner: Option<LockOwner>, reply: ReplyWrite) {
-        match self.requests.answer_write(to_fh(fh), offset, data) {
+    fn write(&self, req: &Request, _ino: INodeNo, fh: FileHandle, offset: u64, data: &[u8], _write_flags: WriteFlags, _flags: OpenFlags, _lock_owner: Option<LockOwner>, reply: ReplyWrite) {
+        match self.requests.answer_write(to_fh(fh), offset, data, req.pid()) {
             Ok(written) => reply.written(written),
             Err(errno) => reply.error(errno),
         }
@@ -467,14 +468,15 @@ impl Filesystem for KernelRequests {
     fn setattr(&self, req: &Request, ino: INodeNo, mode: Option<u32>, _uid: Option<u32>, _gid: Option<u32>, size: Option<u64>, _atime: Option<TimeOrNow>, mtime: Option<TimeOrNow>, _ctime: Option<SystemTime>, fh: Option<FileHandle>, _crtime: Option<SystemTime>, _chgtime: Option<SystemTime>, _bkuptime: Option<SystemTime>, _flags: Option<BsdFileFlags>, reply: ReplyAttr) {
         let (node, fh) = (to_local_item_id(ino), fh.map(to_fh));
         match (size, mtime, mode) {
-            (Some(size), _, _) => match self.requests.decide_truncate(node, size) {
-                Ok(FileToFill::Nothing) => self.requests.queue_truncate(node, fh, size, reply_to_attributes(reply)),
+            (Some(size), _, _) => match self.requests.decide_truncate(node, size, req.pid()) {
+                Ok(FileToFill::Nothing) => self.requests.queue_truncate(node, fh, size, req.pid(), reply_to_attributes(reply)),
                 Ok(fill @ FileToFill::Download(_)) => {
                     if let FileToFill::Download(file) = &fill {
                         if let Err(errno) = self.requests.admit_fill(req.pid(), file) { return reply.error(errno); }
                     }
                     let (requests, reply) = (Arc::clone(&self.requests), reply_to_attributes(reply));
-                    self.runtime.spawn(async move { requests.fill_and_truncate(node, fh, size, fill, reply).await });
+                    let pid = req.pid();
+                    self.runtime.spawn(async move { requests.fill_and_truncate(node, fh, size, fill, pid, reply).await });
                 }
                 Err(errno) => reply.error(errno),
             },
@@ -498,7 +500,7 @@ impl Filesystem for KernelRequests {
 
     /// Only a regular file is made: nothing else has a place in OneDrive.
     fn mknod(&self, req: &Request, parent: INodeNo, name: &OsStr, mode: u32, _umask: u32, _rdev: u32, reply: ReplyEntry) {
-        if let Err(errno) = self.requests.check_write_scope(to_local_item_id(parent), Some(name)) { return reply.error(errno); }
+        if let Err(errno) = self.requests.check_write_scope(to_local_item_id(parent), Some(name), req.pid()) { return reply.error(errno); }
         if mode & libc::S_IFMT != libc::S_IFREG {
             return reply.error(self.refuse_unsupported(Errno::EPERM));
         }
@@ -510,15 +512,15 @@ impl Filesystem for KernelRequests {
     }
 
     /// A symbolic link has nothing OneDrive could hold: none is made.
-    fn symlink(&self, _req: &Request, parent: INodeNo, name: &OsStr, _target: &Path, reply: ReplyEntry) {
-        if let Err(errno) = self.requests.check_write_scope(to_local_item_id(parent), Some(name)) { return reply.error(errno); }
+    fn symlink(&self, req: &Request, parent: INodeNo, name: &OsStr, _target: &Path, reply: ReplyEntry) {
+        if let Err(errno) = self.requests.check_write_scope(to_local_item_id(parent), Some(name), req.pid()) { return reply.error(errno); }
         reply.error(self.refuse_unsupported(Errno::EPERM));
     }
 
     /// OneDrive has no second name of a file: `EPERM`, as link(2) answers of a filesystem
     /// that makes no hard links.
-    fn link(&self, _req: &Request, ino: INodeNo, newparent: INodeNo, newname: &OsStr, reply: ReplyEntry) {
-        if let Err(errno) = self.requests.check_write_scope(to_local_item_id(ino), None).and_then(|()| self.requests.check_write_scope(to_local_item_id(newparent), Some(newname))) { return reply.error(errno); }
+    fn link(&self, req: &Request, ino: INodeNo, newparent: INodeNo, newname: &OsStr, reply: ReplyEntry) {
+        if let Err(errno) = self.requests.check_write_scope(to_local_item_id(ino), None, req.pid()).and_then(|()| self.requests.check_write_scope(to_local_item_id(newparent), Some(newname), req.pid())) { return reply.error(errno); }
         reply.error(self.refuse_unsupported(Errno::EPERM));
     }
 
@@ -530,8 +532,8 @@ impl Filesystem for KernelRequests {
         self.requests.queue_remove(to_local_item_id(parent), name, ItemKind::Directory, req.pid(), reply_to_done(reply))
     }
 
-    fn rename(&self, _req: &Request, parent: INodeNo, name: &OsStr, newparent: INodeNo, newname: &OsStr, flags: RenameFlags, reply: ReplyEmpty) {
-        self.requests.queue_rename(to_local_item_id(parent), name, to_local_item_id(newparent), newname, to_rename_mode(flags), reply_to_done(reply))
+    fn rename(&self, req: &Request, parent: INodeNo, name: &OsStr, newparent: INodeNo, newname: &OsStr, flags: RenameFlags, reply: ReplyEmpty) {
+        self.requests.queue_rename(to_local_item_id(parent), name, to_local_item_id(newparent), newname, to_rename_mode(flags), req.pid(), reply_to_done(reply))
     }
 
     /// The attributes are konedrive's own to write; a program that copies a file's along is
@@ -540,13 +542,13 @@ impl Filesystem for KernelRequests {
     /// file copied in with its attributes (`cp -a`) or a `setfattr` would write: none
     /// reaches the backing file, whose marks the check at start reads, by this way. The
     /// marks of a backing file are written by the daemon alone, on the backing directory.
-    fn setxattr(&self, _req: &Request, ino: INodeNo, _name: &OsStr, _value: &[u8], _flags: i32, _position: u32, reply: ReplyEmpty) {
-        if let Err(errno) = self.requests.check_write_scope(to_local_item_id(ino), None) { return reply.error(errno); }
+    fn setxattr(&self, req: &Request, ino: INodeNo, _name: &OsStr, _value: &[u8], _flags: i32, _position: u32, reply: ReplyEmpty) {
+        if let Err(errno) = self.requests.check_write_scope(to_local_item_id(ino), None, req.pid()) { return reply.error(errno); }
         reply.error(self.refuse_unsupported(Errno::ENOTSUP));
     }
 
-    fn removexattr(&self, _req: &Request, ino: INodeNo, _name: &OsStr, reply: ReplyEmpty) {
-        if let Err(errno) = self.requests.check_write_scope(to_local_item_id(ino), None) { return reply.error(errno); }
+    fn removexattr(&self, req: &Request, ino: INodeNo, _name: &OsStr, reply: ReplyEmpty) {
+        if let Err(errno) = self.requests.check_write_scope(to_local_item_id(ino), None, req.pid()) { return reply.error(errno); }
         reply.error(self.refuse_unsupported(Errno::ENOTSUP));
     }
 

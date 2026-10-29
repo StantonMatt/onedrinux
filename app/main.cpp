@@ -4,6 +4,7 @@
 #include "activitymodel.h"
 #include "appstatus.h"
 #include "autostart.h"
+#include "changeguardcontroller.h"
 #include "conflictmodel.h"
 #include "currentaccount.h"
 #include "daemoncontroller.h"
@@ -100,6 +101,8 @@ int run(int argc, char *argv[], Restart *restart)
     // The download guard, the whole app's, and its notifications.
     DownloadGuardController downloadGuard;
     GuardNotifier guardNotifier(&downloadGuard, &sink);
+    // The change guard's settings, the whole app's; what each account holds is its own.
+    ChangeGuardController changeGuard;
     AccountsModel accounts(&daemon);
     CurrentAccount current(&accounts);
     AppStatus appStatus(&accounts);
@@ -108,7 +111,17 @@ int run(int argc, char *argv[], Restart *restart)
     ServiceUnit serviceUnit;
     // Says a newer release in the foot of the sidebar, and once as a notification.
     ReleaseCheck releaseCheck(QStringLiteral(KONEDRIVE_VERSION), &sink);
-    registerKonedriveQml(&daemon, &accounts, &current, &autostart, &downloadProgressSettings, &placesSettings, &traySettings, &serviceUnit, &releaseCheck, &downloadGuard);
+    registerKonedriveQml(&daemon,
+                         &accounts,
+                         &current,
+                         &autostart,
+                         &downloadProgressSettings,
+                         &placesSettings,
+                         &traySettings,
+                         &serviceUnit,
+                         &releaseCheck,
+                         &downloadGuard,
+                         &changeGuard);
 
     QQmlApplicationEngine engine;
     KLocalization::setupLocalizedContext(&engine);
@@ -123,10 +136,13 @@ int run(int argc, char *argv[], Restart *restart)
     tray.setCurrentAccount(&current);
     QObject::connect(&tray, &TrayIcon::quitRequested, &app, &QCoreApplication::quit);
     // A click on an account's own icon shows that account; on the icon of them
-    // all, the one account needing attention when exactly one does. Either shows its Status.
+    // all, the one account needing attention when exactly one does. Either shows its Status,
+    // or its On Hold while it holds changes.
     QObject::connect(&tray, &TrayIcon::accountToShow, &current, &CurrentAccount::select);
-    QObject::connect(&tray, &TrayIcon::statusToShow, window, [window] {
-        QMetaObject::invokeMethod(window, "showSection", Q_ARG(QVariant, sectionName(WindowSection::Status)));
+    QObject::connect(&tray, &TrayIcon::statusToShow, window, [window, &current] {
+        // Changes on hold wait for the user on a page of their own.
+        const bool held = current.item() && current.item()->held()->count() > 0;
+        QMetaObject::invokeMethod(window, "showSection", Q_ARG(QVariant, sectionName(held ? WindowSection::OnHold : WindowSection::Status)));
     });
 
     // A click on a notification opens the window on its account, where the notice is dealt
@@ -147,6 +163,10 @@ int run(int argc, char *argv[], Restart *restart)
         };
         auto *notifier = new Notifier(item->account(), item->sync(), &sink, {}, item);
         notifier->setAccountName(name);
+        // What the change guard holds: a notification of its own, with its own buttons.
+        auto *held = new ChangeNotifier(item->account(), item->held(), &sink, item);
+        held->setAccountName(name);
+        held->setGuard(&changeGuard);
         auto *progress = new DownloadProgressController(item->sync(), &downloadJobTracker, &downloadProgressSettings, {}, item);
         progress->setAccountName(name);
         // Uploads through the same tracker and switch: "Uploading to OneDrive".

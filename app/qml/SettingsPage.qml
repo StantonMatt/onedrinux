@@ -7,7 +7,7 @@ import org.konedrive.app
 
 /// The whole app's settings: start at login, download progress, Places,
 /// when every account pauses by itself (metered connections, battery), the
-/// download guard with the apps it blocked or has a rule for, and Quit. Each
+/// download guard with the apps it blocked or has a rule for, the change guard, and Quit. Each
 /// OneDrive's own things (its folder, its sign-in, its previews) are on its
 /// OneDrive Settings page.
 FormCard.FormCardPage {
@@ -16,6 +16,8 @@ FormCard.FormCardPage {
     readonly property bool available: Daemon.serviceAvailable
     /// The guard is there and on: its limits and its apps show.
     readonly property bool guardOn: DownloadGuard.serviceAvailable && DownloadGuard.enabled
+    /// The change guard is there and on: its limits show.
+    readonly property bool holdOn: ChangeGuard.serviceAvailable && ChangeGuard.enabled
 
     /// The apps the download guard blocked brought into sight: where its notification leads.
     function showGuardApps() {
@@ -36,7 +38,7 @@ FormCard.FormCardPage {
         Layout.leftMargin: Kirigami.Units.largeSpacing
         Layout.rightMargin: Kirigami.Units.largeSpacing
         type: Kirigami.MessageType.Error
-        text: [Daemon.actionError, DownloadGuard.actionError].filter(error => error.length > 0).join("\n")
+        text: [Daemon.actionError, DownloadGuard.actionError, ChangeGuard.actionError].filter(error => error.length > 0).join("\n")
         visible: text.length > 0
     }
 
@@ -191,6 +193,52 @@ FormCard.FormCardPage {
             objectName: "guardOffLine"
             visible: DownloadGuard.serviceAvailable && !DownloadGuard.enabled
             text: i18n("Any app can download your whole OneDrive.")
+            textItem.wrapMode: Text.Wrap
+            leading: Kirigami.Icon {
+                source: "dialog-warning"
+                implicitWidth: Kirigami.Units.iconSizes.small
+                implicitHeight: Kirigami.Units.iconSizes.small
+            }
+        }
+        // The change guard (docs/design/change-guard.md): the daemon's, for every account.
+        // Turning it off asks first, and never releases what is held.
+        FormCard.FormDelegateSeparator {
+            visible: holdSwitch.visible
+        }
+        FormCard.FormSwitchDelegate {
+            id: holdSwitch
+            objectName: "holdSwitch"
+
+            readonly property bool on: ChangeGuard.enabled
+
+            visible: ChangeGuard.serviceAvailable || !page.available
+            text: i18n("Hold large changes")
+            description: ChangeGuard.description
+            enabled: ChangeGuard.serviceAvailable
+            checked: on
+            // The inner switch writes `checked` back, ending the binding: kept in step here.
+            onOnChanged: checked = on
+            onToggled: {
+                const wanted = checked;
+                checked = on;
+                if (wanted) {
+                    ChangeGuard.setEnabled(true);
+                } else {
+                    stopHoldingDialog.open();
+                }
+            }
+        }
+        FormCard.FormButtonDelegate {
+            objectName: "changeHoldLimitsButton"
+            visible: page.holdOn
+            text: i18nc("@action:button", "Change Limits…")
+            icon.name: "configure"
+            onClicked: holdLimitsDialog.open()
+        }
+        FormCard.FormTextDelegate {
+            objectName: "holdOffLine"
+            visible: ChangeGuard.serviceAvailable && !ChangeGuard.enabled
+            text: i18n("Any app can delete or overwrite your whole OneDrive at once.")
             textItem.wrapMode: Text.Wrap
             leading: Kirigami.Icon {
                 source: "dialog-warning"
@@ -397,5 +445,286 @@ FormCard.FormCardPage {
                 }
             }
         }
+    }
+
+    // Turning the change guard off: large changes then go at once. What is held stays held.
+    Kirigami.PromptDialog {
+        id: stopHoldingDialog
+        objectName: "stopHoldingDialog"
+
+        title: i18nc("@title:window", "Stop Holding Large Changes?")
+        maximumWidth: Kirigami.Units.gridUnit * 25
+        subtitle: {
+            const text = i18n("Large deletions and changes then go to OneDrive at once, without waiting for you. What is deleted can still be restored from OneDrive's recycle bin on the web.");
+            if (Accounts.heldCount === 0) {
+                return text;
+            }
+            return text + "\n\n" + i18np("The change on hold now stays on hold until you allow or restore it.",
+                                            "The %1 changes on hold now stay on hold until you allow or restore them.", Accounts.heldCount);
+        }
+        standardButtons: Kirigami.Dialog.NoButton
+        customFooterActions: [
+            Kirigami.Action {
+                objectName: "turnOffHolding"
+                text: i18nc("@action:button", "Turn Off")
+                icon.name: "dialog-ok"
+                onTriggered: {
+                    ChangeGuard.setEnabled(false);
+                    stopHoldingDialog.close();
+                }
+            },
+            Kirigami.Action {
+                text: i18nc("@action:button", "Cancel")
+                icon.name: "dialog-cancel"
+                onTriggered: stopHoldingDialog.close()
+            }
+        ]
+
+        // The guard gone with the daemon, or turned off elsewhere: not the question now.
+        Connections {
+            target: ChangeGuard
+            function onChanged() {
+                if (!page.holdOn) {
+                    stopHoldingDialog.close();
+                }
+            }
+        }
+    }
+
+    // The change guard's limits, all written together; a box left as it was keeps the
+    // daemon's exact value. Save stays off until a number in range differs from what it keeps.
+    Kirigami.PromptDialog {
+        id: holdLimitsDialog
+        objectName: "holdLimitsDialog"
+
+        /// The boxes by the limit each sets.
+        readonly property var boxes: ({
+                "removals": removalsBox,
+                "removalGiB": removalGiBBox,
+                "rewrites": rewritesBox,
+                "rewriteGiB": rewriteGiBBox,
+                "moves": movesBox,
+                "uploads": uploadsBox,
+                "uploadGiB": uploadGiBBox,
+                "minutes": holdMinutesBox,
+                "dailyRemovals": dailyRemovalsBox
+            })
+        /// What each box showed when the dialog opened.
+        property var shown: ({})
+        /// What the boxes hold as typed: the limit by its key, NaN for one out of range.
+        readonly property var typed: {
+            const values = {};
+            for (const key in boxes) {
+                const box = boxes[key];
+                values[key] = typedIn(box, box.contentItem.text);
+            }
+            return values;
+        }
+        readonly property bool valid: Object.keys(typed).every(key => !isNaN(typed[key]))
+        readonly property bool differs: Object.keys(typed).some(key => typed[key] !== shown[key])
+
+        /// The number typed in `box`, or NaN when it is none within the box's range.
+        function typedIn(box, text) {
+            let value = NaN;
+            try {
+                value = box.valueFromText(text, box.locale);
+            } catch (error) {
+                return NaN;
+            }
+            return Number.isInteger(value) && value >= box.from && value <= box.to ? value : NaN;
+        }
+
+        function save() {
+            if (!valid || !differs) {
+                return;
+            }
+            ChangeGuard.setLimits(typed);
+            close();
+        }
+
+        onAboutToShow: {
+            const limits = ChangeGuard.limits;
+            const values = {};
+            for (const key in boxes) {
+                const box = boxes[key];
+                box.value = limits[key];
+                box.contentItem.text = box.textFromValue(box.value, box.locale);
+                values[key] = box.value;
+            }
+            shown = values;
+            removalsBox.forceActiveFocus();
+        }
+        title: i18nc("@title:window", "Large Change Limits")
+        standardButtons: Kirigami.Dialog.NoButton
+        customFooterActions: [
+            Kirigami.Action {
+                objectName: "saveHoldLimits"
+                text: i18nc("@action:button", "Save")
+                icon.name: "document-save"
+                enabled: holdLimitsDialog.valid && holdLimitsDialog.differs
+                onTriggered: holdLimitsDialog.save()
+            },
+            Kirigami.Action {
+                text: i18nc("@action:button", "Cancel")
+                icon.name: "dialog-cancel"
+                onTriggered: holdLimitsDialog.close()
+            }
+        ]
+
+        ColumnLayout {
+            spacing: Kirigami.Units.smallSpacing
+
+            QQC2.Label {
+                Layout.fillWidth: true
+                text: i18n("Hold when there are more than")
+                wrapMode: Text.Wrap
+            }
+            GridLayout {
+                Layout.fillWidth: true
+                columns: 3
+                columnSpacing: Kirigami.Units.largeSpacing
+                rowSpacing: Kirigami.Units.smallSpacing
+
+                Item {
+                    implicitWidth: 1
+                }
+                QQC2.Label {
+                    text: i18nc("@title:column how many", "Items")
+                    color: Kirigami.Theme.disabledTextColor
+                    Accessible.ignored: true
+                }
+                QQC2.Label {
+                    text: i18nc("@title:column how much", "GiB")
+                    color: Kirigami.Theme.disabledTextColor
+                    Accessible.ignored: true
+                }
+
+                QQC2.Label {
+                    Layout.fillWidth: true
+                    text: i18n("Deletions")
+                    elide: Text.ElideRight
+                    Accessible.ignored: true
+                }
+                LimitBox {
+                    id: removalsBox
+                    objectName: "removalsBox"
+                    to: 100000
+                    Accessible.name: i18n("Deletions, items")
+                }
+                LimitBox {
+                    id: removalGiBBox
+                    objectName: "removalGiBBox"
+                    to: 10000
+                    Accessible.name: i18n("Deletions, GiB")
+                }
+
+                QQC2.Label {
+                    Layout.fillWidth: true
+                    text: i18n("Changed files")
+                    elide: Text.ElideRight
+                    Accessible.ignored: true
+                }
+                LimitBox {
+                    id: rewritesBox
+                    objectName: "rewritesBox"
+                    to: 100000
+                    Accessible.name: i18n("Changed files, items")
+                }
+                LimitBox {
+                    id: rewriteGiBBox
+                    objectName: "rewriteGiBBox"
+                    to: 10000
+                    Accessible.name: i18n("Changed files, GiB")
+                }
+
+                QQC2.Label {
+                    Layout.fillWidth: true
+                    text: i18n("Moves")
+                    elide: Text.ElideRight
+                    Accessible.ignored: true
+                }
+                LimitBox {
+                    id: movesBox
+                    objectName: "movesBox"
+                    to: 100000
+                    Accessible.name: i18n("Moves, items")
+                }
+                // Moves have no size.
+                QQC2.Label {
+                    Layout.alignment: Qt.AlignHCenter
+                    text: "—"
+                    color: Kirigami.Theme.disabledTextColor
+                    Accessible.ignored: true
+                }
+
+                QQC2.Label {
+                    Layout.fillWidth: true
+                    text: i18n("New files")
+                    elide: Text.ElideRight
+                    Accessible.ignored: true
+                }
+                LimitBox {
+                    id: uploadsBox
+                    objectName: "uploadsBox"
+                    to: 100000
+                    Accessible.name: i18n("New files, items")
+                }
+                LimitBox {
+                    id: uploadGiBBox
+                    objectName: "uploadGiBBox"
+                    to: 10000
+                    Accessible.name: i18n("New files, GiB")
+                }
+            }
+            QQC2.Label {
+                Layout.fillWidth: true
+                Layout.topMargin: Kirigami.Units.largeSpacing
+                text: i18n("Within this many minutes")
+                wrapMode: Text.Wrap
+                Accessible.ignored: true
+            }
+            LimitBox {
+                id: holdMinutesBox
+                objectName: "holdMinutesBox"
+                Layout.fillWidth: true
+                Layout.preferredWidth: -1
+                to: 1440
+                Accessible.name: i18n("Within this many minutes")
+            }
+            QQC2.Label {
+                Layout.fillWidth: true
+                Layout.topMargin: Kirigami.Units.smallSpacing
+                text: i18n("Or more than this many deletions in a day")
+                wrapMode: Text.Wrap
+                Accessible.ignored: true
+            }
+            LimitBox {
+                id: dailyRemovalsBox
+                objectName: "dailyRemovalsBox"
+                Layout.fillWidth: true
+                Layout.preferredWidth: -1
+                to: 100000
+                Accessible.name: i18n("Or more than this many deletions in a day")
+            }
+        }
+
+        // The guard gone with the daemon, or turned off: the limits are not the question now.
+        Connections {
+            target: ChangeGuard
+            function onChanged() {
+                if (!page.holdOn) {
+                    holdLimitsDialog.close();
+                }
+            }
+        }
+    }
+
+    /// A box of the change guard's limits: Enter saves.
+    component LimitBox: QQC2.SpinBox {
+        Layout.preferredWidth: Kirigami.Units.gridUnit * 6
+        from: 1
+        editable: true
+        Keys.onReturnPressed: holdLimitsDialog.save()
+        Keys.onEnterPressed: holdLimitsDialog.save()
     }
 }

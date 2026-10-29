@@ -53,3 +53,34 @@ fn account_add_and_write_scope_parse() {
     }
     assert!(Cli::try_parse_from(["konedrivectl", "account", "write-scope", "set"]).is_err());
 }
+
+#[test]
+fn change_decisions_require_the_reviewed_token_and_preserve_selected_kinds() {
+    for action in ["allow", "restore"] {
+        assert!(Cli::try_parse_from(["konedrivectl", "changes", action]).is_err());
+        let command = Cli::try_parse_from([
+            "konedrivectl",
+            "changes",
+            action,
+            "--token",
+            "ledger:12",
+            "removal",
+            "rewrite",
+        ])
+        .unwrap()
+        .command
+        .unwrap();
+        match command {
+            Cmd::Changes {
+                command: ChangesCmd::Allow { token, kinds } | ChangesCmd::Restore { token, kinds },
+            } => {
+                assert_eq!(token, "ledger:12");
+                assert_eq!(kinds, vec!["removal", "rewrite"]);
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+    assert!(
+        matches!(Cli::try_parse_from(["konedrivectl", "changes", "upload", "new folder"]).unwrap().command, Some(Cmd::Changes { command:ChangesCmd::Upload { path } }) if path == "new folder")
+    );
+}

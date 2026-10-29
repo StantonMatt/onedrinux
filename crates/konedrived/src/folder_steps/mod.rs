@@ -103,6 +103,7 @@
 //! commit with the record, and then the undo or the discard. What a listing's page does
 //! between a step's disk and its commit, and what a death leaves there, is between the
 //! two.
+// test: a_hold_cancels_a_content_discard_wait_without_closing_its_old_reader
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -308,6 +309,13 @@ impl FolderSteps {
 
     /// One step that changes a name, as the job of the write-operation thread it is.
     fn run_as_job(&self, step: &FolderStep) -> StepOutcome {
+        if let Some(guard) = &self.place_changes.change_guard {
+            return guard.while_unheld(&[step.item().local_item_id], || self.run_unheld_as_job(step)).unwrap_or(StepOutcome::NotRun(StepObstacle::SendingStopped));
+        }
+        self.run_unheld_as_job(step)
+    }
+
+    fn run_unheld_as_job(&self, step: &FolderStep) -> StepOutcome {
         if self.mount_take_down.is_asked() {
             return StepOutcome::NotRun(StepObstacle::SendingStopped);
         }
@@ -318,7 +326,7 @@ impl FolderSteps {
             FolderStep::RenameToConflictCopy { item, name } => self.run_rename_to_conflict_copy(item, name),
             FolderStep::RemoveItem { item } => self.run_remove_item(item),
             FolderStep::TakeOneDriveContent { item } => self.run_take_onedrive_content(item),
-            // The two cases that are no such job: `run` sends them their own way.
+            // The download cases that are no such job: `run` sends them their own way.
             FolderStep::ShowItem { .. } | FolderStep::DownloadContent { .. } | FolderStep::ReplaceContent { .. } => StepOutcome::NotRun(StepObstacle::SendingStopped),
         }
     }
@@ -340,6 +348,14 @@ impl FolderSteps {
 
     /// [`run_show_items`](Self::run_show_items), as its job.
     fn show_items(&self, items: &[ItemVersions]) -> Vec<StepOutcome> {
+        if let Some(guard) = &self.place_changes.change_guard {
+            let ids: Vec<_> = items.iter().map(|i| i.local_item_id).collect();
+            return guard.while_unheld(&ids, || self.show_unheld_items(items)).unwrap_or_else(|| vec![StepOutcome::NotRun(StepObstacle::SendingStopped); items.len()]);
+        }
+        self.show_unheld_items(items)
+    }
+
+    fn show_unheld_items(&self, items: &[ItemVersions]) -> Vec<StepOutcome> {
         if self.mount_take_down.is_asked() {
             return vec![StepOutcome::NotRun(StepObstacle::SendingStopped); items.len()];
         }
@@ -418,18 +434,21 @@ impl FolderSteps {
     /// A cloud-only handle can also own mmap pages. Do not publish a new content
     /// through that same FUSE inode until every old reader has gone.
     pub(crate) async fn run_take_content(self: &Arc<Self>, item: ItemVersions, lease: Option<crate::sync_parts::lease::Lease>) -> StepOutcome {
+        if self.place_changes.change_guard.as_ref().is_some_and(|guard| guard.blocks(item.local_item_id) || guard.error().is_some()) {
+            return StepOutcome::NotRun(StepObstacle::SendingStopped);
+        }
         if item.content_presence == ContentPresence::OnDisk && self.item_handles.is_open_for_reading(item.local_item_id) {
             return self.run_replace_content_with_lease(item, lease).await;
         }
         let (store, versions, id) = (self.store.clone(), item.clone(), item.local_item_id);
-        let current = self.item_handles.wait_for_no_readers(id, move || {
+        let current = self.item_handles.wait_for_no_readers_guarded(id, move || {
             let (store, versions) = (store.clone(), versions.clone());
             async move { store.read_items(move |reader| Ok(reader.find_item(id)?.is_some_and(|row| versions.are_those_of(&row)))).await.unwrap_or(false) }
-        }).await;
+        }, self.place_changes.change_guard.as_deref()).await;
         if !current { return rows_changed(); }
         let held = match lease { Some(lease) => Some(lease.hold().await), None => None };
         let steps = Arc::clone(self);
-        self.write_operation_thread.run_and_wait(move || { let _held = held; steps.run_take_onedrive_content(&item) }).await
+        self.write_operation_thread.run_and_wait(move || { let _held = held; steps.run_as_job(&FolderStep::TakeOneDriveContent { item }) }).await
             .unwrap_or(StepOutcome::NotRun(StepObstacle::SendingStopped))
     }
 

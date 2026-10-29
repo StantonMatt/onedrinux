@@ -5,10 +5,9 @@
 //! **Answers for:** a commit that answers `RowsChanged` after a step made an item: made
 //! and removed here before it was sent, while its sending ran, the step finds the row
 //! gone at its commit and removes in OneDrive what it made (`docs/design/sync.md` §7.2,
-//! `docs/design/writes.md` §4.5). After a restart nothing of this is done: a file uploaded
-//! and then removed here, the daemon killed before the confirmation, comes back from
-//! OneDrive with the listing as any item of OneDrive's and is shown again; no layer asks
-//! whose it was.
+//! `docs/design/writes.md` §4.5). A file cleanup is recorded in the durable leftover
+//! queue before guard admission. Deferral, a retry or a restart keeps its conditional
+//! deletion available; a later remote edit or adoption abandons that cleanup.
 //!
 //! **Tested without the rest**, against the fixture's fake OneDrive:
 // test: a_new_item_whose_row_is_gone_is_removed_in_onedrive
@@ -16,6 +15,7 @@
 // test: a_made_item_that_cannot_be_removed_is_left_and_said
 // test: the_fate_of_a_made_item_is_by_its_row
 // test: write_scope_leaves_unresolvable_cleanup_items_in_onedrive
+// test: a_cleanup_waiting_for_metadata_cannot_cross_a_new_guard_hold
 
 use konedrive_graph::drive::WriteError;
 use konedrive_graph::pool::Class;
@@ -81,12 +81,25 @@ impl MadeItems {
         if decide_made_item_fate(row.as_ref()) == MadeItemFate::LeaveForListing {
             return RowsChangedFollowUp::CycleWanted;
         }
-        if !super::write_scope::allows_reference(&self.graph, &self.write_scope, &made.item).await {
-            return RowsChangedFollowUp::MadeItemLeft(made.item.clone());
+        // No folder cTag from the create response: a directory cannot be proven ours.
+        if made.content.is_none() { return RowsChangedFollowUp::MadeItemLeft(made.item.clone()); }
+        let left = konedrive_tree::MismatchedItem::of_answer(made.item.clone(), None, Some(&made.etag));
+        if let Err(error) = self.graph.store.call(move |s| {
+            s.step_memory().remember_leftover_removal(&left)?;
+            s.sync_write_ahead_log()
+        }).await {
+            tracing::warn!("cannot persist made-item cleanup: {error}");
+            return RowsChangedFollowUp::CycleWanted;
         }
         let made_id = made.item.item_id.as_str();
         let removed = {
             let _slot = self.graph.drive.pool().acquire(Class::Metadata).await;
+            if !super::write_scope::allows_reference(&self.graph, &self.write_scope, &made.item).await {
+                return RowsChangedFollowUp::MadeItemLeft(made.item.clone());
+            }
+            if !self.graph.admit_cleanup(&made.item, made.content.as_ref().map_or(0, |c| c.size()), &made.etag) {
+                return RowsChangedFollowUp::CycleWanted;
+            }
             match made.content {
                 Some(_) => self.graph.drive.delete_item(made_id, &made.etag).await,
                 // ConfirmedItem carries no folder cTag from the create response. A fresh
@@ -94,6 +107,16 @@ impl MadeItems {
                 None => return RowsChangedFollowUp::MadeItemLeft(made.item.clone()),
             }
         };
+        let settled = matches!(removed, Ok(()) | Err(WriteError::NotFound) | Err(WriteError::Changed));
+        if settled {
+            let gone = !matches!(removed, Err(WriteError::Changed));
+            // Retire guard state before forgetting its durable sender: failures retry.
+            if self.graph.settle_cleanup(&made.item, gone).is_err() { return RowsChangedFollowUp::CycleWanted; }
+            let reference = made.item.clone();
+            if self.graph.store.call(move |s| if gone { s.step_memory().forget_removed_mismatched_item(&reference) } else { s.step_memory().forget_mismatched_item(&reference) }).await.is_err() {
+                return RowsChangedFollowUp::CycleWanted;
+            }
+        }
         match removed {
             Ok(()) | Err(WriteError::NotFound) => RowsChangedFollowUp::MadeItemRemoved(made.item.clone()),
             Err(error) => {

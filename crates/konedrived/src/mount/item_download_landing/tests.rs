@@ -625,3 +625,44 @@ fn account_stop_finishes_while_an_old_reader_holds_a_pending_content_change() {
         });
     }
 }
+
+#[test]
+fn a_hold_prevents_a_staged_replacement_from_discarding_the_resident_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let guard = Arc::new(crate::change_guard::ChangeGuard::open(dir.path().join("guard.json"), crate::change_guard::GuardConfig { moves: 0, ..Default::default() }));
+    let fixture = ItemFixture::with_change_guard(Some(Arc::clone(&guard)));
+    let row = pending_replacement(&fixture);
+    let row = fixture.move_here(row.local_item_id, "renamed.txt");
+    let landing = make_landing(&fixture);
+    begin_download_step(&fixture, &row);
+    guard.observe(&[(row.clone(), "renamed.txt".into())], 100).unwrap();
+    assert!(guard.blocks(row.local_item_id));
+    assert_eq!(land(&fixture, &landing, b"new version", &LandingCondition::ReplaceVersions { item: ItemVersions::of(&row) }), ItemLandingOutcome::StepStopped);
+    assert_eq!(fixture.read_disk_file("renamed.txt").unwrap(), b"old version");
+    assert_eq!(count_records(&fixture), 0);
+    assert_eq!(fixture.find_item(row.local_item_id).unwrap(), row);
+}
+
+#[test]
+fn a_hold_cancels_a_replacement_wait_without_closing_its_old_reader() {
+    use crate::mount::item_handles::OpenItemFile;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = Arc::new(crate::change_guard::ChangeGuard::open(dir.path().join("guard.json"), crate::change_guard::GuardConfig { moves: 0, ..Default::default() }));
+    let fixture = ItemFixture::with_change_guard(Some(Arc::clone(&guard)));
+    let row = pending_replacement(&fixture);
+    let row = fixture.move_here(row.local_item_id, "renamed.txt");
+    let reader = fixture.item_handles.add_file(OpenItemFile::ReadingBackingFile { item: row.local_item_id, backing_file: Arc::new(File::open(fixture.disk_path("renamed.txt")).unwrap()) });
+    let landing = make_landing(&fixture);
+    let condition = LandingCondition::ReplaceVersions { item: ItemVersions::of(&row) };
+    fixture.runtime().block_on(async {
+        let waiting = landing.wait_for_readers(&condition);
+        tokio::pin!(waiting);
+        assert!(futures_util::poll!(waiting.as_mut()).is_pending());
+        guard.observe(&[(row.clone(), "renamed.txt".into())], 100).unwrap();
+        assert!(!tokio::time::timeout(std::time::Duration::from_secs(5), waiting).await.expect("a hold wakes the replacement"));
+    });
+    assert!(fixture.item_handles.is_open_for_reading(row.local_item_id));
+    fixture.item_handles.close_reader(reader);
+    assert_eq!(fixture.read_disk_file("renamed.txt").unwrap(), b"old version");
+    assert_eq!(count_records(&fixture), 0);
+}

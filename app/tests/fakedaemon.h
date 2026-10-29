@@ -2,7 +2,7 @@
 
 // A stand-in for konedrived on the tests' private session bus, shaped as the
 // daemon serves it: the manager at /org/konedrive/Accounts with Accounts
-// (dbus/org.konedrive.Accounts.xml), Files and DownloadGuard, and each account at
+// (dbus/org.konedrive.Accounts.xml), Files, DownloadGuard and ChangeGuard, and each account at
 // /org/konedrive/Accounts/<id> with Account and its folder's Folder, Transfers,
 // UploadQueue, Conflicts, LocalScan and ActivityLog. Each interface is an
 // adaptor, since one D-Bus path holds one object. What the controllers ask is
@@ -10,6 +10,7 @@
 // PropertiesChanged the way the daemon does.
 
 #include "accountcontroller.h"
+#include "changeguardtypes.h"
 #include "daemoncontroller.h"
 #include "synccontroller.h"
 #include "synctypes.h"
@@ -25,7 +26,9 @@
 #include <QTimer>
 #include <QVariantMap>
 
+#include <limits>
 #include <memory>
+#include <optional>
 
 namespace fake
 {
@@ -78,6 +81,8 @@ class FakeAccount : public QDBusAbstractAdaptor
     Q_PROPERTY(qulonglong QuotaTotal READ quotaTotal)
     Q_PROPERTY(qulonglong QuotaRemaining READ quotaRemaining)
     Q_PROPERTY(QString QuotaState READ quotaState)
+    Q_PROPERTY(QStringList WritePaths READ writePaths)
+    Q_PROPERTY(bool WriteScopeEnabled READ writeScopeEnabled)
 
 public:
     FakeAccount(QObject *parent, const QDBusConnection &bus, const QString &path, const QString &id, const QString &label)
@@ -102,6 +107,8 @@ public:
     qulonglong quotaTotal() const { return m_properties.value(QStringLiteral("QuotaTotal")).toULongLong(); }
     qulonglong quotaRemaining() const { return m_properties.value(QStringLiteral("QuotaRemaining")).toULongLong(); }
     QString quotaState() const { return m_properties.value(QStringLiteral("QuotaState")).toString(); }
+    QStringList writePaths() const { return m_properties.value(QStringLiteral("WritePaths")).toStringList(); }
+    bool writeScopeEnabled() const { return m_properties.value(QStringLiteral("WriteScopeEnabled")).toBool(); }
 
     void set(const QVariantMap &changes)
     {
@@ -109,6 +116,17 @@ public:
             m_properties.insert(it.key(), it.value());
         }
         fake::propertiesChanged(m_bus, m_path, AccountController::InterfaceName, changes);
+    }
+
+    /// A trial, as SetWriteScope leaves it.
+    void setWriteScope(const QStringList &paths) { set({{QStringLiteral("WritePaths"), paths}, {QStringLiteral("WriteScopeEnabled"), true}}); }
+
+    /// Account.WriteRefused, as the daemon reports a change refused outside the trial.
+    void refuseWrite(const QString &path, const QString &folder, qulonglong count = 1, const QString &app = QString())
+    {
+        auto signal = QDBusMessage::createSignal(m_path, AccountController::InterfaceName, QStringLiteral("WriteRefused"));
+        signal << path << folder << app << QVariant::fromValue<qulonglong>(count);
+        m_bus.send(signal);
     }
 
     /// The sign-in a switch to read-write waits for, granted.
@@ -121,6 +139,8 @@ public:
     /// Changes made here that are not sent: while not 0, an unforced SetMode("read-only")
     /// keeps the wish, with ReadOnlyWanted and UnsentBeforeReadOnly saying so, as the daemon's does.
     qulonglong unsentChanges = 0;
+    /// SetWriteScope and ClearWriteScope are refused Failed with these words, when not empty.
+    QString refuseWriteScope;
 
     /// The wish for read-only, kept with `unsent` changes still to send, or gone.
     void setReadOnlyWish(bool wanted, qulonglong unsent = 0)
@@ -196,6 +216,35 @@ public Q_SLOTS:
         }
         return refuse(QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"), QStringLiteral("unknown mode ") + mode);
     }
+    /// As the daemon's: InvalidArgs for a path that is not a plain relative one; saved, then
+    /// both properties changed.
+    void SetWriteScope(const QStringList &paths, const QDBusMessage &message)
+    {
+        calls << QStringLiteral("SetWriteScope:") + paths.join(QLatin1Char('|'));
+        if (!refuseWriteScope.isEmpty()) {
+            message.setDelayedReply(true);
+            m_bus.send(message.createErrorReply(QStringLiteral("org.konedrive.Error.Failed"), refuseWriteScope));
+            return;
+        }
+        for (const QString &path : paths) {
+            if (path.isEmpty() || path.startsWith(QLatin1Char('/')) || path.split(QLatin1Char('/')).contains(QStringLiteral(".."))) {
+                message.setDelayedReply(true);
+                m_bus.send(message.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"), QStringLiteral("not a relative path: ") + path));
+                return;
+            }
+        }
+        setWriteScope(paths);
+    }
+    void ClearWriteScope(const QDBusMessage &message)
+    {
+        calls << QStringLiteral("ClearWriteScope");
+        if (!refuseWriteScope.isEmpty()) {
+            message.setDelayedReply(true);
+            m_bus.send(message.createErrorReply(QStringLiteral("org.konedrive.Error.Failed"), refuseWriteScope));
+            return;
+        }
+        set({{QStringLiteral("WritePaths"), QStringList()}, {QStringLiteral("WriteScopeEnabled"), false}});
+    }
 
 private:
     QDBusConnection m_bus;
@@ -210,6 +259,8 @@ private:
         {QStringLiteral("QuotaTotal"), QVariant::fromValue<qulonglong>(0)},
         {QStringLiteral("QuotaRemaining"), QVariant::fromValue<qulonglong>(0)},
         {QStringLiteral("QuotaState"), QString()},
+        {QStringLiteral("WritePaths"), QStringList()},
+        {QStringLiteral("WriteScopeEnabled"), false},
     };
 };
 
@@ -887,9 +938,13 @@ public:
     /// Off: it is only logged and answers false, as a daemon that is making
     /// the account already does.
     bool cancelEnds = true;
+    /// The browser finishes inside CancelSignIn, before its false reply.
+    bool finishOnCancel = false;
 
 public Q_SLOTS:
     uint SignIn(const QDBusMessage &message, QString &url);
+    /// SignIn with a mode, logged "Add:<mode>"; InvalidArgs for any but read-only or read-write.
+    uint Add(const QString &mode, const QDBusMessage &message, QString &url);
     bool CancelSignIn(uint signIn);
     void Remove(const QDBusObjectPath &account, const QDBusMessage &message);
     void SetClientId(const QString &id, const QDBusMessage &message)
@@ -1190,6 +1245,240 @@ private:
     };
 };
 
+/// A held (or sent) row of ChangeGuard.ListHeld, for the tests: `kind`, `path`, `bytes`,
+/// and the rest as given.
+inline KonedriveHeldChange heldRow(const QString &kind, const QString &path, qulonglong bytes = 0, qint64 since = 0)
+{
+    KonedriveHeldChange row;
+    row.kind = kind;
+    row.path = path;
+    row.bytes = bytes;
+    row.since = since;
+    row.state = QStringLiteral("held");
+    row.generation = QStringLiteral("g1");
+    return row;
+}
+
+/// ChangeGuard on the manager object (dbus/org.konedrive.ChangeGuard.xml): its settings, each
+/// account's rows with a token of their revision, and its methods, logged in `calls`. Allow and
+/// Restore take the selected held kinds' rows away (unless `answer` says otherwise) and send
+/// HeldChanged, as the daemon does. A test sets rows with hold() and sends the signals itself.
+class FakeChangeGuard : public QDBusAbstractAdaptor
+{
+    Q_OBJECT
+    Q_CLASSINFO("D-Bus Interface", "org.konedrive.ChangeGuard")
+    Q_PROPERTY(bool Enabled READ enabled)
+
+public:
+    static inline const QString Interface = QStringLiteral("org.konedrive.ChangeGuard");
+
+    explicit FakeChangeGuard(QObject *daemon)
+        : QDBusAbstractAdaptor(daemon)
+    {
+        registerKonedriveChangeGuardTypes();
+    }
+
+    bool enabled() const { return m_enabled; }
+
+    /// The switch as SetEnabled sets it, with its PropertiesChanged.
+    void setEnabled(bool on)
+    {
+        m_enabled = on;
+        fake::propertiesChanged(fake::bus(), fake::ManagerPath, Interface, {{QStringLiteral("Enabled"), on}});
+    }
+
+    /// The token of the rows as they are now.
+    QString token() const { return QStringLiteral("fake:%1").arg(revision); }
+
+    /// `rows` are what `account` holds and sent now: ChangesHeld for each held kind, then
+    /// HeldChanged, as the daemon sends them on news.
+    void hold(const QString &account, const KonedriveHeldChangeList &rows)
+    {
+        held.insert(account, rows);
+        ++revision;
+        for (const QString &kind : {QStringLiteral("removal"), QStringLiteral("rewrite"), QStringLiteral("move"), QStringLiteral("upload")}) {
+            qulonglong count = 0;
+            qulonglong bytes = 0;
+            qint64 since = std::numeric_limits<qint64>::max();
+            for (const KonedriveHeldChange &row : rows) {
+                if (row.kind == kind && !row.sent) {
+                    count += 1 + (kind == QLatin1String("removal") || kind == QLatin1String("upload") ? row.descendants : 0);
+                    bytes += row.bytes;
+                    since = std::min(since, row.since);
+                }
+            }
+            if (count > 0) {
+                auto signal = QDBusMessage::createSignal(fake::ManagerPath, Interface, QStringLiteral("ChangesHeld"));
+                signal << account << token() << kind << QVariant::fromValue(count) << QVariant::fromValue(bytes) << QVariant::fromValue(since);
+                fake::bus().send(signal);
+            }
+        }
+        sendHeldChanged();
+    }
+
+    void sendHeldChanged() { fake::bus().send(QDBusMessage::createSignal(fake::ManagerPath, Interface, QStringLiteral("HeldChanged"))); }
+
+    void sendProgress(const QString &account, const QString &token, const QStringList &kinds, qulonglong done, qulonglong total)
+    {
+        auto signal = QDBusMessage::createSignal(fake::ManagerPath, Interface, QStringLiteral("RestoreProgress"));
+        signal << account << token << kinds << QVariant::fromValue(done) << QVariant::fromValue(total);
+        fake::bus().send(signal);
+    }
+
+    /// Answers the decisions kept waiting (`wait`), with `answer` or what they did.
+    void finishWaiting()
+    {
+        const QList<QDBusMessage> pending = std::exchange(waiting, {});
+        for (const QDBusMessage &message : pending) {
+            const QList<QVariant> args = message.arguments();
+            if (refused(message)) {
+                continue;
+            }
+            const KonedriveGuardResult result = decide(args.value(0).toString(), args.value(2).toStringList());
+            fake::bus().send(message.createReply(QVariant::fromValue(result)));
+        }
+        sendHeldChanged();
+    }
+
+    QHash<QString, KonedriveHeldChangeList> held;
+    quint64 revision = 1;
+    QStringList calls;
+    QString listError;
+    QString listErrorName = QStringLiteral("org.konedrive.Error.Failed");
+    /// Every method but ListHeld is refused Failed with these words, when not empty.
+    QString refuse;
+    /// What Allow and Restore answer, when set; the rows go all the same.
+    std::optional<KonedriveGuardResult> answer;
+    /// Allow and Restore wait for finishWaiting(), as a long restore does.
+    bool wait = false;
+    QList<QDBusMessage> waiting;
+    KonedriveThresholds thresholds{
+        {QStringLiteral("removals"), 20},
+        {QStringLiteral("removal-bytes"), 1ULL << 30},
+        {QStringLiteral("daily-removals"), 100},
+        {QStringLiteral("rewrites"), 50},
+        {QStringLiteral("rewrite-bytes"), 1ULL << 30},
+        {QStringLiteral("moves"), 200},
+        {QStringLiteral("uploads"), 500},
+        {QStringLiteral("upload-bytes"), 5ULL << 30},
+        {QStringLiteral("window-seconds"), 600},
+        {QStringLiteral("daily-window-seconds"), 86400},
+    };
+
+public Q_SLOTS:
+    QString ListHeld(const QString &account, const QDBusMessage &message, KonedriveHeldChangeList &changes)
+    {
+        calls << QStringLiteral("ListHeld:") + account;
+        if (!listError.isEmpty()) {
+            message.setDelayedReply(true);
+            fake::bus().send(message.createErrorReply(listErrorName, listError));
+            return {};
+        }
+        changes = held.value(account);
+        return token();
+    }
+    KonedriveGuardResult AllowHeld(const QString &account, const QString &token, const QStringList &kinds, const QDBusMessage &message)
+    {
+        return decided(QStringLiteral("AllowHeld"), account, token, kinds, message);
+    }
+    KonedriveGuardResult RestoreHeld(const QString &account, const QString &token, const QStringList &kinds, const QDBusMessage &message)
+    {
+        return decided(QStringLiteral("RestoreHeld"), account, token, kinds, message);
+    }
+    KonedriveGuardResult UploadLocal(const QString &account, const QString &path, const QDBusMessage &message)
+    {
+        calls << QStringLiteral("UploadLocal:%1:%2").arg(account, path);
+        if (refused(message)) {
+            return {};
+        }
+        return KonedriveGuardResult{1, 0, 0, 0, {}};
+    }
+    void SetEnabled(bool on, const QDBusMessage &message)
+    {
+        calls << QStringLiteral("SetEnabled:") + (on ? QStringLiteral("on") : QStringLiteral("off"));
+        if (refused(message)) {
+            return;
+        }
+        m_enabled = on;
+        fake::propertiesChanged(fake::bus(), fake::ManagerPath, Interface, {{QStringLiteral("Enabled"), on}});
+    }
+    void SetThresholds(const KonedriveThresholds &values, const QDBusMessage &message)
+    {
+        QStringList said;
+        for (auto it = values.cbegin(); it != values.cend(); ++it) {
+            said << QStringLiteral("%1=%2").arg(it.key()).arg(it.value());
+        }
+        calls << QStringLiteral("SetThresholds:") + said.join(QLatin1Char(','));
+        if (refused(message)) {
+            return;
+        }
+        for (auto it = values.cbegin(); it != values.cend(); ++it) {
+            thresholds.insert(it.key(), it.value());
+        }
+        fake::propertiesChanged(fake::bus(), fake::ManagerPath, Interface, {{QStringLiteral("Enabled"), m_enabled}});
+    }
+    bool GetSettings(KonedriveThresholds &values)
+    {
+        calls << QStringLiteral("GetSettings");
+        values = thresholds;
+        return m_enabled;
+    }
+    QString GetError(const QString &)
+    {
+        return QString();
+    }
+
+Q_SIGNALS:
+    void ChangesHeld(const QString &account, const QString &token, const QString &kind, qulonglong count, qulonglong bytes, qlonglong since);
+    void RestoreProgress(const QString &account, const QString &token, const QStringList &kinds, qulonglong done, qulonglong total);
+    void HeldChanged();
+
+private:
+    KonedriveGuardResult decided(const QString &method, const QString &account, const QString &token, const QStringList &kinds, const QDBusMessage &message)
+    {
+        calls << QStringLiteral("%1:%2:%3:%4").arg(method, account, token, kinds.join(QLatin1Char(',')));
+        if (refused(message)) {
+            return {};
+        }
+        if (wait) {
+            message.setDelayedReply(true);
+            waiting << message;
+            return {};
+        }
+        const KonedriveGuardResult result = decide(account, kinds);
+        QTimer::singleShot(0, this, &FakeChangeGuard::sendHeldChanged);
+        return result;
+    }
+
+    KonedriveGuardResult decide(const QString &account, const QStringList &kinds)
+    {
+        KonedriveGuardResult result;
+        KonedriveHeldChangeList &rows = held[account];
+        for (auto it = rows.begin(); it != rows.end();) {
+            if (!it->sent && (kinds.isEmpty() || kinds.contains(it->kind))) {
+                result.done += 1 + (it->kind == QLatin1String("removal") || it->kind == QLatin1String("upload") ? it->descendants : 0);
+                it = rows.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        ++revision;
+        return answer ? *answer : result;
+    }
+
+    bool refused(const QDBusMessage &message)
+    {
+        if (refuse.isEmpty()) {
+            return false;
+        }
+        message.setDelayedReply(true);
+        fake::bus().send(message.createErrorReply(QStringLiteral("org.konedrive.Error.Failed"), refuse));
+        return true;
+    }
+
+    bool m_enabled = true;
+};
+
 /// The daemon: the manager object and its accounts. `account` and `sync` are
 /// the first account's, for tests about one account.
 class FakeDaemon : public QObject
@@ -1202,6 +1491,7 @@ public:
         : manager(new FakeAccounts(this))
         , files(new FakeFiles(this))
         , guard(new FakeDownloadGuard(this))
+        , changeGuard(new FakeChangeGuard(this))
     {
         // Before anything is sent: Transfers is an a(stt).
         registerKonedriveSyncTypes();
@@ -1263,6 +1553,7 @@ public:
         if (signIn != 0) {
             finishSignIn(QStringLiteral("cancelled"), QString());
         }
+        signInMode = QStringLiteral("read-write");
         signIn = ++m_lastSignIn;
         return signIn;
     }
@@ -1281,7 +1572,8 @@ public:
         signIn = 0;
         QString path = QStringLiteral("/");
         if (outcome == QLatin1String("signed-in")) {
-            FakeAccountObject *added = addAccount(message, {{QStringLiteral("Email"), message}, {QStringLiteral("State"), QStringLiteral("signed-in")}});
+            FakeAccountObject *added = addAccount(message, {{QStringLiteral("Email"), message}, {QStringLiteral("State"), QStringLiteral("signed-in")},
+                                                                           {QStringLiteral("Mode"), signInMode}});
             // As the daemon says it of an account signed in with no folder yet.
             added->sync->folder->decide("offline", "no-folder");
             path = added->path;
@@ -1329,9 +1621,11 @@ public:
     FakeAccounts *manager;
     FakeFiles *files;
     FakeDownloadGuard *guard;
+    FakeChangeGuard *changeGuard;
     QList<FakeAccountObject *> objects;
     /// The number of the SignIn that has not ended; 0 when none is under way.
     uint signIn = 0;
+    QString signInMode = QStringLiteral("read-write");
     FakeAccount *account = nullptr;
     FakeSync *sync = nullptr;
 
@@ -1374,12 +1668,35 @@ inline uint FakeAccounts::SignIn(const QDBusMessage &message, QString &url)
     return number;
 }
 
+inline uint FakeAccounts::Add(const QString &mode, const QDBusMessage &message, QString &url)
+{
+    calls << QStringLiteral("Add:") + mode;
+    if (!mode.isEmpty() && mode != QLatin1String("read-only") && mode != QLatin1String("read-write")) {
+        message.setDelayedReply(true);
+        fake::bus().send(message.createErrorReply(QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"), QStringLiteral("unknown mode ") + mode));
+        return 0;
+    }
+    if (!refuseSignIn.isEmpty()) {
+        message.setDelayedReply(true);
+        fake::bus().send(message.createErrorReply(QStringLiteral("org.konedrive.Error.Failed"), refuseSignIn));
+        return 0;
+    }
+    const uint number = m_daemon->beginSignIn();
+    m_daemon->signInMode = mode.isEmpty() ? QStringLiteral("read-write") : mode;
+    url = QStringLiteral("https://login.example/authorize?sign_in=%1&mode=%2").arg(number).arg(mode);
+    return number;
+}
+
 /// Never refused: whether it cancelled. False, and nothing changes, for a
 /// number that is not under way. The outcome is sent after the call has been
 /// answered.
 inline bool FakeAccounts::CancelSignIn(uint signIn)
 {
     calls << QStringLiteral("CancelSignIn:%1").arg(signIn);
+    if (finishOnCancel) {
+        m_daemon->finishSignIn(QStringLiteral("signed-in"), QStringLiteral("race@example.com"));
+        return false;
+    }
     if (!cancelEnds || m_daemon->signIn != signIn) {
         return false;
     }

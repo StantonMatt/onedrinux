@@ -183,6 +183,22 @@ pub(crate) struct ItemContentFiles {
 }
 
 impl ItemContentFiles {
+    /// Replayed on every plan and startup. Durable remote-removal evidence and
+    /// the row's absence confirm cleanup; unbound bytes need an explicit Allow.
+    pub(crate) fn retry_guard_removals(&self) -> Result<(), TreeError> {
+        let Some(guard) = self.change_guard() else { return Ok(()) };
+        let rows = self.open_read_connection()?;
+        let clean = rows.read_items(|items| guard.retained_cleanup(items))?;
+        for (id, path) in clean {
+            // Only runs on the write thread (or before the mount starts), so Restore
+            // and another unlink cannot replace this ownership while it is cleaned.
+            if let Err(error) = self.place_changes.discard_retained(&path) { tracing::warn!("cannot discard removal's retained bytes: {error}"); continue; }
+            guard.cleaned_retained(id).map_err(|e| TreeError::Io(std::io::Error::other(e)))?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn change_guard(&self) -> Option<&Arc<crate::change_guard::ChangeGuard>> { self.place_changes.change_guard.as_ref() }
     /// Made by the mount's build, with the store's path.
     pub(super) fn new(place_changes: Arc<PlaceChanges>, store_path: PathBuf, item_handles: Arc<ItemHandles>) -> Self {
         Self { place_changes, store_path, item_handles }

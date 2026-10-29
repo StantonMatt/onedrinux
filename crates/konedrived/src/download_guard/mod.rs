@@ -10,7 +10,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use identity::{Caller, Callers, BACKGROUND_READERS};
+use identity::{Caller, BACKGROUND_READERS};
+pub(crate) use identity::Callers;
 use konedrive_dbus::rows::GuardApp;
 use serde::{Deserialize, Serialize};
 pub(crate) use downloads::{AccountDownloads, AppDownloads, DownloadTicket};

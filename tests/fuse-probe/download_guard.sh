@@ -1,9 +1,15 @@
 # Remote-content admission, over the fake Graph only, in the VM's own mount.
 
+# Listing completion precedes the planner's ShowItem jobs. Count names without
+# opening their content before a bulk read relies on which file exhausts its budget.
+bulk_files_are_shown() { [ "$(user 'ls | wc -l')" -eq "$1" ]; }
+
 a_bulk_reader_is_cut_off_at_the_default_file_limit() {
     begin_folder
     for n in $(seq 1 35); do seed_file F$n R f$n.txt "file $n"; done
     register_folder read-only
+    check_within 20 "all thirty-five files are shown before the bulk read" bulk_files_are_shown 35
+    check "showing the files fetched no content" "$(onedrive count GET dl/)" 0
     local result
     result=$($U python3 - "$F" <<'PY'
 import errno, os, sys
@@ -14,11 +20,11 @@ for n in range(1, 36):
             assert f.read() == f'file {n}'.encode()
         ok += 1
     except OSError as e:
-        refused.append(errno.errorcode[e.errno])
+        refused.append(f'f{n}.txt:{errno.errorcode[e.errno]}')
 print(ok, ','.join(refused))
 PY
 )
-    check "one bulk reader gets thirty files, then EACCES" "$result" "30 EACCES,EACCES,EACCES,EACCES,EACCES"
+    check "one bulk reader gets thirty files, then EACCES" "$result" "30 f31.txt:EACCES,f32.txt:EACCES,f33.txt:EACCES,f34.txt:EACCES,f35.txt:EACCES"
     for n in $(seq 31 35); do
         check_state f$n.txt online-only
         check "file $n fetched no content" "$(onedrive count GET dl/F$n)" 0
@@ -27,6 +33,39 @@ PY
     check "refusal changes no folder error" "$(daemon status | sed 's/.*last error //')" '""'
     check_holds "refusal records no failed file activity" "$(daemon activity)" "Downloaded"
     check "no guard refusal is a sync failure" "$(daemon activity | grep -c 'kind: Failed')" 0
+}
+
+missing_names_do_not_consume_or_bypass_the_download_limit() {
+    begin_folder
+    # Three absent names reproduce the early lookups of an unfinished first filling.
+    for n in $(seq 4 8); do seed_file F$n R f$n.txt "file $n"; done
+    register_folder read-only
+    check_within 20 "all five existing files are shown" bulk_files_are_shown 5
+    daemon guard limits 3 2147483648 600 > /dev/null
+    local result
+    result=$($U python3 - "$F" <<'PY'
+import errno, sys
+ok, refused = 0, []
+for n in range(1, 9):
+    try:
+        with open(f'{sys.argv[1]}/f{n}.txt', 'rb') as f:
+            assert f.read() == f'file {n}'.encode()
+        ok += 1
+    except OSError as e:
+        refused.append(f'f{n}.txt:{errno.errorcode[e.errno]}')
+print(ok, ','.join(refused))
+PY
+)
+    check "only three existing files are admitted after three missing names" "$result" "3 f1.txt:ENOENT,f2.txt:ENOENT,f3.txt:ENOENT,f7.txt:EACCES,f8.txt:EACCES"
+    for n in $(seq 1 3); do
+        check "missing file $n fetched no content" "$(onedrive count GET dl/F$n)" 0
+    done
+    for n in $(seq 4 6); do check_state f$n.txt hydrated; done
+    for n in 7 8; do
+        check_state f$n.txt online-only
+        check "refused file $n fetched no content" "$(onedrive count GET dl/F$n)" 0
+    done
+    check_holds "the budget counts successful content admissions" "$(daemon guard apps)" "true bulk 3"
 }
 
 background_readers_are_refused_before_fetch_and_local_content_still_works() {
@@ -246,6 +285,7 @@ download_guard() {
     ip link set lo up
     for name in \
         a_bulk_reader_is_cut_off_at_the_default_file_limit \
+        missing_names_do_not_consume_or_bypass_the_download_limit \
         background_readers_are_refused_before_fetch_and_local_content_still_works \
         normal_open_and_kio_file_copy_still_hydrate \
         explicit_hydrate_and_pin_bypass_a_blocked_app \

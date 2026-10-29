@@ -18,6 +18,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 . "$here/file_writes.sh"
 . "$here/file_reads.sh"
 . "$here/download_guard.sh"
+. "$here/mass_changes.sh"
 . "$here/daemon_restarts.sh"
 . "$here/kio_trash.sh"
 

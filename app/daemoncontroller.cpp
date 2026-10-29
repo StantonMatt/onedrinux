@@ -193,7 +193,13 @@ void DaemonController::setOnBattery(const QString &choice)
 
 void DaemonController::signIn(std::function<void(uint, const QString &)> done, std::function<void(const QString &)> failed)
 {
-    auto *watcher = new QDBusPendingCallWatcher(m_iface->SignIn(), this);
+    add(QString(), std::move(done), std::move(failed));
+}
+
+void DaemonController::add(const QString &mode, std::function<void(uint, const QString &)> done, std::function<void(const QString &)> failed)
+{
+    // SignIn is Add with the daemon's default, and older daemons have it too.
+    auto *watcher = new QDBusPendingCallWatcher(mode.isEmpty() ? m_iface->SignIn() : m_iface->Add(mode), this);
     connect(watcher, &QDBusPendingCallWatcher::finished, this, [done, failed](QDBusPendingCallWatcher *w) {
         w->deleteLater();
         const QDBusPendingReply<uint, QString> reply = *w;
@@ -207,9 +213,20 @@ void DaemonController::signIn(std::function<void(uint, const QString &)> done, s
     });
 }
 
-void DaemonController::cancelSignIn(uint number, std::function<void(const QString &)> failed)
+void DaemonController::cancelSignIn(uint number, std::function<void(const QString &)> failed, std::function<void(bool)> answered)
 {
-    watch(m_iface->CancelSignIn(number), {}, std::move(failed));
+    auto *watcher = new QDBusPendingCallWatcher(m_iface->CancelSignIn(number), this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this, [failed, answered](QDBusPendingCallWatcher *w) {
+        w->deleteLater();
+        const QDBusPendingReply<bool> reply = *w;
+        if (reply.isError()) {
+            if (failed) {
+                failed(reply.error().message());
+            }
+        } else if (answered) {
+            answered(reply.value());
+        }
+    });
 }
 
 void DaemonController::onSignInFinished(uint number, const QString &outcome, const QString &message, const QDBusObjectPath &account)

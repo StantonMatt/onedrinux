@@ -72,13 +72,16 @@ impl From<ConfigError> for String {
 /// The calls do blocking file I/O on a small file, as the single-account code did.
 pub struct ConfigStore {
     file: PathBuf,
+    pub(crate) state_dir: PathBuf,
+    pub(crate) change_guards: Mutex<std::collections::BTreeMap<AccountId, std::sync::Arc<crate::change_guard::ChangeGuard>>>,
     pub(crate) download_guard: std::sync::Arc<crate::download_guard::DownloadGuard>,
+    pub(super) write_refusals: Mutex<std::collections::HashMap<AccountId, std::sync::Weak<super::write_refusals::WriteRefusals>>>,
     inner: Mutex<Inner>,
 }
 
-struct Inner {
+pub(super) struct Inner {
     /// As last read or written; empty while poisoned.
-    config: Config,
+    pub(super) config: Config,
     /// Why the file could not be loaded; `Some` means poisoned.
     poisoned: Option<String>,
     /// Trouble that belongs to no account: the poison, an account not loaded, or a
@@ -106,7 +109,13 @@ fn read(file: &Path) -> Result<FileRead, String> {
             let config = toml::from_str(&text).map_err(unreadable)?;
             Ok(FileRead::V1 { text, config })
         }
-        Some(toml::Value::Integer(2)) => Ok(FileRead::V2(toml::from_str(&text).map_err(unreadable)?)),
+        Some(toml::Value::Integer(2)) => {
+            let mut config = toml::from_str(&text).map_err(unreadable)?;
+            if super::change_guard::migrate(&mut config) {
+                write_config(file, &config).map_err(|e| e.to_string())?;
+            }
+            Ok(FileRead::V2(config))
+        },
         Some(toml::Value::Integer(n)) if *n > 2 => Err(format!(
             "{} was written by a newer version of konedrive (configuration version {n})",
             file.display()
@@ -152,14 +161,14 @@ impl ConfigStore {
         }
         let troubles = poisoned.iter().map(|detail| ConfigTrouble::Unreadable { detail: detail.clone() }).collect();
         let download_guard = std::sync::Arc::new(crate::download_guard::DownloadGuard::new(config.download_guard.unwrap_or(true), config.download_guard_limits.clone().unwrap_or_default()));
-        Self { file, download_guard, inner: Mutex::new(Inner { config, poisoned, troubles }) }
+        Self { state_dir: paths.state_dir.clone(), change_guards: Mutex::default(), write_refusals: Mutex::default(), file, download_guard, inner: Mutex::new(Inner { config, poisoned, troubles }) }
     }
 
     pub fn file(&self) -> &Path {
         &self.file
     }
 
-    fn lock(&self) -> MutexGuard<'_, Inner> {
+    pub(super) fn lock(&self) -> MutexGuard<'_, Inner> {
         // A change that panicked wrote nothing and left `config` as it was.
         crate::panic::lock(&self.inner)
     }
@@ -225,6 +234,9 @@ impl ConfigStore {
             write_config(&self.file, &config)?;
         }
         self.download_guard.configure(config.download_guard.unwrap_or(true), config.download_guard_limits.clone().unwrap_or_default());
+        for (id, guard) in crate::panic::lock(&self.change_guards).iter() {
+            if config.accounts.iter().any(|a| &a.id == id) { guard.configure(config.change_guard.clone().unwrap_or_default()); }
+        }
         inner.config = config;
         Ok(result)
     }

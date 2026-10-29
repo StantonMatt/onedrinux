@@ -81,6 +81,10 @@ foreach(folder_interface Folder UploadQueue Conflicts ActivityLog)
     string(TOLOWER ${folder_interface} folder_basename)
     qt_add_dbus_interface(konedrive_dbus_SRCS ${folder_xml} ${folder_basename}interface)
 endforeach()
+# The change guard, on the manager object: its settings, and each account's holds.
+set(change_guard_xml ${KONEDRIVE_DBUS_DIR}/org.konedrive.ChangeGuard.xml)
+set_source_files_properties(${change_guard_xml} PROPERTIES INCLUDE changeguardtypes.h)
+qt_add_dbus_interface(konedrive_dbus_SRCS ${change_guard_xml} changeguardinterface)
 
 find_package(KF6 ${KF_MIN_VERSION} REQUIRED COMPONENTS
     I18n Config Notifications StatusNotifierItem DBusAddons KIO WindowSystem JobWidgets Service)
@@ -88,6 +92,8 @@ find_package(KF6 ${KF_MIN_VERSION} REQUIRED COMPONENTS
 add_library(konedrive_core STATIC
     daemoncontroller.cpp
     downloadguardcontroller.cpp
+    changeguardcontroller.cpp
+    heldchanges.cpp
     accountcontroller.cpp
     synccontroller.cpp
     accountsmodel.cpp
@@ -163,6 +169,7 @@ set(KONEDRIVE_QML
     qml/OneDriveSettingsPage.qml
     qml/SettingsPage.qml
     qml/GuardAppRow.qml
+    qml/OnHoldPage.qml
     qml/AccountSwitcher.qml
     qml/ServiceCard.qml)
 qt_add_qml_module(konedrive_window
@@ -218,6 +225,7 @@ if(BUILD_TESTING)
     konedrive_test(appstatustest)
     konedrive_test(notifiertest)
     konedrive_test(downloadguardtest)
+    konedrive_test(changeguardtest)
     konedrive_test(autostarttest)
     konedrive_test(downloadprogresssettingstest)
     konedrive_test(placescontrollertest)
@@ -232,6 +240,15 @@ if(BUILD_TESTING)
     # The download guard's controls on Settings, Status and OneDrive Settings, in the window.
     konedrive_test(guardpagestest)
     target_link_libraries(guardpagestest PRIVATE konedrive_windowplugin Qt6::Qml Qt6::Quick Qt6::QuickControls2 KF6::I18nQml)
+
+    # The change guard in the window: On Hold, Status' card, Settings' switch and limits.
+    konedrive_test(onholdpagetest)
+    target_link_libraries(onholdpagetest PRIVATE konedrive_windowplugin Qt6::Qml Qt6::Quick Qt6::QuickControls2 KF6::I18nQml)
+
+    # Two-way by default and a trial's folders: the sign-in's read-only choice, OneDrive
+    # Settings' Sync card, the refused-change notification and Status' line.
+    konedrive_test(trialtest)
+    target_link_libraries(trialtest PRIVATE konedrive_windowplugin Qt6::Qml Qt6::Quick Qt6::QuickControls2 KF6::I18nQml)
 
     # Loads the window with Qt's disk cache on, in an empty cache of its own:
     # the window's files leave no unit there, since they are in the binary.

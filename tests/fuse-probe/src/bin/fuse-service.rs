@@ -91,6 +91,9 @@ async fn main() {
         ..AccountSnapshot::default()
     });
     let service = testing::wiring().account(account.clone()).persist(persist.clone()).onedrive(drive, paths).build();
+    // Ordinary groups exercise immediate sending; mass_changes explicitly enables
+    // admission before mounting. No test reaches the installed daemon or live state.
+    if !arguments.iter().any(|a| a == "--change-guard") { service.test_changes_enabled(false).expect("test guard configuration"); }
     // The folder takes the account's mode before it is brought up, as the accounts manager
     // has it.
     service.follow_mode(mode).await;
@@ -124,6 +127,22 @@ async fn main() {
         let answer = match words.as_slice() {
             ["write-scope", "clear"] => said(persist.store.update_account(&persist.account, |account| { account.write_paths = None; Ok::<_, ConfigError>(()) }).map(|()| "saved".into()).map_err(|e| e.to_string())),
             ["write-scope", "set", paths @ ..] => said(persist.store.update_account(&persist.account, |account| { account.write_paths = Some(paths.iter().map(|path| (*path).to_owned()).collect()); Ok::<_, ConfigError>(()) }).map(|()| "saved".into()).map_err(|e| e.to_string())),
+            ["changes", "unsettled"] => said(service.test_changes_unsettled().map(|n| n.to_string())),
+            ["changes", "token"] => said(service.test_changes_snapshot().map(|(token,_)| token)),
+            ["changes", "allow", token] => said(service.test_changes_allow_batch(token).await.map(guard_result)),
+            ["changes", "restore", token] => said(service.test_changes_restore_batch(token).await.map(guard_result)),
+            ["changes", "upload", path] => said(service.test_changes_upload_local(path).map(guard_result)),
+            ["changes", "rows"] => said(service.test_changes_snapshot().map(|(_,rows)| rows.iter().map(|r| format!("{} {} {} descendants={} bytes={} after={} old={} sent={}", r.kind, r.item, r.path, r.descendants, r.bytes, r.after_bytes, r.old_path, r.sent)).collect::<Vec<_>>().join(" | "))),
+            ["changes", "enable"] => said(service.test_changes_enabled(true).map(|()| "saved".into())),
+            ["changes", "disable"] => said(service.test_changes_enabled(false).map(|()| "saved".into())),
+            ["changes", "held"] => said(service.test_changes_held().map(|rows| rows.iter().map(|r| format!("{} {} {} {}", r.kind, r.item, r.state, r.path)).collect::<Vec<_>>().join(" | "))),
+            ["changes", "count"] => said(service.test_changes_snapshot().map(|(_, rows)| rows.iter().filter(|r| !r.sent).map(|r| 1 + if r.kind == "removal" || r.kind == "upload" { r.descendants } else { 0 }).sum::<u64>().to_string())),
+            ["changes", "allow"] => said(service.test_changes_allow().map(|()| "allowed".into())),
+            ["changes", "restore"] => said(service.test_changes_restore().await.map(|()| "restored".into())),
+            ["changes", "limit", key, value] => said((|| {
+                let value = value.parse::<u64>().map_err(|e| e.to_string())?;
+                service.test_changes_thresholds([((*key).to_owned(),value)].into()).map(|()| "saved".into())
+            })()),
             ["guard", "enabled", choice] => said(persist.store.set_download_guard(*choice == "on").map(|()| "saved".into()).map_err(|e| e.to_string())),
             ["guard", "limits", files, bytes, seconds] => said((|| {
                 persist.store.set_guard_thresholds(files.parse().map_err(|_| "bad files")?, bytes.parse().map_err(|_| "bad bytes")?, seconds.parse().map_err(|_| "bad seconds")?).map_err(|e| e.to_string())?;
@@ -218,4 +237,8 @@ async fn follow(service: &SyncService, account: &StateHandle, mode: Mode) -> Str
     account.update(|snapshot| snapshot.mode = mode);
     service.follow_mode(mode).await;
     service.mode().as_str().to_owned()
+}
+
+fn guard_result(r: konedrived::account_folder::testing::GuardResult) -> String {
+    format!("done={} pending-offline={} failed={} kept-both-versions={}", r.done, r.pending_offline, r.failed, r.kept_both_versions)
 }

@@ -186,6 +186,7 @@ pub(crate) struct FolderStartInput {
     pub(crate) pool: Arc<TransferPool>,
     pub(crate) split_download_share: Arc<Share>,
     pub(crate) download_guard: Arc<crate::download_guard::DownloadGuard>,
+    pub(crate) change_guard: Option<Arc<crate::change_guard::ChangeGuard>>,
     /// `[transfers] download_after`.
     pub(crate) download_after: u64,
     /// The folder's tree lock, kept with the folder's record.
@@ -368,6 +369,7 @@ pub(crate) async fn start_folder_sync(input: FolderStartInput) -> Result<Started
         split_download_share: Arc::clone(&input.split_download_share),
         download_after: input.download_after,
         download_guard: Arc::clone(&input.download_guard),
+        change_guard: input.change_guard.clone(),
         free_space_reserve: { let running = Arc::clone(&input.running); Arc::new(move || crate::sync_plan_task::disk_space::count_reserve_bytes(running.settings().free_space_reserve_gb)) },
         tree_lock: Arc::clone(&input.tree_lock),
         ignore: Arc::clone(&input.ignore),
@@ -657,7 +659,7 @@ async fn read_quota_before_first_plan(drive: &DriveClient, space: &OneDriveSpace
 #[allow(clippy::too_many_arguments)]
 fn start_sync_tasks(input: &FolderStartInput, store: &Store, mount: &Arc<ItemMount>, sync_plan_wake: &Arc<SyncPlanWake>, running_steps: &Arc<RunningSteps>, published_plan: &Arc<PublishedPlan>, sending_holds: &Arc<crate::sync_parts::sending_holds::SendingHolds>, onedrive_space: &Arc<OneDriveSpace>, drive_id: &DriveId) -> SyncTasks {
     let stop = CancellationToken::new();
-    let graph = GraphAccess { drive: input.drive.clone(), drive_id: drive_id.clone(), store: store.clone(), clock: Arc::clone(&input.clock) };
+    let graph = GraphAccess { change_guard: input.change_guard.clone(), drive: input.drive.clone(), drive_id: drive_id.clone(), store: store.clone(), clock: Arc::clone(&input.clock) };
     let write_scope = input.drive_record.as_ref().map(|record| record.store.write_scope(&record.account)).unwrap_or_default();
     let lost_answers = LostAnswers::new(graph.clone(), Arc::clone(&input.tree_lock));
     let session_cancellations = SessionCancellations::new(graph.clone(), lost_answers.clone(), Arc::clone(running_steps)).with_write_scope(write_scope.clone());
@@ -702,6 +704,8 @@ fn start_sync_tasks(input: &FolderStartInput, store: &Store, mount: &Arc<ItemMou
         store: store.clone(),
         sync_plan_wake: Arc::clone(sync_plan_wake),
         step_runners,
+        change_guard: input.change_guard.clone(),
+        retained_cleanup: Some((Arc::clone(mount.item_content_files()), Arc::clone(&mount.folder_step_parts().write_operation_thread))),
         session_cancellations,
         running_steps: Arc::clone(running_steps),
         sending_holds: Arc::clone(sending_holds),

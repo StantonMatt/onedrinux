@@ -14,12 +14,14 @@
 
 mod atomic;
 mod config_trouble;
+mod change_guard;
 mod download_guard;
 mod ids;
 pub(crate) mod migrate;
 mod model;
 mod paths;
 mod store;
+pub(crate) mod write_refusals;
 mod write_scope;
 pub(crate) use write_scope::{WriteScope, WriteScopeSource};
 

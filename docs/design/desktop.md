@@ -349,9 +349,9 @@ which is the whole app's. With no account at all the window is one page, "Add yo
 
 | Page | Shows |
 |---|---|
-| **Status** | in its header "Sync Now", "Pause" (2, 8 or 24 hours, or until resumed) or "Resume", and "Open Folder" with the folder's path in its tooltip. The state: the headline and the line under it by `Overall`, the mode ("Read-only", or "Read-only for now" while the folder of a read-write account is not writable), the trouble, the last start-up check, "Sign In Again" or "Sync Anyway" when they apply, and one line of what Issues lists, which opens it. The space: one bar as long as the OneDrive's storage (`QuotaTotal`), bright for what is on this device (`LocalBytes`), pale for the rest of what is used in OneDrive (`QuotaUsed`), with "N items always kept (size)" (`PinnedCount`, `PinnedBytes`); "Free Up Space…", and "Unpin All…" while anything is pinned. Two cards, "Downloading" and "Uploading": the speed, the files moving, what is left with its size and time, what is done, and a chart of the last two minutes (KQuickCharts); under Downloading the thumbnails being downloaded, under Uploading what waits and why. The transfer pool once below them; the transfers under way with progress bars. **History**, folded until opened: the events the daemon keeps, newest first, with a search by name or folder. With no folder yet, the head says so, with "Choose Folder…"; a folder that stopped has only why, with "Try Again" and "Use Another Folder…" (below) |
+| **Status** | in its header "Sync Now", "Pause" (2, 8 or 24 hours, or until resumed) or "Resume", and "Open Folder" with the folder's path in its tooltip. The state: the headline and the line under it by `Overall`, the mode ("Read-only", or "Read-only for now" while the folder of a read-write account is not writable), the trouble, the last start-up check, "Sign In Again" or "Sync Anyway" when they apply, one line of what Issues lists, which opens it, and during a trial how many folders can be changed. The space: one bar as long as the OneDrive's storage (`QuotaTotal`), bright for what is on this device (`LocalBytes`), pale for the rest of what is used in OneDrive (`QuotaUsed`), with "N items always kept (size)" (`PinnedCount`, `PinnedBytes`); "Free Up Space…", and "Unpin All…" while anything is pinned. Two cards, "Downloading" and "Uploading": the speed, the files moving, what is left with its size and time, what is done, and a chart of the last two minutes (KQuickCharts); under Downloading the thumbnails being downloaded, under Uploading what waits and why. The transfer pool once below them; the transfers under way with progress bars. **History**, folded until opened: the events the daemon keeps, newest first, with a search by name or folder. With no folder yet, the head says so, with "Choose Folder…"; a folder that stopped has only why, with "Try Again" and "Use Another Folder…" (below) |
 | **Issues** | one list in three sections, with a count badge while anything needs the user: **Can't Upload**, `NotUploadedSummary()` by what can be done about it, a reason one action fixes as one line with its button, and the files of a reason when it is opened (`NotUploadedFiles(reason, 20)`); **Kept Both Versions**, each conflict copy with "Show Both" and "Dismiss"; **Can't Be Shown in the Folder**, `Skipped()` and why, in the words `sync skipped` uses. The last two show their first 200 rows and count the rest |
-| **OneDrive Settings** | the name with "Rename…"; the Microsoft account's name and email; **Two-way sync** (below); the folder with "Use Another Folder…"; "Previews without downloading" (§8) and the free space to keep for pinned files, changed after "Edit", which turns into "Save"; the ignore list ("Never uploaded"); "Sign Out"; "Disconnect This OneDrive…". With no folder yet, only the account's part, "Sign Out" and "Disconnect This OneDrive…" |
+| **OneDrive Settings** | the name with "Rename…"; the Microsoft account's name and email; **Two-way sync** and, two-way, **Only these folders can be changed** (below); the folder with "Use Another Folder…"; "Previews without downloading" (§8) and the free space to keep for pinned files, changed after "Edit", which turns into "Save"; the ignore list ("Never uploaded"); "Sign Out"; "Disconnect This OneDrive…". With no folder yet, only the account's part, "Sign Out" and "Disconnect This OneDrive…" |
 | **Settings** | "Start at login", "Show download and upload progress", "Show in Places", "Show a tray icon for each account"; for every account, "Pause on metered connections" and "On battery"; "Quit KOneDrive" |
 
 The long lists are `ListView`s, which build only the rows in sight, with a fixed height.
@@ -393,9 +393,14 @@ longer the one it started from, the window starts the installed program in its p
 process (`SelfRestart`): hidden in the tray if it was hidden, on the same account if it was shown.
 A window built by hand and run against an installed daemon stays, with the version line.
 
-**Sign In…** is `Accounts.SignIn`; the window then waits for `SignInFinished` with that number
-([accounts.md](accounts.md) §8.2), with the link to copy and "Cancel". "Add Another OneDrive…" in
-the switcher's menu calls it at once and shows the same wait. `signed-in` chooses the new account,
+**Sign In…** is `Accounts.SignIn`, two-way by the daemon's default (`new_account_mode`); the window
+then waits for `SignInFinished` with that number ([accounts.md](accounts.md) §8.2), with the link to
+copy and "Cancel". "Add Another OneDrive…" in the switcher's menu calls it at once and shows the same
+wait. While a two-way sign-in waits, which is when Microsoft's page asks to allow changes, "Sign In
+Read-Only Instead" cancels it (`CancelSignIn`) and, once the daemon says it did, starts
+`Accounts.Add("read-only")`, whose URL opens again; the cancelled one's `cancelled` ends nothing. A
+sign-in the browser had finished already is made the account as it would have been. A read-only
+sign-in that waits has no such row. `signed-in` chooses the new account,
 shows its Status and opens the dialog that picks its folder. A cancel shows nothing, and with an
 account already there leads back to its Status; `already-added` names the account it is, a failure
 says the daemon's reason, with "Sign In…" to try again, and a daemon that leaves the bus ends the
@@ -406,8 +411,8 @@ after a sign-in, by "Choose Folder…" on Status, and by "Use Another Folder…"
 stopped. The window checks the folder picked first (`FolderChoice`): one that is another account's
 folder or inside one, or has anything in it, is not registered; Status says why, and the dialog
 opens again with that as its title. The daemon refuses a folder that is not empty too
-(`NotEmpty`). A folder that passes is registered (`Folder.Register`), read-only for a new account:
-two-way sync is switched on in OneDrive Settings. A dialog closed with no folder leaves "Choose
+(`NotEmpty`). A folder that passes is registered (`Folder.Register`) in the mode the account was
+added with: two-way unless it signed in read-only. Two-way sync is switched in OneDrive Settings. A dialog closed with no folder leaves "Choose
 Folder…" on Status, and OneDrive Settings, where the account can be disconnected. For a folder that
 stopped (`Overall` is `stopped`) Status says why (`Trouble`), with "Try Again" (`Refresh`), and how
 many changes made there are not uploaded (`UploadQueue.UnsentCount`): they stay in the old folder
@@ -424,7 +429,22 @@ with "Choose Folder…".
 opens for a sign-in allowing KOneDrive to change files; then `SetMode("read-write", false)`, whose
 URL opens as Sign In's does, and while that sign-in waits the switch says so. Turned off while
 changes are unsent, the switch to read-only waits for them, and the page says how many are still to
-send, with "Switch Now" (`force`) and "Keep Two-Way Sync" ([writes.md](writes.md) §2).
+send, with "Switch Now" (`force`) and "Keep Two-Way Sync" ([writes.md](writes.md) §2). Two-way, its
+words say that large changes wait for review, or, with Settings' "Hold large changes" off, a warning
+line says they are not held.
+
+**Only these folders can be changed** is a trial (`Account.WriteScopeEnabled`, `WritePaths`,
+[accounts.md](accounts.md) §10.1), shown below Two-way sync only while it is on. Turned on, it opens
+the folder dialog in the OneDrive folder ("Choose a Folder That Can Be Changed") and starts with the
+folder picked (`SetWriteScope`); a dialog closed with nothing leaves it off. On, each folder is a row,
+relative to the drive root and cut in the middle, with Remove (`SetWriteScope` with the rest); the
+last folder's Remove is off, since an empty list would refuse every change. "Add Folder…" opens the
+same dialog: a folder outside the OneDrive folder, or the folder itself, opens it again titled "Choose
+a Folder Inside Your OneDrive Folder"; one inside a folder listed changes nothing; one that holds
+folders listed takes their place. Turned off, it asks "Allow Changes Everywhere?" first, then
+`ClearWriteScope`. Each change goes through the daemon and the rows show what it says; a refusal is
+the page's error. Status says the trial on its head card: "Changes are allowed only in N folders.
+OneDrive Settings lists them."
 
 **Places.** Each account's folder has an entry in Dolphin's Places panel and in file dialogs,
 `OneDrive — <label>`, with one account too. The entry is found again by a tag of its own
@@ -471,8 +491,8 @@ An account added or removed gains or loses its icon at once. The setting is the 
 
 Notifications are sent by the **window's process**, not the daemon, through KNotification, with
 events defined in `app/konedrive.notifyrc` so that each can be configured in System Settings
-(`app/notifier.cpp`, the download guard's `GuardNotifier` there too; `newerRelease` from
-`app/releasecheck.cpp`):
+(`app/notifier.cpp`, the download guard's `GuardNotifier` and the change guard's `ChangeNotifier`
+there too; `newerRelease` from `app/releasecheck.cpp`):
 
 | Event | When |
 |---|---|
@@ -486,10 +506,12 @@ events defined in `app/konedrive.notifyrc` so that each can be configured in Sys
 | `nameTaken` | a name could not be used here because OneDrive holds it with an item the folder cannot show (F304): that item's reason, and to rename it in OneDrive |
 | `throttled` | a program was refused a file during OneDrive's `Retry-After`: once per wait, naming the first file and the time left |
 | `newerRelease` | a newer release is out on GitHub, once per release (§4, the version line); not an account's, so it names none and is never summed up |
-| `downloadsBlocked` | the download guard ([download-guard.md](download-guard.md)) blocked an app for going over its limits (`DownloadsBlocked`, reason `bulk`): "Too many downloads by …", with the files or the size it downloaded and the window, and Allow for This Session, Always Allow, Always Block and Free Up What It Downloaded; or a program it could not identify (`unidentified`), with no button, since it can't be allowed. Never for a background reader (`background`) or an app always blocked (`user`). Free Up's result, or a button the daemon refused, takes its place |
+| `downloadsBlocked` | the download guard ([download-guard.md](download-guard.md)) blocked an app for going over its limits (`DownloadsBlocked`, reason `bulk`): "Too many downloads by …", with the files or the size it downloaded and the window, and Allow for This Session and Always Allow, the two buttons a Plasma popup has room for (Always Block and Free Up What It Downloaded are in the app's menu in the window); or a program it could not identify (`unidentified`), with no button, since it can't be allowed. Never for a background reader (`background`) or an app always blocked (`user`). A button the daemon refused takes its place |
+| `writeRefused` | a program's change outside a trial's folders was refused (`Account.WriteRefused`): "Change refused", which folder ("“Documents/Taxes/2025” can't be changed on this computer: only the folders you chose can.", or the top of the OneDrive), with "Allow This Folder", which adds it (`SetWriteScope`); none at the top, where it would allow everything, nor once the trial has ended. The rest of the next 10 minutes are counted, the daemon's own counts added: "23 more changes were refused outside the folders that can be changed.", with no button |
+| `changesHeld` | the change guard ([change-guard.md](change-guard.md)) holds an account's changes of a kind that was not held before: "312 deletions on hold" (several kinds: "370 changes on hold"), what was changed within which window, Review… (On Hold) and Restore, Move Back, Don't Upload or Restore All. One per account, keyed by it and never summed up; more of a shown kind changes its words in place, nothing held any more takes it back. Restore acts on what it says, and its result (or the daemon's refusal) takes its place |
 
-The first notification of an event is sent at once; more of the same event within 10 s are sent as
-one summary, except `downloadsBlocked`: the guard counts each app across every account, so it names
+The first notification of an event is sent at once; more of the same event within 10 s (10 minutes
+for `writeRefused`) are sent as one summary, except `downloadsBlocked`: the guard counts each app across every account, so it names
 none, and it is never summed up, since each has its own buttons. It is one per block, never one per
 refused read, and an app has one at a time: a new one takes the place of the one shown, and one whose
 app the list (`ListApps`, read again after each signal and when the daemon comes back) no longer has
@@ -502,7 +524,8 @@ more than one account a notification's title names the account. Clicking it open
 account where the event is dealt with (`WindowSection`): `uploadFailed`, `conflict`,
 `notRemovedHere` and `nameTaken` open their section of Issues, `downloadFailed` and `updateFailed` open Status with
 History unfolded, `newerRelease` opens the release's page in the browser, `downloadsBlocked` opens Settings
-at Blocked and Allowed Apps (on the account already shown), the others Status. With the app quit nothing notifies, and what happened meanwhile
+at Blocked and Allowed Apps (on the account already shown), `writeRefused` OneDrive Settings at its Sync
+card, the others Status. With the app quit nothing notifies, and what happened meanwhile
 is never announced later; the window's lists still show it.
 
 ## 7. Download and upload progress in Plasma

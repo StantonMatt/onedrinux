@@ -4,6 +4,7 @@
 //! account; the list of them is the daemon's, in `registry.rs`.
 
 pub(crate) mod bring_up;
+mod change_guard;
 mod folder;
 pub(crate) mod free_up;
 pub(crate) mod hydrate;

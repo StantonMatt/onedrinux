@@ -8,6 +8,9 @@ const EVERY_SENT_PART: [SentPart; 5] = [SentPart::NewDirectory, SentPart::NewFil
 /// A file of 3 bytes in a read-write folder, with nothing in its way.
 fn conditions() -> SendingConditions {
     SendingConditions {
+        is_local_only: false,
+        is_held_for_approval: false,
+        change_quiet_until: None,
         is_ignored: false,
         name_refusal: None,
         size: Some(3),

@@ -70,6 +70,7 @@ use crate::local::SharedIgnore;
 use crate::status::report::Report;
 
 /// The order the parts of a mount are built in.
+mod guard_restore;
 pub(in crate::mount) mod build_order;
 
 /// What a mount over the rows is made with: what the folder's start hands it.
@@ -85,6 +86,7 @@ pub(crate) struct ItemMountSetup {
     pub(crate) pool: Arc<TransferPool>,
     pub(crate) split_download_share: Arc<Share>,
     pub(crate) download_guard: Arc<crate::download_guard::DownloadGuard>,
+    pub(crate) change_guard: Option<Arc<crate::change_guard::ChangeGuard>>,
     pub(crate) free_space_reserve: Arc<dyn Fn() -> u64 + Send + Sync>,
     /// `[transfers] download_after`.
     pub(crate) download_after: u64,

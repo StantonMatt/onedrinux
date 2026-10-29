@@ -154,6 +154,12 @@ pub trait Account {
     fn label(&self) -> zbus::Result<String>;
     /// Restricts writes to these relative subtrees. An empty list refuses every write.
     fn set_write_scope(&self, paths: &[&str]) -> zbus::Result<()>;
+    /// A refused path and its containing existing folder, relative to the drive root.
+    /// Empty folder means the root (no Allow This Folder action). App is `app:<desktop
+    /// id>` or `exe:<absolute executable>`, empty if unknown. Count covers this report
+    /// only: first immediately, subsequent refusals coalesced at most every 10 seconds.
+    #[zbus(signal)]
+    fn write_refused(&self, path: &str, folder: &str, app: &str, count: u64) -> zbus::Result<()>;
     /// Removes the restriction; read-only mode still applies.
     fn clear_write_scope(&self) -> zbus::Result<()>;
     #[zbus(property)]

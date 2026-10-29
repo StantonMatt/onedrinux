@@ -172,6 +172,9 @@ tests/fuse-probe/run.sh kio_trash                 # by name only
   and KDE Frameworks 6 development packages on the host, and the guest runs it with the host's
   libraries.
 - **One scenario**: `ONLY` names the scenarios to run, of the groups asked for.
+- **Folder readiness**: `register_folder` waits for the first Graph listing to end. The
+  planner may still be placing its items. A scenario that reads a known set of files must
+  wait for those names to be shown, using metadata alone, before testing content admission.
 - **Reading a failure**: `SERVICE_LOG=debug EVIDENCE_LOG_LINES=400` set the level of the daemon's
   log and how much of it a failed scenario prints.
 - **The result**: the run fails when a scenario fails that `tests/fuse-probe/expected-to-fail.txt`

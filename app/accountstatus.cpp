@@ -1,6 +1,7 @@
 #include "accountstatus.h"
 
 #include "accountcontroller.h"
+#include "heldchanges.h"
 #include "synccontroller.h"
 #include "timetext.h"
 #include "transfermodel.h"
@@ -72,6 +73,15 @@ AccountStatus::AccountStatus(AccountController *account, SyncController *sync, C
     update();
 }
 
+void AccountStatus::setHeld(HeldChanges *held)
+{
+    m_held = held;
+    if (held) {
+        connect(held, &HeldChanges::changed, this, &AccountStatus::update);
+    }
+    update();
+}
+
 QString AccountStatus::iconName() const
 {
     return iconFor(m_state);
@@ -90,6 +100,9 @@ QString AccountStatus::iconFor(const QString &state)
     }
     if (state == QLatin1String("paused")) {
         return QStringLiteral("media-playback-pause");
+    }
+    if (state == QLatin1String("held")) {
+        return QStringLiteral("state-error");
     }
     return QStringLiteral("state-offline");
 }
@@ -278,6 +291,17 @@ void AccountStatus::update()
         if (reason != QLatin1String("unreachable")) {
             troubleLine = trouble;
         }
+        // Changes the change guard holds, while nothing worse goes on (a pause, a wait, no
+        // connection keep their own words): they wait for the user.
+        const bool held = m_held && m_held->count() > 0 && !m_sync->paused() && heldBack.isEmpty() && !throttled && !listing
+                          && reason != QLatin1String("unreachable") && (state == QLatin1String("ok") || state == QLatin1String("syncing") || state == QLatin1String("warning"));
+        if (held) {
+            state = QStringLiteral("held");
+            headline = i18n("Changes on hold");
+            detail = doing == i18n("Up to date") ? i18n("Everything else is up to date.") : doingChecked;
+            text = m_held->summary();
+            attention.clear();
+        }
         // Changes made here are not uploaded: the account is read-only, or two-way with a
         // folder that runs read-only for now (Folder.Writable).
         QString readOnly;
@@ -291,7 +315,9 @@ void AccountStatus::update()
         }
 
         // Why the account needs attention, where the line does not say it: by the reason.
-        if (reason == QLatin1String("conflicts")) {
+        if (held) {
+            // The line says it.
+        } else if (reason == QLatin1String("conflicts")) {
             attention = i18np("Kept both versions of 1 file changed here and in OneDrive", "Kept both versions of %1 files changed here and in OneDrive", m_sync->conflictCount());
         } else if (reason == QLatin1String("quota-full")) {
             attention = i18np("OneDrive is full: 1 file waits for space", "OneDrive is full: %1 files wait for space", m_sync->spaceWaitingCount());

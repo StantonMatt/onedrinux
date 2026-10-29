@@ -287,3 +287,15 @@ fn a_pending_rename_and_a_policy_hold_keep_the_resident_copy() {
     assert_eq!(free(&fixture, &protected, &clean), FreedCopy::Left(FreeUpDecision::LeaveModifiedHere));
     assert_eq!(fixture.read_disk_file("report.txt").as_deref(), Some(b"only local copy while offline".as_slice()));
 }
+
+#[test]
+fn change_guard_leaves_a_held_moves_clean_copy_on_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let guard = Arc::new(crate::change_guard::ChangeGuard::open(dir.path().join("guard.json"), crate::change_guard::GuardConfig { moves: 0, ..Default::default() }));
+    let fixture = ItemFixture::with_change_guard(Some(Arc::clone(&guard)));
+    let file = make_clean_copy(&fixture, "doc", b"offline bytes");
+    let moved = fixture.move_here(file.local_item_id, "renamed");
+    guard.observe(&[(moved.clone(), "renamed".into())], 100).unwrap();
+    assert!(matches!(free(&fixture, &make_free_up(&fixture), &moved), FreedCopy::Left(FreeUpDecision::LeaveModifiedHere)));
+    assert_eq!(fixture.read_disk_file("renamed").unwrap(), b"offline bytes");
+}

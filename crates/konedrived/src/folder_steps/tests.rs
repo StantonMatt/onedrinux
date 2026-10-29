@@ -854,3 +854,40 @@ fn the_sync_marks_are_announced_for_each_item_the_folder_shows_at_its_place_now(
     steps.announce_marks_changed(vec![file, directory]);
     assert_eq!(list_announced(&fixture).len(), 4);
 }
+
+#[test]
+fn change_guard_holds_a_reconciliation_even_when_its_plan_predates_the_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let guard = Arc::new(crate::change_guard::ChangeGuard::open(dir.path().join("guard.json"), crate::change_guard::GuardConfig { rewrites: 0, ..Default::default() }));
+    let fixture = ItemFixture::with_change_guard(Some(Arc::clone(&guard)));
+    let file = fixture.show_onedrive_file("doc", b"cloud bytes").local_item_id;
+    fixture.land_copy(file, b"cloud bytes");
+    let row = fixture.change_file_here(file, b"keep local work");
+    let planned = ItemVersions::of(&row);
+    let steps = make_steps(&fixture);
+    guard.observe(&[(row, "doc".into())], 100).unwrap();
+    assert!(matches!(run(&fixture, &steps, FolderStep::TakeOneDriveContent { item: planned }), StepOutcome::NotRun(StepObstacle::SendingStopped)));
+    assert_eq!(fixture.read_disk_file("doc").unwrap(), b"keep local work");
+}
+
+#[test]
+fn a_hold_cancels_a_content_discard_wait_without_closing_its_old_reader() {
+    let dir = tempfile::tempdir().unwrap();
+    let guard = Arc::new(crate::change_guard::ChangeGuard::open(dir.path().join("guard.json"), crate::change_guard::GuardConfig { moves: 0, ..Default::default() }));
+    let fixture = ItemFixture::with_change_guard(Some(Arc::clone(&guard)));
+    let file = fixture.show_onedrive_file("doc", b"old version");
+    let row = fixture.move_here(file.local_item_id, "renamed");
+    let reader = fixture.open_cloud_reader(&row);
+    let steps = make_steps(&fixture);
+    fixture.runtime().block_on(async {
+        let waiting = steps.run_take_content(ItemVersions::of(&row), None);
+        tokio::pin!(waiting);
+        assert!(futures_util::poll!(waiting.as_mut()).is_pending());
+        guard.observe(&[(row.clone(), "renamed".into())], 100).unwrap();
+        assert!(matches!(tokio::time::timeout(std::time::Duration::from_secs(5), waiting).await.expect("a hold wakes the content wait"), StepOutcome::RowsChanged(_)));
+    });
+    assert!(fixture.item_handles.is_open_for_reading(row.local_item_id));
+    fixture.close_reader(reader);
+    assert_eq!(fixture.find_item(row.local_item_id).unwrap(), row);
+    assert_eq!(count_records(&fixture), 0);
+}

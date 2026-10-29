@@ -313,7 +313,7 @@ pub struct ItemPlace {
 
 /// What tells one content of a file from another, with its size and its modification time
 /// (`mtime` in whole Unix seconds, `mtime_nsec` the rest of it: 0 for a time OneDrive gave).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ContentVersion {
     /// Told by what OneDrive gave or the client computed from the bytes: the QuickXorHash
     /// (base64) and the cTag. Either may be missing; a copy on disk whose row was lost has

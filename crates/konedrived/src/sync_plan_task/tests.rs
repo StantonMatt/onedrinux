@@ -65,6 +65,8 @@ impl TaskFixture {
         };
         let free_space = Arc::new(Mutex::new(Some(u64::MAX)));
         let task = SyncPlanTask::new(SyncPlanTaskParts {
+            change_guard: None,
+            retained_cleanup: None,
             store: fixture.store.clone(),
             sync_plan_wake: Arc::clone(&fixture.sync_plan_wake),
             step_runners: fixture.step_runners_stand_in(),

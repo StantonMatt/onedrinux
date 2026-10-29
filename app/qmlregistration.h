@@ -8,6 +8,7 @@
 #include "accountstatus.h"
 #include "activitymodel.h"
 #include "autostart.h"
+#include "changeguardcontroller.h"
 #include "conflictmodel.h"
 #include "currentaccount.h"
 #include "daemoncontroller.h"
@@ -31,12 +32,16 @@ inline void registerKonedriveQml(DaemonController *daemon,
                                  TraySettings *tray,
                                  ServiceUnit *serviceUnit,
                                  ReleaseCheck *releaseCheck,
-                                 DownloadGuardController *downloadGuard = nullptr)
+                                 DownloadGuardController *downloadGuard = nullptr,
+                                 ChangeGuardController *changeGuard = nullptr)
 {
-    // One on the daemon's bus when none is given: what does not test the guard has it off
+    // One on the daemon's bus when none is given: what does not test the guards has them off
     // the fake daemon, which may have none.
     if (!downloadGuard) {
         downloadGuard = new DownloadGuardController(daemon->bus(), daemon);
+    }
+    if (!changeGuard) {
+        changeGuard = new ChangeGuardController(daemon->bus(), daemon);
     }
     const char *uri = "org.konedrive.app";
     qmlRegisterSingletonInstance(uri, 1, 0, "Daemon", daemon);
@@ -49,12 +54,15 @@ inline void registerKonedriveQml(DaemonController *daemon,
     qmlRegisterSingletonInstance(uri, 1, 0, "ServiceUnit", serviceUnit);
     qmlRegisterSingletonInstance(uri, 1, 0, "ReleaseCheck", releaseCheck);
     qmlRegisterSingletonInstance(uri, 1, 0, "DownloadGuard", downloadGuard);
+    qmlRegisterSingletonInstance(uri, 1, 0, "ChangeGuard", changeGuard);
     // Parented to `current`, whose account its refusal shows with.
     qmlRegisterSingletonInstance(uri, 1, 0, "FolderChoice", new FolderChoice(accounts, current, current));
     qmlRegisterUncreatableType<AccountItem>(uri, 1, 0, "AccountItem", QStringLiteral("owned by Accounts"));
     qmlRegisterUncreatableType<AccountController>(uri, 1, 0, "AccountController", QStringLiteral("owned by Accounts"));
     qmlRegisterUncreatableType<SyncController>(uri, 1, 0, "SyncController", QStringLiteral("owned by Accounts"));
     qmlRegisterUncreatableType<AccountStatus>(uri, 1, 0, "AccountStatus", QStringLiteral("owned by Accounts"));
+    qmlRegisterUncreatableType<HeldChanges>(uri, 1, 0, "HeldChanges", QStringLiteral("owned by Accounts"));
+    qmlRegisterUncreatableType<HeldRowsModel>(uri, 1, 0, "HeldRowsModel", QStringLiteral("owned by a HeldChanges"));
     qmlRegisterUncreatableType<TransferModel>(uri, 1, 0, "TransferModel", QStringLiteral("owned by a SyncController"));
     qmlRegisterUncreatableType<ActivityModel>(uri, 1, 0, "ActivityModel", QStringLiteral("owned by a SyncController"));
     qmlRegisterUncreatableType<ConflictModel>(uri, 1, 0, "ConflictModel", QStringLiteral("owned by a SyncController"));

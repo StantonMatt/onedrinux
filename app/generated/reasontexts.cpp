@@ -62,6 +62,8 @@ bool takesDetail(QStringView key)
         QLatin1String("not-read-on-disk"),
         QLatin1String("being-checked"),
         QLatin1String("quiet-time"),
+        QLatin1String("held-for-approval"),
+        QLatin1String("local-only"),
         QLatin1String("network"),
         QLatin1String("local-error"),
         QLatin1String("index-error"),
@@ -219,6 +221,18 @@ QString reasonSentence(const ReasonParts &parts, const QString &needs, const QSt
     if (parts.key == QLatin1String("being-checked")) {
         if (!parts.hasDetail) {
             return i18n("Being checked: KOneDrive is asking OneDrive for the whole folder again, and goes on by itself.");
+        }
+        return QString();
+    }
+    if (parts.key == QLatin1String("local-only")) {
+        if (!parts.hasDetail) {
+            return i18n("Kept on this computer. Choose Upload to send it to OneDrive.");
+        }
+        return QString();
+    }
+    if (parts.key == QLatin1String("held-for-approval")) {
+        if (!parts.hasDetail) {
+            return i18n("Changes are held for approval: allow them or restore the cloud version.");
         }
         return QString();
     }

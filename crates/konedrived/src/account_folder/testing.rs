@@ -169,6 +169,9 @@ pub fn persist(file: &Path) -> Persist {
         None => store.add_account("Personal").map(|a| {
             // Most fixtures model an existing read-only account; two-way scenarios opt in.
             let _ = store.update_account(&a.id, |account| { account.mode = crate::config::Mode::ReadOnly; Ok::<_, crate::config::ConfigError>(()) });
+            // Ordinary service tests exercise immediate sending. Guard tests enable
+            // admission explicitly and use their own ledger under this temporary root.
+            let _ = store.set_changes_enabled(false);
             a.id
         }).unwrap_or_else(|_| crate::config::AccountId::new("0123456789ab")),
     };
@@ -351,3 +354,33 @@ impl Builder {
         service
     }
 }
+
+/// Isolated FUSE harness controls. These do not add any production bus or CLI bypass.
+#[cfg(feature = "fault-injection")]
+impl SyncService {
+    pub fn test_changes_enabled(&self, enabled: bool) -> Result<(), String> {
+        self.wiring.persist.store.set_changes_enabled(enabled).map_err(|e| e.to_string())
+    }
+    pub fn test_changes_thresholds(&self, limits: std::collections::BTreeMap<String, u64>) -> Result<(), String> {
+        self.wiring.persist.store.set_changes_thresholds(limits).map_err(|e| e.to_string())
+    }
+    pub fn test_changes_held(&self) -> Result<Vec<konedrive_dbus::rows::HeldChange>, String> { Ok(self.change_guard()?.list(false)) }
+    pub fn test_changes_allow(&self) -> Result<(), String> { self.change_guard()?.decide(&[], false).map(drop) }
+    pub async fn test_changes_restore(&self) -> Result<(), String> {
+        let result = self.restore_changes(self.change_guard()?.snapshot()?.0, vec![]).await?;
+        if result.failed > 0 { return Err(format!("{} restore(s) failed: {:?}", result.failed, result.failures)); }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "fault-injection")]
+impl SyncService {
+    pub fn test_changes_unsettled(&self) -> Result<usize, String> { Ok(self.change_guard()?.unsettled()) }
+    pub fn test_changes_snapshot(&self) -> Result<(String, Vec<konedrive_dbus::rows::HeldChange>), String> { self.change_guard()?.snapshot() }
+    pub async fn test_changes_allow_batch(&self, token: &str) -> Result<konedrive_dbus::rows::GuardResult, String> { self.allow_changes(token.into(), vec![]).await }
+    pub async fn test_changes_restore_batch(&self, token: &str) -> Result<konedrive_dbus::rows::GuardResult, String> { self.restore_changes(token.into(), vec![]).await }
+    pub fn test_changes_upload_local(&self, path: &str) -> Result<konedrive_dbus::rows::GuardResult, String> { self.change_guard()?.upload_local(path, self.clock.now()) }
+}
+
+#[cfg(feature = "fault-injection")]
+pub use konedrive_dbus::rows::GuardResult;

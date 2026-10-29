@@ -542,3 +542,18 @@ fn explicit_hydrate_rereads_after_an_app_free_up_queued_ahead_of_it() {
     assert_eq!(presence_at(&fixture, "keep.txt"), ContentPresence::OnDisk, "hydrate cannot use its stale pre-free snapshot");
     assert_eq!(run.block_on(files.free_app_downloads("app:reader")).unwrap(), FreedSpace::default());
 }
+
+#[test]
+fn a_failed_guard_never_offers_or_frees_a_clean_resident_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let ledger = dir.path().join("guard.json");
+    fs::write(&ledger, b"damaged ledger").unwrap();
+    let guard = Arc::new(crate::change_guard::ChangeGuard::open(ledger, Default::default()));
+    let fixture = ItemFixture::with_change_guard(Some(guard));
+    make_clean_copy(&fixture, "doc", b"keep resident bytes");
+    let files = make_files_interface(&fixture);
+    assert_eq!(fixture.runtime().block_on(files.decide_free_up(&fixture.disk_path("doc"), false)).unwrap(), FreeUpDecision::LeaveModifiedHere);
+    fixture.runtime().block_on(files.free_up(&fixture.disk_path("doc"))).unwrap();
+    assert_eq!(fixture.read_disk_file("doc").unwrap(), b"keep resident bytes");
+    assert_eq!(presence_at(&fixture, "doc"), ContentPresence::OnDisk);
+}

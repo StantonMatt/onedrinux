@@ -153,6 +153,12 @@ pub const READ_ONLY_FOLDER: &str = "the folder is read-only";
 /// since — only holds its item longer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncPlanInput {
+    /// Held mutations are neither sent nor reconciled away until a user decision.
+    pub held_for_approval: BTreeSet<LocalItemId>,
+    /// The local-only subset of held_for_approval, reported in Issues with an Upload action.
+    pub local_only: BTreeSet<LocalItemId>,
+    /// Removal batching is independent of file modification times.
+    pub change_quiet_until: BTreeMap<LocalItemId, i64>,
     pub items: Vec<Item>,
     /// Whether the folder can show an item as OneDrive has it
     /// ([`ItemStore::find_folder_visibility`](crate::ItemStore::find_folder_visibility)),
@@ -562,6 +568,9 @@ fn describe_item<'a>(input: &SyncPlanInput, items: &PlanItems<'_>, item: &'a Ite
         }),
         below_in_onedrive: Vec::new(),
         sending: SendingConditions {
+            is_local_only: input.local_only.contains(&id),
+            is_held_for_approval: input.held_for_approval.contains(&id) || (item.kind == ItemKind::Directory && input.held_for_approval.iter().any(|held| items.is_shown_in(*held, id) || items.is_in_onedrive_in(*held, id))),
+            change_quiet_until: input.change_quiet_until.get(&id).copied(),
             is_ignored: input.ignored_items.contains(&id),
             name_refusal: input.name_refusals.get(&id).cloned(),
             size: item.local.as_ref().and_then(|local| local.content.as_ref()).map(|content| content.size()),
@@ -651,6 +660,8 @@ pub fn make_sync_plan(input: &SyncPlanInput) -> SyncPlan {
     let waiting_for_the_user: BTreeSet<LocalItemId> = wait_chain::list_items_that_wait_for_the_user(&answers).into_iter().collect();
     let content_meanwhile = cases.iter().filter(|case| waiting_for_the_user.contains(&case.item.local_item_id)).filter_map(|case| Some(Overruling::of(case.item.local_item_id, ItemDecision::Step(decide_content_while_place_waits(case)?))));
     answers.overrule(content_meanwhile.collect());
+    // Relation passes must not turn a held generation into a reconciliation step.
+    answers.overrule(cases.iter().filter(|case| case.sending.is_held_for_approval).map(|case| Overruling::of(case.item.local_item_id, ItemDecision::Wait(WaitReason::User(if case.sending.is_local_only { Reason::LocalOnly } else { Reason::HeldForApproval })))).collect());
     SyncPlan::of_answers(&input.items, answers)
 }
 

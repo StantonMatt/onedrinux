@@ -190,19 +190,43 @@ impl ItemWriteOperations {
             RemoveDecision::SetAsideOnDisk { item } => {
                 let path = case.path.as_ref().ok_or(Errno::ENOENT)?;
                 let place = case.item.as_ref().and_then(|row| row.local.as_ref()).and_then(|local| local.place.clone()).ok_or(Errno::ENOENT)?;
-                let record = self.write_place_change_record(PlaceChangeRecord::SetAside { item, place, aside_name: make_aside_entry_name(item) })?;
+                let retained = if let Some(guard) = &self.place_changes.change_guard {
+                    let row = case.item.as_ref().ok_or(Errno::ENOENT)?;
+                    if row.kind == ItemKind::File {
+                        let directory = guard.aside_directory(&self.backing_directory.resolve_root_path());
+                        std::fs::create_dir_all(&directory).map_err(|_| Errno::EIO)?;
+                        let aside = guard.prepare_removal(row, &path.display().to_string(), crate::clock::unix_now()).map_err(|_| Errno::EIO)?;
+                        Some(aside)
+                    } else { None }
+                } else { None };
+                let aside_name = retained.as_ref().map(|p| p.as_os_str().to_owned()).unwrap_or_else(|| make_aside_entry_name(item));
+                let record = self.write_place_change_record(PlaceChangeRecord::SetAside { item, place, aside_name })?;
                 #[cfg(test)]
                 self.reach(super::tests::OperationPoint::RecordWritten);
                 let change = self.place_changes.begin();
-                let undo = change.set_aside(path, item).map_err(|refusal| self.refuse_place_change(record, &refusal))?;
+                let undo = match &retained {
+                    Some(aside) => change.set_aside_named(path, aside),
+                    None => change.set_aside(path, item),
+                }.map_err(|refusal| self.refuse_place_change(record, &refusal))?;
+                if let Some(aside) = &retained {
+                    // The source parent and retained directory must both survive a crash.
+                    let synced = (|| -> std::io::Result<()> {
+                        for parent in [path.parent().unwrap_or(std::path::Path::new("")), aside.parent().unwrap()] {
+                            std::fs::File::open(self.backing_directory.resolve_path(parent))?.sync_all()?;
+                        }
+                        self.backing_directory.clone_descriptor()?.sync_all()
+                    })();
+                    if synced.is_err() { return Err(self.undo_place_change(&change, undo, record, Errno::EIO)); }
+                }
                 #[cfg(test)]
                 self.reach(super::tests::OperationPoint::DiskChanged);
                 let ((), undo) = self.write_row_or_undo(&change, undo, record, move |store| store.item_store().settle_place_change_record(record, &PlaceChangeRowWrite::LocalVersion(LocalVersionChange::Removed { item })).map(drop))?;
                 change.end();
-                self.place_changes.discard(undo);
+                if retained.is_none() { self.place_changes.discard(undo); }
                 item
             }
         };
+        self.observe_guard_item(removed);
         self.download_states.forget_item(removed);
         Ok(())
     }

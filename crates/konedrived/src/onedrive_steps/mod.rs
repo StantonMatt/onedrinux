@@ -115,6 +115,9 @@
 // test: a_directory_removal_waits_for_a_later_completed_listing
 // test: an_uploaded_temporary_saved_over_a_cloud_file_updates_the_original_id
 // test: an_upload_in_flight_follows_the_temporary_binding_after_an_atomic_save
+// test: sender_scope_precedes_guard_admission_and_a_hold_still_blocks_in_scope
+// test: a_guard_trip_while_metadata_waits_for_a_slot_prevents_the_request
+// test: removal_quiet_time_and_the_predelete_listing_both_finish_before_a_guarded_delete
 
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
@@ -157,6 +160,7 @@ use name_holders::{NameHolder, NameHolders};
 /// What every part that asks Graph is made with.
 #[derive(Clone)]
 pub(crate) struct GraphAccess {
+    pub(crate) change_guard: Option<Arc<crate::change_guard::ChangeGuard>>,
     pub(crate) drive: konedrive_graph::drive::DriveClient,
     /// The folder's drive: what an answer's item and parent are referenced in. The Graph
     /// client asks by item id in the account's own drive, and nothing of another drive is
@@ -167,6 +171,21 @@ pub(crate) struct GraphAccess {
     pub(crate) store: Store,
     /// Unix seconds: the account's clock, which the tests hold.
     pub(crate) clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+}
+
+impl GraphAccess {
+    /// Cleanup DELETEs are removals too. They use stable synthetic ids in the ledger
+    /// when no tree row remains; Restore leaves such an orphan in the cloud.
+    pub(crate) fn admit_cleanup(&self, reference: &konedrive_tree::OneDriveItemReference, bytes: u64, version: &str) -> bool {
+        self.change_guard.as_ref().is_none_or(|guard| guard.admit_cleanup(reference, bytes, version, (self.clock)()).unwrap_or(false))
+    }
+    pub(crate) fn settle_cleanup(&self, reference: &OneDriveItemReference, sent: bool) -> Result<(), TreeError> {
+        if let Some(guard) = &self.change_guard {
+            guard.settle_cleanup(reference, sent).map_err(|e| TreeError::Io(std::io::Error::other(e)))?;
+        }
+        Ok(())
+    }
+
 }
 
 /// What the job of a commit answers: the commit's outcome, and the item's paths for the
@@ -255,14 +274,57 @@ impl OneDriveSteps {
     /// request among it — lets the next run go on or adopt.
     pub(crate) async fn run(&self, step: OneDriveStep) -> StepOutcome {
         if let Err(outcome) = self.check_write_scope(&step).await { return outcome; }
-        match &step {
+        if let Some(guard) = self.content_files.change_guard() {
+            if guard.lacks_step(&step) {
+                let planned = step.clone();
+                let paths = self.graph.store.read_items(move |items| {
+                    let mut versions = vec![planned.item()];
+                    if let OneDriveStep::SendDirectoryRemoval { below, .. } = &planned { versions.extend(below); }
+                    versions.into_iter().map(|v| {
+                        let path = items.find_path(v.local_item_id)?.or(items.find_synced_path(v.local_item_id)?).unwrap_or_default();
+                        Ok((v.local_item_id, path.display().to_string()))
+                    }).collect::<Result<std::collections::BTreeMap<_,_>, TreeError>>()
+                }).await;
+                let paths = match paths { Ok(paths) => paths, Err(error) => return fail_store(error) };
+                if let Err(detail) = guard.observe_step(&step, &paths, (self.graph.clock)()) { return StepOutcome::Failed(StepFailure::Store { detail }); }
+            }
+            match guard.admit(&step, (self.graph.clock)()) {
+                Ok(true) => {},
+                Ok(false) => return StepOutcome::NotRun(StepObstacle::SendingStopped),
+                Err(detail) => return StepOutcome::Failed(StepFailure::Store { detail }),
+            }
+        }
+        let outcome = match &step {
             OneDriveStep::MakeDirectory { item, parent, name } => self.run_make_directory(item, parent, name).await,
             OneDriveStep::SendNewFile { item, parent, name } => self.run_send_new_file(item, parent, name).await,
             OneDriveStep::SendContent { item } => self.run_send_content(item).await,
             OneDriveStep::SendMove { item, parent, name } => self.run_send_move(item, parent, name).await,
             OneDriveStep::SendFileRemoval { item } => self.run_send_file_removal(item).await,
             OneDriveStep::SendDirectoryRemoval { item, below } => self.run_send_directory_removal(item, below).await,
+        };
+        if matches!(outcome, StepOutcome::Written { .. }) {
+            if let Some(guard) = self.content_files.change_guard() {
+                if let Err(detail) = guard.sent(&step) { return StepOutcome::Failed(StepFailure::Store { detail }); }
+
+            }
+        } else if let Some(guard) = self.content_files.change_guard() {
+            guard.ended_without_write(&step);
         }
+        outcome
+    }
+
+    /// A worker can wait for a pool slot while the scope narrows or another edit
+    /// trips a hold. Check both again at the last admission before sending.
+    async fn check_sender(&self, step: &OneDriveStep) -> Result<(), StepOutcome> {
+        self.check_write_scope(step).await?;
+        if let Some(guard) = &self.graph.change_guard {
+            match guard.admit(step, (self.graph.clock)()) {
+                Ok(true) => {},
+                Ok(false) => return Err(StepOutcome::NotRun(StepObstacle::SendingStopped)),
+                Err(detail) => return Err(StepOutcome::Failed(StepFailure::Store { detail })),
+            }
+        }
+        Ok(())
     }
 
     /// Refuses a reference of another drive than the folder's: nothing is sent for it.
@@ -288,6 +350,9 @@ impl OneDriveSteps {
     /// store: the temporary name, when `name` is not the name of the item's local place,
     /// and the record of the request, when it is one of one answer.
     async fn remember_before_request(&self, item: &ItemVersions, name: Option<&OsStr>, request: Option<RecordedRequest>) -> Result<(), StepOutcome> {
+        if self.graph.change_guard.as_ref().is_some_and(|g| g.blocks(item.local_item_id) || g.error().is_some()) {
+            return Err(StepOutcome::NotRun(StepObstacle::SendingStopped));
+        }
         let id = item.local_item_id;
         let local_place = item.local.as_ref().and_then(|local| local.place.clone());
         let temporary_name = match (name, local_place) {
@@ -443,6 +508,9 @@ impl OneDriveSteps {
         let request = SentRequest::MakeDirectory { parent, name };
         let answered = {
             let _slot = self.graph.drive.pool().acquire(Class::Metadata).await;
+            if let Err(outcome) = self.check_sender(&OneDriveStep::MakeDirectory { item: item.clone(), parent: parent.clone(), name: name.to_owned() }).await {
+                return self.refuse_for_certain(item, outcome).await;
+            }
             self.graph.drive.create_folder(parent.item_id.as_str(), graph_name).await
         };
         let made = match answered {
@@ -722,6 +790,9 @@ impl OneDriveSteps {
             let change = ItemChange { name: is_name_other.then_some(graph_name), parent_id: is_directory_other.then_some(parent.item_id.as_str()), modified: None };
             let answered = {
                 let _slot = self.graph.drive.pool().acquire(Class::Metadata).await;
+                if let Err(outcome) = self.check_sender(&OneDriveStep::SendMove { item: item.clone(), parent: parent.clone(), name: name.to_owned() }).await {
+                    return self.refuse_for_certain(item, outcome).await;
+                }
                 self.graph.drive.update_item(item_id, guard.as_str(), &change).await
             };
             match answered {
@@ -750,7 +821,14 @@ impl OneDriveSteps {
             Err(outcome) => return outcome,
         };
         let (planned, sent_parent, sent_name) = (item.clone(), parent.clone(), name.to_owned());
-        let committed = match self.commit_step(item, move |store| store.item_store().commit_send_move(&planned, &sent_parent, &sent_name, &moved)).await {
+        let change_guard = self.content_files.change_guard().cloned();
+        let committed = match self.commit_step(item, move |store| {
+            let mut items = store.item_store();
+            match change_guard {
+                Some(guard) => guard.commit_move(&mut items, &planned, &sent_parent, &sent_name, &moved),
+                None => items.commit_send_move(&planned, &sent_parent, &sent_name, &moved),
+            }
+        }).await {
             Ok(committed) => committed,
             Err(outcome) => return outcome,
         };
@@ -798,10 +876,16 @@ impl OneDriveSteps {
         }
         let answered = {
             let _slot = self.graph.drive.pool().acquire(Class::Metadata).await;
+            if let Err(outcome) = self.check_sender(&OneDriveStep::SendFileRemoval { item: item.clone() }).await {
+                return self.refuse_for_certain(item, outcome).await;
+            }
             self.graph.drive.delete_item(onedrive_item.item_id.as_str(), guard.as_str()).await
         };
         if let Err(outcome) = self.follow_removal_answer(item, answered).await {
             return outcome;
+        }
+        if let Some(guard) = &self.graph.change_guard {
+            if let Err(detail) = guard.confirm_removals(&[item.local_item_id]) { return StepOutcome::Failed(StepFailure::Store { detail }); }
         }
         let planned = item.clone();
         let committed = match self.commit_step(item, move |store| store.item_store().commit_send_file_removal(&planned)).await {
@@ -875,10 +959,17 @@ impl OneDriveSteps {
         }
         let answered = {
             let _slot = self.graph.drive.pool().acquire(Class::Metadata).await;
+            if let Err(outcome) = self.check_sender(&OneDriveStep::SendDirectoryRemoval { item: item.clone(), below: below.to_vec() }).await {
+                return self.refuse_for_certain(item, outcome).await;
+            }
             self.graph.drive.delete_folder(onedrive_item.item_id.as_str(), &guard).await
         };
         if let Err(outcome) = self.follow_removal_answer(item, answered).await {
             return outcome;
+        }
+        if let Some(guard) = &self.graph.change_guard {
+            let ids: Vec<_> = std::iter::once(item.local_item_id).chain(below.iter().map(|v| v.local_item_id)).collect();
+            if let Err(detail) = guard.confirm_removals(&ids) { return StepOutcome::Failed(StepFailure::Store { detail }); }
         }
         let (planned, planned_below) = (item.clone(), below.to_vec());
         let committed = match self.commit_step(item, move |store| store.item_store().commit_send_directory_removal(&planned, &planned_below)).await {

@@ -55,32 +55,37 @@ impl WriteScope {
 
 /// Read afresh at admission, including on a mount kept across a stop/start.
 #[derive(Clone)]
-pub(crate) struct WriteScopeSource(Arc<dyn Fn() -> WriteScope + Send + Sync>);
+pub(crate) struct WriteScopeSource {
+    read: Arc<dyn Fn() -> WriteScope + Send + Sync>,
+    pub(crate) refusals: Arc<super::write_refusals::WriteRefusals>,
+}
 
 impl Default for WriteScopeSource {
     fn default() -> Self {
-        Self(Arc::new(WriteScope::default))
+        Self::new(WriteScope::default)
     }
 }
 
 impl WriteScopeSource {
     pub(crate) fn new(read: impl Fn() -> WriteScope + Send + Sync + 'static) -> Self {
-        Self(Arc::new(read))
+        Self { read: Arc::new(read), refusals: Arc::new(Default::default()) }
     }
     pub(crate) fn get(&self) -> WriteScope {
-        (self.0)()
+        (self.read)()
     }
 }
 
 impl ConfigStore {
     pub(crate) fn write_scope(self: &Arc<Self>, id: &AccountId) -> WriteScopeSource {
         let (store, id) = (Arc::clone(self), id.clone());
-        WriteScopeSource::new(move || {
+        let refusals = store.write_refusals(&id);
+        let read = Arc::new(move || {
             store
                 .account(&id)
                 .and_then(|account| WriteScope::parse(account.write_paths.as_deref()).ok())
                 .unwrap_or_else(WriteScope::denied)
-        })
+        });
+        WriteScopeSource { read, refusals }
     }
 }
 

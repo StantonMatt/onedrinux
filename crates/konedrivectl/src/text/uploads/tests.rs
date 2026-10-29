@@ -142,6 +142,8 @@ fn spelled(reason: &Reason) -> (&'static str, bool) {
         Reason::NotReadOnDisk => ("not-read-on-disk", true),
         Reason::BeingChecked => ("being-checked", true),
         Reason::QuietTime => ("quiet-time", true),
+        Reason::LocalOnly => ("local-only", true),
+        Reason::HeldForApproval => ("held-for-approval", true),
         Reason::Network => ("network", true),
         Reason::LocalIo => ("local-error", true),
         Reason::Store => ("index-error", true),
@@ -159,7 +161,7 @@ fn spelled(reason: &Reason) -> (&'static str, bool) {
 /// stored where it has no sentence yet. A reworded key fails here.
 #[test]
 fn every_reason_is_stored_under_its_spelling_and_is_worded() {
-    assert_eq!(Reason::ALL.len(), 30);
+    assert_eq!(Reason::ALL.len(), 32);
     let mut seen = std::collections::BTreeSet::new();
     for reason in Reason::ALL {
         let (spelling, worded) = spelled(&reason);

@@ -6,6 +6,7 @@
 #include <functional>
 
 class AccountController;
+class HeldChanges;
 class SyncController;
 class QTimer;
 
@@ -20,8 +21,10 @@ class AccountStatus : public QObject
     Q_OBJECT
     /// "offline", "warning", "paused", "syncing" or "ok", as the daemon decided it; "offline"
     /// too while the service is not running, and for a state this build does not know.
+    /// "held" while the change guard holds changes and nothing worse goes on.
     Q_PROPERTY(QString state READ state NOTIFY changed)
-    /// The icon for the state: state-offline, state-warning, media-playback-pause, state-sync, state-ok.
+    /// The icon for the state: state-offline, state-warning, media-playback-pause, state-sync,
+    /// state-ok, and state-error while changes are held.
     Q_PROPERTY(QString iconName READ iconName NOTIFY changed)
     /// The status line: "Up to date · checked 20 s ago" ("Up to date · live" while changes
     /// arrive through the notification socket), "Paused: metered connection" while the account
@@ -77,6 +80,10 @@ public:
 
     AccountStatus(AccountController *account, SyncController *sync, Clock clock = {}, QObject *parent = nullptr);
 
+    /// What the change guard holds of the account: while it holds something and nothing worse
+    /// goes on, the state is "held" and the head says so.
+    void setHeld(HeldChanges *held);
+
     QString state() const { return m_state; }
     QString iconName() const;
     QString text() const { return m_text; }
@@ -111,6 +118,7 @@ private:
 
     AccountController *m_account;
     SyncController *m_sync;
+    HeldChanges *m_held = nullptr;
     Clock m_clock;
     QTimer *m_tick;
     QString m_state = QStringLiteral("offline");

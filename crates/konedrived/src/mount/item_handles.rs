@@ -27,6 +27,8 @@
 // test: a_directory_read_in_parts_reads_the_items_it_listed_first
 
 // test: a_pending_replacement_is_woken_only_after_its_last_reader_closes
+// test: a_hold_cancels_a_replacement_wait_without_closing_its_old_reader
+// test: a_hold_cancels_a_content_discard_wait_without_closing_its_old_reader
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -184,15 +186,32 @@ impl ItemHandles {
 
     /// Wait without a tree lock for resident readers (including mmap lifetimes) to
     /// close. The landing checks once more under `reader_gate` before exchanging files.
+    #[cfg(test)]
     pub(crate) async fn wait_for_no_readers<F, Check>(&self, item: LocalItemId, current: F) -> bool
     where F: Fn() -> Check, Check: std::future::Future<Output = bool> {
+        self.wait_for_no_readers_guarded(item, current, None).await
+    }
+
+    /// A hold also ends a staged content change while its old reader stays open.
+    /// Subscribe before checking, so a trip between the check and wait cannot be lost.
+    pub(crate) async fn wait_for_no_readers_guarded<F, Check>(&self, item: LocalItemId, current: F, guard: Option<&crate::change_guard::ChangeGuard>) -> bool
+    where F: Fn() -> Check, Check: std::future::Future<Output = bool> {
+        let mut news = guard.map(|guard| guard.subscribe());
         loop {
             let changed = self.readers_changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
-            if !current().await { return false; }
+            if guard.is_some_and(|guard| guard.blocks(item) || guard.error().is_some()) || !current().await { return false; }
             if !self.is_open_for_reading(item) { return true; }
-            changed.await;
+            tokio::select! {
+                _ = changed => {},
+                _ = async {
+                    match &mut news {
+                        Some(news) => { let _ = news.recv().await; },
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {},
+            }
         }
     }
 

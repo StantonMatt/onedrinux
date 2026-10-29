@@ -20,6 +20,10 @@ import org.konedrive.app
 ListPage {
     id: page
 
+    function escaped(text: string): string {
+        return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+
     readonly property var sync: Current.sync
     readonly property var window: QQC2.ApplicationWindow.window
     readonly property var conflicts: sync ? sync.conflicts : null
@@ -233,6 +237,17 @@ ListPage {
                 text: page.sync ? page.sync.actionError : ""
                 visible: text.length > 0
             }
+            // Why an Upload of a file kept on this computer was refused.
+            Kirigami.InlineMessage {
+                objectName: "uploadLocalError"
+                Layout.fillWidth: true
+                Layout.topMargin: Kirigami.Units.largeSpacing
+                Layout.leftMargin: Kirigami.Units.largeSpacing
+                Layout.rightMargin: Kirigami.Units.largeSpacing
+                type: Kirigami.MessageType.Error
+                text: Current.item ? page.escaped(Current.item.held.actionError) : ""
+                visible: text.length > 0
+            }
 
             FormCard.FormCard {
                 objectName: "nothingCard"
@@ -316,13 +331,35 @@ ListPage {
                         }
                         Repeater {
                             model: reasonBlock.items
-                            delegate: FormCard.FormButtonDelegate {
+                            delegate: ColumnLayout {
+                                id: fileRow
                                 required property var modelData
-                                text: modelData.path
-                                // The service's own words for a refused one.
-                                description: modelData.reason !== reasonBlock.modelData.reason ? modelData.why : i18n("Show in folder")
-                                icon.name: "document-open-folder"
-                                onClicked: page.sync.showInFolder(modelData.path)
+                                // Kept on this computer by Don't Upload: Upload sends it after all.
+                                readonly property bool localOnly: reasonBlock.modelData.reason === "local-only"
+                                Layout.fillWidth: true
+                                spacing: 0
+                                FormCard.FormButtonDelegate {
+                                    visible: !fileRow.localOnly
+                                    text: fileRow.modelData.path
+                                    // The service's own words for a refused one.
+                                    description: fileRow.modelData.reason !== reasonBlock.modelData.reason ? fileRow.modelData.why : i18n("Show in folder")
+                                    icon.name: "document-open-folder"
+                                    onClicked: page.sync.showInFolder(fileRow.modelData.path)
+                                }
+                                FormCard.FormTextDelegate {
+                                    objectName: "localOnlyRow"
+                                    visible: fileRow.localOnly
+                                    text: fileRow.modelData.path
+                                    textItem.elide: Text.ElideMiddle
+                                    textItem.textFormat: Text.PlainText
+                                    trailing: QQC2.Button {
+                                        objectName: "uploadLocalButton"
+                                        text: i18nc("@action:button upload a file kept on this computer", "Upload")
+                                        icon.name: "cloud-upload"
+                                        enabled: Current.item !== null
+                                        onClicked: Current.item.held.uploadLocal(fileRow.modelData.path)
+                                    }
+                                }
                             }
                         }
                         FormCard.FormTextDelegate {

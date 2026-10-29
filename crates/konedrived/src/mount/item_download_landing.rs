@@ -64,6 +64,8 @@
 
 // test: a_replacement_waits_for_registered_readers_before_touching_names_or_rows
 // test: a_local_edit_cancels_the_staged_wait_even_while_an_old_reader_stays_open
+// test: a_hold_prevents_a_staged_replacement_from_discarding_the_resident_copy
+// test: a_hold_cancels_a_replacement_wait_without_closing_its_old_reader
 
 use std::fs::File;
 use std::path::PathBuf;
@@ -216,13 +218,13 @@ impl ItemDownloadLanding {
     pub(super) async fn wait_for_readers(&self, condition: &LandingCondition) -> bool {
         if let LandingCondition::ReplaceVersions { item } = condition {
             let (store, versions, id) = (self.store.clone(), item.clone(), item.local_item_id);
-            self.item_handles.wait_for_no_readers(id, move || {
+            self.item_handles.wait_for_no_readers_guarded(id, move || {
                 let (store, versions) = (store.clone(), versions.clone());
                 async move {
                     store.read_items(move |reader| Ok(reader.find_item(id)?.is_some_and(|row| versions.are_those_of(&row))))
                         .await.unwrap_or(false)
                 }
-            }).await
+            }, self.place_changes.change_guard.as_deref()).await
         } else { true }
     }
 
@@ -256,6 +258,12 @@ impl ItemDownloadLanding {
             .then(|| crate::panic::lock(&self.item_handles.reader_gate));
         if _readers.is_some() && self.item_handles.is_open_for_reading(condition.item()) {
             return None;
+        }
+        if matches!(condition, LandingCondition::ReplaceVersions { .. }) {
+            if let Some(guard) = &self.place_changes.change_guard {
+                return Some(guard.while_unheld(&[condition.item()], || self.land_ready(file, condition, attribution, downloads))
+                    .unwrap_or(ItemLandingOutcome::StepStopped));
+            }
         }
         Some(self.land_ready(file, condition, attribution, downloads))
     }

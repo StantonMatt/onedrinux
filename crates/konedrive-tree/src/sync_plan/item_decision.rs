@@ -355,6 +355,8 @@ pub(crate) fn decide_item(case: &ItemCase<'_>) -> ItemDecision {
     if (here, in_onedrive) == (SideChange::NeverWas, SideChange::NeverWas) {
         return ItemDecision::NothingToDo;
     }
+    if case.sending.is_local_only { return ItemDecision::Wait(WaitReason::User(Reason::LocalOnly)); }
+    if case.sending.is_held_for_approval { return ItemDecision::Wait(WaitReason::User(Reason::HeldForApproval)); }
     if let Some(hold) = find_hold(case) {
         return ItemDecision::Wait(hold);
     }
@@ -373,7 +375,7 @@ pub(crate) fn decide_item(case: &ItemCase<'_>) -> ItemDecision {
 /// good, and the content of the file is OneDrive's and the folder's all the same.
 pub(crate) fn decide_content_while_place_waits(case: &ItemCase<'_>) -> Option<SyncStep> {
     let item = case.item;
-    if find_hold(case).is_some() || item.kind != ItemKind::File {
+    if case.sending.is_held_for_approval || find_hold(case).is_some() || item.kind != ItemKind::File {
         return None;
     }
     // Of a file the folder cannot show, the content that was changed here alone is decided,
@@ -462,6 +464,7 @@ fn decide_bound_item_onedrive_never_listed(case: &ItemCase<'_>) -> ItemDecision 
 /// is sent.
 fn find_decision_not_to_send(case: &ItemCase<'_>, sent_part: SentPart) -> Option<ItemDecision> {
     Some(match find_sending_obstacle(sent_part, &case.sending)? {
+        SendingObstacle::HeldForApproval => ItemDecision::Wait(WaitReason::User(Reason::HeldForApproval)),
         SendingObstacle::Ignored => ItemDecision::Exclusion(ExclusionReason::NameIgnored),
         SendingObstacle::NameRefused(reason) => ItemDecision::Wait(WaitReason::User(reason)),
         SendingObstacle::OneDriveFull => ItemDecision::Wait(WaitReason::User(Reason::WaitingForSpace)),

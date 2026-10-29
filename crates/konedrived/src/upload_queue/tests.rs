@@ -746,3 +746,22 @@ fn the_properties_are_written_by_the_one_writer_and_emptied_at_a_stop() {
     publish_stopped_queue(&state);
     assert_eq!(state.get().upload_queue, SyncSnapshot::default().upload_queue, "every count 0, no upload, not full, no note");
 }
+
+#[test]
+fn held_changes_leave_issues_but_local_only_uploads_stay_with_their_reason() {
+    let mut held = entry(changed_file(), for_user(Reason::HeldForApproval));
+    held.memory.refusal = Some(refusal(Reason::Forbidden));
+    let mut local = entry(changed_file(), for_user(Reason::LocalOnly));
+    local.item.local_item_id = id(8);
+    let conditions = running(None);
+    assert_eq!(decide_queue_state(&held, &conditions), Some(QueueState::Blocked));
+    assert!(summarize_kept_back(&[held.clone()], &conditions).is_empty());
+    assert!(list_blocked_entries(&[held.clone()], &conditions).is_empty());
+    let totals = QueueTotals { unsent: konedrive_tree::UnsentTotal { count: 2, bytes:40 }, refused_for_good: vec![id(7)], refused_for_space: vec![(id(7),20)], answered:vec![held,local.clone()] };
+    let counts = count_queue(&totals, &conditions);
+    assert_eq!((counts.blocked,counts.pending,counts.too_big), (1,0,0));
+    let summary = summarize_kept_back(&[local], &conditions);
+    assert_eq!(summary.len(),1);
+    assert_eq!(summary[0].reason,"local-only");
+    assert_eq!(summary[0].group,"per-file");
+}

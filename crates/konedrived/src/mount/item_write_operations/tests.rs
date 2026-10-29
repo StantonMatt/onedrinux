@@ -145,7 +145,10 @@ impl OperationsFixture {
     /// As [`new`](Self::new), the write operations reporting into what `make_report`
     /// makes for the fixture's folder: for a test that reads what the user was told.
     pub(super) fn with_report(make_report: impl FnOnce(&ItemFixture) -> crate::status::report::Report) -> Self {
-        let fixture = ItemFixture::new();
+        Self::with_report_and_guard(make_report, None)
+    }
+    fn with_report_and_guard(make_report: impl FnOnce(&ItemFixture) -> crate::status::report::Report, guard: Option<Arc<crate::change_guard::ChangeGuard>>) -> Self {
+        let fixture = ItemFixture::with_change_guard(guard);
         let report = make_report(&fixture);
         let operations = Arc::new(ItemWriteOperations::new(
             Arc::clone(&fixture.place_changes),
@@ -703,3 +706,5 @@ fn a_death_at_each_point_of_each_operation_is_settled_by_the_check_at_start() {
 pub(super) fn mark_of(path: &str) -> Option<String> {
     Some(onedrive_id_of(path))
 }
+
+mod change_guard;

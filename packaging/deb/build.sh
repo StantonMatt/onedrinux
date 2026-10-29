@@ -24,8 +24,11 @@ with open(sys.argv[1], 'rb') as f:
     print(tomllib.load(f)['workspace']['package']['version'])
 PY
 )
-version="$cargo_version~git$short_commit"
-export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git -C "$repo" show -s --format=%ct HEAD)}
+commit_time=$(git -C "$repo" show -s --format=%ct HEAD)
+export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$commit_time}
+# HEAD's commit time orders builds, so apt sees a later commit as an upgrade; `+` sorts
+# after the `~git<hash>` versions built before. Commits must be at least a second apart.
+version="$cargo_version+git$(date -u -d "@$commit_time" +%Y%m%d%H%M%S).$short_commit"
 
 for artifact in "$rust_build/konedrived" "$rust_build/konedrivectl" \
     "$app_build/bin/konedrive" \

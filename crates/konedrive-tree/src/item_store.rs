@@ -71,6 +71,7 @@ use crate::model::{ContentPresence, ContentVersion, FolderVisibility, Item, Item
 use crate::{FoldedName, RowRefusal, RowRefusalReason, TreeError, TreeStore, MAX_CHAIN};
 
 /// The three operations that move a binding from one item to another.
+mod guard_restore;
 pub(crate) mod bindings;
 /// Whether a file's content is in the backing directory, written by itself.
 mod content_presence;

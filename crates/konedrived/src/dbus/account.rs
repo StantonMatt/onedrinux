@@ -60,6 +60,11 @@ impl Account {
         Ok(())
     }
 
+    /// Refusals since the previous report (not a running total). Folder is empty at
+    /// the drive root; app is the download guard's stable identity, or empty if unknown.
+    #[zbus(signal)]
+    pub(crate) async fn write_refused(emitter: &SignalEmitter<'_>, path: &str, folder: &str, app: &str, count: u64) -> zbus::Result<()>;
+
     #[zbus(property)]
     async fn write_paths(&self) -> Vec<String> { self.service.write_paths().unwrap_or_default() }
 
@@ -149,6 +154,7 @@ pub(crate) async fn export(connection: &Connection, path: &ObjectPath<'_>, servi
     // Captured before the interface is on the bus (not inside the task): otherwise a state
     // change landing in between would be absorbed into this baseline instead of being
     // emitted as a PropertiesChanged signal.
+    let reports = service.config().write_refusals(service.id());
     let mut changes = service.state().subscribe();
     let mut previous = changes.borrow_and_update().clone();
     let server = connection.object_server();
@@ -156,13 +162,27 @@ pub(crate) async fn export(connection: &Connection, path: &ObjectPath<'_>, servi
     #[cfg(feature = "dev-tools")]
     server.at(path, TokenExport { service: Arc::clone(&service) }).await?;
     let iface = server.interface::<_, Account>(path).await?;
+    let mut refusals = reports.take_receiver().ok_or_else(|| zbus::Error::Failure("account refusal consumer already exported".into()))?;
     Ok(tokio::spawn(async move {
-        while changes.changed().await.is_ok() {
-            let current = changes.borrow_and_update().clone();
-            if let Err(e) = emit_changes(&iface, &previous, &current).await {
-                tracing::warn!("cannot emit PropertiesChanged: {e}");
+        let _reports = reports;
+        let callers = crate::download_guard::Callers::default();
+        loop {
+            tokio::select! {
+                changed = changes.changed() => {
+                    if changed.is_err() { break; }
+                    let current = changes.borrow_and_update().clone();
+                    if let Err(e) = emit_changes(&iface, &previous, &current).await {
+                        tracing::warn!("cannot emit PropertiesChanged: {e}");
+                    }
+                    previous = current;
+                }
+                Some((refusal, count)) = refusals.next() => {
+                    let app = callers.identify(refusal.pid).map(|caller| caller.identity).unwrap_or_default();
+                    if let Err(e) = Account::write_refused(iface.signal_emitter(), &refusal.path.to_string_lossy(), &refusal.folder.to_string_lossy(), &app, count).await {
+                        tracing::warn!("cannot emit WriteRefused: {e}");
+                    }
+                }
             }
-            previous = current;
         }
     }))
 }
@@ -222,3 +242,6 @@ async fn emit_changes(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

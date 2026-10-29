@@ -234,6 +234,7 @@ pub(super) fn decide_open_trouble(error: &OpenAtRowError) -> StepTrouble {
 
 /// The place changes of one mount.
 pub(crate) struct PlaceChanges {
+    pub(crate) change_guard: Option<Arc<crate::change_guard::ChangeGuard>>,
     backing_directory: Arc<BackingDirectory>,
     count: AtomicU64,
     /// Lock 3 of the order: held by `begin` while it raises the count, and by a reader
@@ -275,7 +276,17 @@ impl PlaceChanges {
     /// build, after the write-operation thread, before anything that changes or opens by
     /// path.
     pub(super) fn new(backing_directory: Arc<BackingDirectory>, write_operation_thread_id: std::thread::ThreadId) -> Self {
-        PlaceChanges { backing_directory, count: AtomicU64::new(0), changes: std::sync::Mutex::new(()), ended: std::sync::Condvar::new(), write_operation_thread_id, sleeper_count: AtomicUsize::new(0) }
+        PlaceChanges { change_guard: None, backing_directory, count: AtomicU64::new(0), changes: std::sync::Mutex::new(()), ended: std::sync::Condvar::new(), write_operation_thread_id, sleeper_count: AtomicUsize::new(0) }
+    }
+
+    /// Called only after a guarded cloud removal has committed. Retained copies are
+    /// never part of start-up's temporary-aside cleanup.
+    pub(crate) fn discard_retained(&self, path: &Path) -> io::Result<()> {
+        match self.backing_directory.remove_file(path) {
+            Ok(()) => self.sync_directory(path.parent().unwrap_or(Path::new(""))),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => self.sync_directory(path.parent().unwrap_or(Path::new(""))),
+            Err(error) => Err(error),
+        }
     }
 
     /// Removes every entry of the root that is still set aside
@@ -718,6 +729,14 @@ impl PlaceChange<'_> {
     /// that name takes it ([`make_entry`](Self::make_entry)), and nothing in it is ever
     /// removed by the daemon.
     pub(crate) fn set_aside(&self, path: &Path, item: LocalItemId) -> Result<PlaceUndo, PlaceRefusal> {
+        self.set_aside_at(path, Path::new(&make_aside_entry_name(item)), true)
+    }
+    /// Retained removal copies use a name recorded durably before the rename. Unlike
+    /// temporary asides this never replaces an earlier retained copy.
+    pub(crate) fn set_aside_named(&self, path: &Path, aside: &Path) -> Result<PlaceUndo, PlaceRefusal> {
+        self.set_aside_at(path, aside, false)
+    }
+    fn set_aside_at(&self, path: &Path, aside: &Path, replace_temporary: bool) -> Result<PlaceUndo, PlaceRefusal> {
         let place_changes = self.place_changes;
         match place_changes.inspect_entry_to_set_aside(path).map_err(|error| to_refusal(&error, path))? {
             EntryToSetAside::Nothing => Ok(PlaceUndo::Nothing),
@@ -727,8 +746,8 @@ impl PlaceChange<'_> {
                 Ok(PlaceUndo::RestoreMark { path: path.to_owned(), mark: OneDriveItemId::new(mark) })
             }
             EntryToSetAside::Movable => {
-                let set_aside = PathBuf::from(make_aside_entry_name(item));
-                place_changes.move_aside(path, &set_aside).map_err(|error| to_refusal(&error, path))?;
+                let set_aside = aside.to_owned();
+                if replace_temporary { place_changes.move_aside(path, &set_aside) } else { place_changes.rename_without_replacing(path, &set_aside) }.map_err(|error| to_refusal(&error, path))?;
                 self.sync_or_undo(PlaceUndo::Restore { set_aside: set_aside.clone(), path: path.to_owned() }, &[path, &set_aside])
             }
         }

@@ -501,6 +501,33 @@ subtree with exact spelling, compared by path components. Absolute paths, empty 
 empty restriction from no restriction; `WritePaths` returns the paths (empty in either case).
 Both properties emit changes after the setting is saved atomically in `config.toml`.
 
+The app's **Allow This Folder** action reads `WritePaths`, adds the signal's nonempty
+`folder`, and calls `SetWriteScope` with the resulting list. No new method is needed.
+The app omits a folder already covered and removes descendants when adding their parent.
+Removing a folder uses `SetWriteScope` with the remaining list. The daemon permits an empty
+list; the app disables the last Remove button. Turning the trial off uses `ClearWriteScope`.
+Do not offer Allow This Folder once `WriteScopeEnabled` is false, or for the drive root.
+
+`Account.WriteRefused(s path, s folder, s app, t count)` reports program mutations refused
+by the scope. `path` is relative to the drive root. `folder` is the existing containing
+folder that would permit retrying the operation; an empty string names the root and means
+there is no Allow This Folder action. For a refused new name it is the parent, for an
+existing file its parent, and for a change to a directory's own attributes that directory.
+A rename reports its first refused endpoint, checking the source before the destination.
+`app` is the download guard's identity (`app:<desktop id>` from the systemd app unit,
+otherwise `exe:<absolute executable>`), or empty if the process exited or cannot be inspected.
+Arguments and file content never enter the signal.
+
+The first report is immediate; further refusals coalesce at most once every 10 seconds per
+account, including a final report when a burst ends. `count` counts refusals in this report,
+not a running total; a coalesced report keeps one representative path, folder and caller.
+The FUSE path only tries a bounded channel (64 details); a full channel drops new details
+and retains their count. Procfs identification and signal delivery happen in the account's
+export task. Reports are ephemeral and stop with account removal. This is separate from
+the app's 10-minute notification window: show **Change refused** with **Allow This Folder**
+once, then add the subsequent signal counts to **%n more changes were refused**. Ordinary
+read-only mode, unresolvable rows and outgoing sender retries do not produce this signal.
+
 The mount returns `EROFS` outside these subtrees, including both ends of a rename, writes
 through a handle opened before restriction, state-changing attributes and unsupported link
 and xattr requests. Read hydration, pins and free-up remain available everywhere. Admission

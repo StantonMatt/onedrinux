@@ -1,6 +1,7 @@
 //! konedrived: the KOneDrive user daemon.
 
 pub mod config;
+pub mod change_guard;
 pub mod download_guard;
 pub mod account;
 pub(crate) mod folder;

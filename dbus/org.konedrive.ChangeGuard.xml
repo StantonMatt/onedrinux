@@ -1,0 +1,129 @@
+<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN" "http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
+<node>
+  <!-- At /org/konedrive/Accounts. Settings apply to every present and future account.
+       Account ids are from Accounts.List. Paths are relative to the drive root and
+       intentionally disclosed so users can review their changes; no file content is sent.
+       Subscribe before listing. Tokens identify a ledger and the latest shown sequence;
+       later generations and later holds are never decided by that token, even on restart.
+       Kinds: removal, rewrite, move, upload. Empty kinds selects all four.
+       A result is (done, pending-offline, failed, kept-both-versions, failures).
+       Failures are (local item id, relative path, plain-text reason), one per failed change.
+       Counts are individual changes, including folded descendants, not displayed rows.
+       Allow's done means released for sending, not confirmed in Graph; pending-offline
+       means the same durable admission while the last cycle reports OneDrive unreachable.
+       Restore's done means locally restored; failures remain on hold. Kept-both counts
+       successful rewrite restores which keep the local version as a copy.
+       Later Graph outcomes are reported by the ordinary queue and Conflicts interfaces. -->
+  <interface name="org.konedrive.ChangeGuard">
+    <method name="ListHeld">
+      <!-- Account whose current hold is being reviewed. -->
+      <arg name="account" type="s" direction="in"/>
+      <!-- Opaque token to pass unchanged to AllowHeld or RestoreHeld. -->
+      <arg name="token" type="s" direction="out"/>
+      <!-- Each row: local id (negative for cleanup), path (new for moves), kind,
+           original bytes (new bytes for uploads; folded tree total), Unix event time,
+           generation, state (held/restoring/sent), is-directory, descendant count
+           excluding itself, local bytes after, old path (moves only), sent flag.
+           Removed/new directory descendants are folded into their topmost selected
+           directory, with total bytes and item count. Moved directories count known
+           descendants without folding independent move rows. Sent rows have the same
+           shape and belong to held kinds in the preceding window; they cannot be acted
+           on. Local-only entries are in Issues, not here. Rows sort by relative path;
+           clients may apply their platform's natural filename collation. -->
+      <arg name="changes" type="a(xsstxssbttsb)" direction="out"/>
+      <annotation name="org.qtproject.QtDBus.QtTypeName.Out1" value="KonedriveHeldChangeList"/>
+    </method>
+    <method name="AllowHeld">
+      <!-- Account whose shown changes may be sent. -->
+      <arg name="account" type="s" direction="in"/>
+      <!-- Token from ListHeld or ChangesHeld. Invalid/foreign tokens are refused. -->
+      <arg name="token" type="s" direction="in"/>
+      <!-- Selected kinds, or empty for every kind within this token. -->
+      <arg name="kinds" type="as" direction="in"/>
+      <!-- Per-change admission counts and reasons, as described above. -->
+      <arg name="result" type="(tttta(xss))" direction="out"/>
+      <annotation name="org.qtproject.QtDBus.QtTypeName.Out0" value="KonedriveGuardResult"/>
+    </method>
+    <method name="RestoreHeld">
+      <!-- Account whose shown local changes should be restored. -->
+      <arg name="account" type="s" direction="in"/>
+      <!-- Token from ListHeld or ChangesHeld; later changes are untouched. -->
+      <arg name="token" type="s" direction="in"/>
+      <!-- Selected kinds, or empty for all within this token. Upload means Don't Upload. -->
+      <arg name="kinds" type="as" direction="in"/>
+      <!-- Completed local restores, failures and retained rewrite copies. -->
+      <arg name="result" type="(tttta(xss))" direction="out"/>
+      <annotation name="org.qtproject.QtDBus.QtTypeName.Out0" value="KonedriveGuardResult"/>
+    </method>
+    <method name="UploadLocal">
+      <!-- Account with an Issues entry whose Reason is local-only. -->
+      <arg name="account" type="s" direction="in"/>
+      <!-- Exact relative path. A folder also selects its local-only descendants;
+           required local-only parent folders are re-admitted too. Held work is untouched. -->
+      <arg name="path" type="s" direction="in"/>
+      <!-- Done counts entries returned to normal admission; limits may hold them again. -->
+      <arg name="result" type="(tttta(xss))" direction="out"/>
+      <annotation name="org.qtproject.QtDBus.QtTypeName.Out0" value="KonedriveGuardResult"/>
+    </method>
+    <method name="SetEnabled">
+      <!-- Shared switch. Turning off never releases existing held or local-only work. -->
+      <arg name="enabled" type="b" direction="in"/>
+    </method>
+    <method name="SetThresholds">
+      <!-- Shared limits; keys: removals, removal-bytes, daily-removals (24-hour count),
+           rewrites, rewrite-bytes, moves, uploads, upload-bytes, window-seconds,
+           daily-window-seconds (86400 by default). Omitted keys keep exact stored values.
+           Bytes and seconds are integers; zero count holds the first change;
+           zero bytes holds the first positive-byte change;
+           time windows must be positive. Unknown keys refuse the whole update. -->
+      <arg name="thresholds" type="a{st}" direction="in"/>
+      <annotation name="org.qtproject.QtDBus.QtTypeName.In0" value="KonedriveThresholds"/>
+    </method>
+    <method name="GetSettings">
+      <!-- Shared switch, including when there are no accounts yet. -->
+      <arg name="enabled" type="b" direction="out"/>
+      <!-- Every shared limit, with defaults resolved. -->
+      <arg name="thresholds" type="a{st}" direction="out"/>
+      <annotation name="org.qtproject.QtDBus.QtTypeName.Out1" value="KonedriveThresholds"/>
+    </method>
+    <method name="GetError">
+      <!-- Account whose durable ledger health is requested. -->
+      <arg name="account" type="s" direction="in"/>
+      <!-- Plain-text ledger error, empty when healthy. -->
+      <arg name="error" type="s" direction="out"/>
+    </method>
+    <!-- Daemon-wide switch and all limits, with change notifications. -->
+    <property name="Enabled" type="b" access="read"/>
+    <property name="Thresholds" type="a{st}" access="read">
+      <annotation name="org.qtproject.QtDBus.QtTypeName" value="KonedriveThresholds"/>
+    </property>
+    <signal name="ChangesHeld">
+      <!-- Account with held work. -->
+      <arg name="account" type="s"/>
+      <!-- Token for precisely this notification's batch. -->
+      <arg name="token" type="s"/>
+      <!-- Kind summarized by this signal. -->
+      <arg name="kind" type="s"/>
+      <!-- Individual held changes, including folded descendants. -->
+      <arg name="count" type="t"/>
+      <!-- Original bytes, or new bytes for uploads, summed without double counting. -->
+      <arg name="bytes" type="t"/>
+      <!-- Earliest held event time, Unix seconds. -->
+      <arg name="since" type="x"/>
+    </signal>
+    <signal name="RestoreProgress">
+      <!-- Account being restored. -->
+      <arg name="account" type="s"/>
+      <!-- Token passed to this RestoreHeld operation. -->
+      <arg name="token" type="s"/>
+      <!-- Kinds passed to RestoreHeld, empty meaning all. -->
+      <arg name="kinds" type="as"/>
+      <!-- Changes processed, including failures; final counts are in the method reply. -->
+      <arg name="done" type="t"/>
+      <!-- Total selected individual changes. Terminal done equals total. -->
+      <arg name="total" type="t"/>
+    </signal>
+    <!-- Re-list authoritative rows after a change, including resolution of the last hold. -->
+    <signal name="HeldChanged"/>
+  </interface>
+</node>

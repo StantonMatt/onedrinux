@@ -128,7 +128,8 @@ behind is removed by the kernel.
 
 The daemon's own names are hidden by the mount and refused to programs (`folder/disk.rs`): an
 entry set aside (`.konedrive-aside-<local item id>`, in the root), the temporary name of an
-exchange of two names (`.konedrive-swap-…`, a row's place), and `.konedrive-holding` and
+exchange of two names (`.konedrive-swap-…`, a row's place), the retained removal directory
+`.konedrive-change-guard`, and `.konedrive-holding` and
 `.konedrive-new-…`. A folder that holds placeholders of an older konedrive — a file marked with a
 state that is not whole, or a `.konedrive-holding` directory — is not mounted
 (`ItemMountError::LegacyPlaceholders`).
@@ -177,6 +178,13 @@ for good only after the row is written and the change ended. A directory that ho
 says is not set aside: it stays where it is, without its mark. Leftovers of a death are put back by
 the start-up check, and only after the check are the entries still set aside removed
 (`PlaceChanges::remove_aside_entries`): before it, the entry a record puts back would be deleted.
+
+The [change guard](change-guard.md) keeps a resident file's unlink aside beyond the row
+write, in its private retained directory on this filesystem. Its recorded aside path is
+confined to that directory; startup's temporary-aside cleanup leaves it alone. Cloud
+confirmation drops the retained bytes, and Restore can rename them back without a
+content download. Held versions are refused both by free-up's conditional commit and
+by a reconciliation step, including one queued before the trip.
 
 A step towards the folder keeps the same order; `folder_steps/mod.rs` has the record, the disk and
 the commit of each case. Taking OneDrive's content for a downloaded copy sets the old copy aside

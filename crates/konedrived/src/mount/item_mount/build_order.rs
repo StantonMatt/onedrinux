@@ -82,7 +82,7 @@ pub(in crate::mount) fn build(setup: ItemMountSetup, runtime: tokio::runtime::Ha
 
 /// Steps 1 to 7 over a backing directory that is open and has its write bits.
 fn build_over(backing_directory: Arc<BackingDirectory>, setup: ItemMountSetup, runtime: tokio::runtime::Handle) -> Result<(ItemMount, ItemKernelRequests), ItemMountError> {
-    let ItemMountSetup { root, store_path, store, drive_id, source, report, pool, split_download_share, download_after, download_guard, free_space_reserve, tree_lock, ignore, write_scope, sync_plan_wake, running_steps, published_plan, take_down_report, clock } = setup;
+    let ItemMountSetup { root, store_path, store, drive_id, source, report, pool, split_download_share, download_after, download_guard, change_guard, free_space_reserve, tree_lock, ignore, write_scope, sync_plan_wake, running_steps, published_plan, take_down_report, clock } = setup;
     let folder = root.path;
     let mount_started_at = clock();
     let upload_rules = Arc::new(UploadRules::new(ignore).with_write_scope(write_scope));
@@ -90,10 +90,20 @@ fn build_over(backing_directory: Arc<BackingDirectory>, setup: ItemMountSetup, r
     let access_mode_switch = Arc::new(AccessModeSwitch::new(AccessMode::ReadOnly));
     let mount_take_down = Arc::new(MountTakeDown::new(Arc::clone(&access_mode_switch), take_down_report));
     let write_operation_thread = Arc::new(WriteOperationThread::start(tree_lock)?);
-    let place_changes = Arc::new(PlaceChanges::new(Arc::clone(&backing_directory), write_operation_thread.thread_id()));
+    let mut place_changes = PlaceChanges::new(Arc::clone(&backing_directory), write_operation_thread.thread_id());
+    place_changes.change_guard = change_guard.clone();
+    if let Some(guard) = &change_guard {
+        let wake = Arc::clone(&sync_plan_wake);
+        guard.attach(Arc::new(move || wake.wake(crate::sync_parts::sync_plan_wake::WakeCause::LocalVersionWritten)));
+    }
+    let place_changes = Arc::new(place_changes);
 
     // Before anything else reads the rows: afterwards they say what the disk has.
     let start_check_findings = check_backing_directory_at_start(Arc::clone(&backing_directory), Arc::clone(&upload_rules), drive_id, &store)?;
+    if let Some(guard) = &change_guard {
+        let guard = Arc::clone(guard);
+        store.call_blocking(move |s| guard.reconcile_restores(&s.item_store().reader()))?;
+    }
     // Only now: before the check, the entry a record puts back would be deleted.
     let removed = place_changes.remove_aside_entries()?;
     if removed > 0 {
@@ -132,6 +142,7 @@ fn build_over(backing_directory: Arc<BackingDirectory>, setup: ItemMountSetup, r
             Some(crate::sync_parts::published_plan::ItemAnswer::Waiting(_)
                 | crate::sync_parts::published_plan::ItemAnswer::Fault(_))))));
     let item_content_files = Arc::new(ItemContentFiles::new(Arc::clone(&place_changes), store_path, Arc::clone(&item_handles)));
+    item_content_files.retry_guard_removals()?;
     let directory_states = super::super::directory_states::DirectoryStates::build(
         &store, Arc::clone(&download_states), Arc::clone(&running_steps), Arc::clone(&published_plan), Arc::clone(&inotify_bridge),
     )?;

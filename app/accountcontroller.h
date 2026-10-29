@@ -8,6 +8,7 @@
 #include <QVariantMap>
 
 #include <functional>
+#include <optional>
 
 class OrgKonedriveAccountInterface;
 class QDBusServiceWatcher;
@@ -48,6 +49,12 @@ class AccountController : public QObject
     Q_PROPERTY(qulonglong quotaTotal READ quotaTotal NOTIFY accountChanged)
     Q_PROPERTY(QString signInUrl READ signInUrl NOTIFY signInUrlChanged)
     Q_PROPERTY(QString actionError READ actionError NOTIFY actionErrorChanged)
+    /// A trial (Account.WriteScopeEnabled): only writePaths can be changed on this computer.
+    Q_PROPERTY(bool writeScopeEnabled READ writeScopeEnabled NOTIFY accountChanged)
+    /// The trial's folders (Account.WritePaths), relative to the drive root; empty without one.
+    Q_PROPERTY(QStringList writePaths READ writePaths NOTIFY accountChanged)
+    /// A SetWriteScope or ClearWriteScope asked from this window has not answered yet.
+    Q_PROPERTY(bool writeScopeChanging READ writeScopeChanging NOTIFY writeScopeChangingChanged)
 
 public:
     static const QString ServiceName;
@@ -73,6 +80,9 @@ public:
     qulonglong quotaTotal() const { return m_quotaTotal; }
     QString signInUrl() const { return m_signInUrl; }
     QString actionError() const { return m_actionError; }
+    bool writeScopeEnabled() const { return m_writeScopeEnabled; }
+    QStringList writePaths() const { return m_writePaths; }
+    bool writeScopeChanging() const { return m_scopeCall.has_value(); }
 
     Q_INVOKABLE void retry();
     /// SetLabel; the daemon checks it (the rules AccountsModel::labelProblem states).
@@ -87,6 +97,15 @@ public:
     Q_INVOKABLE void setMode(const QString &mode, bool force = false);
     /// Gives up a switch to read-write waiting for its sign-in (CancelSignIn).
     Q_INVOKABLE void cancelModeSwitch();
+    /// `folder` (relative to the drive root) can be changed: SetWriteScope with it added to
+    /// the trial's folders (writeScopeWith), or with it alone, which starts a trial. Nothing is
+    /// asked when a folder listed covers it already.
+    Q_INVOKABLE void allowFolder(const QString &folder);
+    /// SetWriteScope without `folder`. The last folder stays: an empty list would refuse every
+    /// change; clearWriteScope() ends the trial instead.
+    Q_INVOKABLE void removeFolder(const QString &folder);
+    /// ClearWriteScope: every folder can be changed, and the list is forgotten.
+    Q_INVOKABLE void clearWriteScope();
 
     /// What the window says when SetMode(`mode`) was refused `errorName`, the daemon's
     /// `message` kept only where no plain words fit.
@@ -102,9 +121,14 @@ Q_SIGNALS:
     void openUrlRequested(const QString &url);
     /// The user asked to sign out from this window (the Notifier stays quiet about it).
     void signOutRequested();
+    void writeScopeChangingChanged();
+    /// Account.WriteRefused: `count` changes outside the trial's folders were refused since the
+    /// last report, one of them `path`, made in `folder` (empty: the top of the drive) by `app`.
+    void writeRefused(const QString &path, const QString &folder, const QString &app, qulonglong count);
 
 private Q_SLOTS:
     void onPropertiesChanged(const QString &interfaceName, const QVariantMap &changed, const QStringList &invalidated);
+    void onWriteRefused(const QString &path, const QString &folder, const QString &app, qulonglong count);
 
 private:
     /// GetAll; `then` runs once its answer is applied.
@@ -114,6 +138,16 @@ private:
     void endModeSwitch();
     void setActionError(const QString &message);
     void call(const QDBusPendingCall &pending, std::function<void(const QDBusPendingCall &)> onSuccess = {});
+    /// The trial as asked from this window: on with `paths`, or off.
+    struct WriteScope {
+        bool enabled = false;
+        QStringList paths;
+    };
+    /// The trial as it will be once the call under way has answered, else as it is.
+    WriteScope writeScope() const;
+    /// SetWriteScope(`scope`'s paths), or ClearWriteScope for a scope that is off; a refusal
+    /// lands in actionError.
+    void changeWriteScope(const WriteScope &scope);
 
     QDBusConnection m_bus;
     QString m_path;
@@ -136,4 +170,11 @@ private:
     QString m_switchingTo;
     /// Counts setMode() and cancelModeSwitch() calls: an answer to an older one is ignored.
     quint64 m_modeCall = 0;
+    bool m_writeScopeEnabled = false;
+    QStringList m_writePaths;
+    /// What the scope call under way asks for: what the next change starts from, so that two
+    /// quick changes do not undo each other.
+    std::optional<WriteScope> m_scopeCall;
+    /// Counts the scope calls: only the last one's answer ends writeScopeChanging.
+    quint64 m_scopeCalls = 0;
 };

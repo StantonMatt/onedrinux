@@ -159,3 +159,36 @@ async fn the_fake_refuses_a_folder_delete_without_if_match() {
     assert_eq!(answer.status().as_u16(), 412);
     assert!(folder.graph.with(|cloud| cloud.item("docs").is_some()));
 }
+
+#[tokio::test]
+async fn removal_quiet_time_and_the_predelete_listing_both_finish_before_a_guarded_delete() {
+    let dir = tempfile::tempdir().unwrap();
+    let guard = Arc::new(crate::change_guard::ChangeGuard::open(dir.path().join("guard.json"), Default::default()));
+    let fixture = ItemFixture::with_change_guard(Some(Arc::clone(&guard)));
+    let directory = fixture.show_onedrive_directory("docs");
+    let file = fixture.show_onedrive_file("docs/file.txt", b"cloud bytes");
+    fixture.remove_here(file.local_item_id);
+    fixture.remove_here(directory.local_item_id);
+    let folder = StepsFolder::start(fixture).await;
+    // The fixture's synthetic folder has no cTag until a real fake-cloud listing.
+    let changes = folder.graph.with(|cloud| cloud.items.values().filter(|row| row.parent.is_some()).map(|row| {
+        konedrive_tree::Change::Upsert(konedrive_tree::Row {
+            id: row.id.clone(), parent_id: row.parent.clone(), name: row.name.clone(),
+            kind: if row.folder { konedrive_tree::Kind::Folder } else { konedrive_tree::Kind::File },
+            size: row.size, mtime: row.mtime, etag: Some(row.etag.clone()), ctag: Some(row.ctag.clone()), quickxor: row.hash.clone(), mime: None, placement: konedrive_tree::Placement::Placed,
+        })
+    }).collect());
+    folder.fixture.write_listing(changes);
+    let item = folder.fixture.versions_of(directory.local_item_id);
+    let tag = item.onedrive_folder_ctag.clone().unwrap();
+    let step = OneDriveStep::SendDirectoryRemoval { item, below: vec![folder.fixture.versions_of(file.local_item_id)] };
+    assert_eq!(folder.run(step.clone()).await, StepOutcome::NotRun(StepObstacle::SendingStopped));
+    assert_eq!(folder.count("DELETE", ""), 0);
+    folder.fixture.now.fetch_add(31, Ordering::SeqCst);
+    assert_eq!(folder.run(step.clone()).await, StepOutcome::RowsChanged(RowsChangedFollowUp::CycleWanted));
+    assert_eq!(folder.count("DELETE", ""), 0);
+    folder.fixture.write_listing(vec![]);
+    assert!(matches!(folder.run(step).await, StepOutcome::Written { .. }));
+    assert_eq!(folder.count("DELETE", ""), 1);
+    assert!(folder.graph.with(|cloud| cloud.guards.contains(&("me/drive/items/docs".to_owned(), tag))));
+}

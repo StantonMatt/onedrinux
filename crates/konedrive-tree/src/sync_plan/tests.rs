@@ -15,6 +15,7 @@ mod place;
 mod item_relations;
 mod directory_removal;
 mod start_up_check;
+mod change_guard;
 mod temporary_names;
 mod items_left_by_uploads;
 mod own_upload_contents;
@@ -206,6 +207,9 @@ pub(crate) fn input(items: Vec<Item>) -> SyncPlanInput {
         now: 500,
         next_tries: BTreeMap::new(),
         sending_refusals: BTreeMap::new(),
+        local_only: Default::default(),
+        held_for_approval: BTreeSet::new(),
+        change_quiet_until: BTreeMap::new(),
         items_left_by_start_up_check: BTreeSet::new(),
         onedrive_item_count_below,
         shown_item_count_in,

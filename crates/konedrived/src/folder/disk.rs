@@ -99,7 +99,7 @@ pub(crate) fn make_aside_entry_name(item: konedrive_tree::LocalItemId) -> std::f
 /// back what a death left. A temporary name is NOT among them: it is a row's place, and
 /// skipping it would make the check find the row's file gone.
 pub(crate) fn is_rowless_entry_name(name: &OsStr) -> bool {
-    daemon_owned(name) || name.as_bytes().starts_with(ASIDE_ENTRY_PREFIX.as_bytes())
+    name == ".konedrive-change-guard" || daemon_owned(name) || name.as_bytes().starts_with(ASIDE_ENTRY_PREFIX.as_bytes())
 }
 
 /// Whether the mount hides `name` and refuses it to programs (lookup `ENOENT`, make and

@@ -391,6 +391,15 @@ impl StepMemory<'_> {
         self.write(|tx| remember_mismatched_item(tx, item, upload))
     }
 
+    /// Queue a guarded cleanup even when the upload's local row has already gone.
+    /// Reuses the durable leftover queue and its rule against deleting adopted items.
+    pub fn remember_leftover_removal(&mut self, upload: &MismatchedItem) -> Result<(), TreeError> {
+        self.write(|tx| {
+            if !is_item_of_folder(tx, &upload.item)? { leave_removal(tx, upload)?; }
+            Ok(())
+        })
+    }
+
     /// The item `onedrive_item`, which an upload left, is not this folder's to remove any
     /// more (changed by another, or adopted): forgotten wherever it is kept. OneDrive has
     /// it still, and a row a listing made of it stays. For one removed or found gone,

@@ -1,12 +1,14 @@
 import QtQuick
 import QtQuick.Controls as QQC2
+import QtQuick.Dialogs
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
 import org.kde.kirigamiaddons.formcard as FormCard
 import org.konedrive.app
 
 /// The settings of the OneDrive chosen in the sidebar — an account, its folder and how it
-/// syncs, as one: its name and Microsoft account, two-way sync, its folder (or another one),
+/// syncs, as one: its name and Microsoft account, two-way sync and a trial's folders that can be
+/// changed, its folder (or another one),
 /// its previews and the free space its downloads leave, the advanced settings (what is never
 /// uploaded, signing out), and disconnecting it. Signing in again and opening the folder are
 /// on Status.
@@ -22,6 +24,19 @@ FormCard.FormCardPage {
     readonly property bool hasFolder: available && sync.rootPath.length > 0
     readonly property string accountError: account ? (account.actionError.length > 0 ? account.actionError : account.lastError) : ""
     readonly property var window: QQC2.ApplicationWindow.window
+    /// Large changes wait for review (Settings' Hold large changes, the whole app's).
+    readonly property bool holdOn: ChangeGuard.serviceAvailable && ChangeGuard.enabled
+
+    /// The Sync card brought into sight: where a refused change's notification leads.
+    function showSyncSettings() {
+        Qt.callLater(() => {
+            if (!syncHeader.visible) {
+                return;
+            }
+            const y = syncHeader.mapToItem(flickable.contentItem, 0, 0).y;
+            flickable.contentY = Math.max(0, Math.min(y, flickable.contentHeight - flickable.height));
+        });
+    }
 
     objectName: "oneDriveSettingsPage"
     title: window ? window.accountTitle(i18nc("@title", "OneDrive Settings")) : i18nc("@title", "OneDrive Settings")
@@ -96,7 +111,9 @@ FormCard.FormCardPage {
 
     // How the folder syncs: the account's mode (Account.Mode). While a switch is under way the
     // switch shows the mode asked for, and what it waits for is below it with its ways out.
+    // Two-way, a trial can allow changes only in folders chosen (Account.WritePaths).
     FormCard.FormHeader {
+        id: syncHeader
         visible: page.hasFolder
         title: i18nc("@title:group", "Sync")
     }
@@ -120,13 +137,16 @@ FormCard.FormCardPage {
             text: i18n("Two-way sync")
             description: {
                 if (!shown) {
-                    const readOnly = i18n("Files from OneDrive arrive and open as usual, but can't be changed here, and nothing is uploaded.");
+                    const readOnly = i18n("Your files download and open as usual, but can't be changed here, and nothing is uploaded.");
                     return on ? readOnly : readOnly + " " + i18n("Turning it on opens your browser once more to allow KOneDrive to change your files.");
                 }
                 if (on && page.sync !== null && !page.sync.writable) {
                     return i18n("Two-way sync is on, but the folder can't be watched right now, so nothing is uploaded. If it stays so, Status says why.");
                 }
-                return i18n("What you add, change, rename, move or delete in the folder is uploaded to OneDrive and shows on your other devices.");
+                if (page.holdOn) {
+                    return i18n("What you add, change, move or delete here happens in OneDrive too. Large changes wait for your review, and deleted files go to OneDrive's recycle bin.");
+                }
+                return i18n("What you add, change, move or delete here happens in OneDrive too. Deleted files go to OneDrive's recycle bin.");
             }
             enabled: page.signedIn && !towardTwoWay && !towardReadOnly
             checked: shown
@@ -191,6 +211,105 @@ FormCard.FormCardPage {
             text: i18nc("@action:button", "Keep Two-Way Sync")
             icon.name: "dialog-cancel"
             onClicked: page.account.setMode("read-write", false)
+        }
+        // Settings' Hold large changes is off: nothing waits for review.
+        FormCard.FormTextDelegate {
+            objectName: "notHeldLine"
+            visible: twoWaySwitch.on && twoWaySwitch.shown && ChangeGuard.serviceAvailable && !ChangeGuard.enabled
+            text: i18n("Large changes are not held for review: “Hold large changes” is off in Settings.")
+            textItem.wrapMode: Text.Wrap
+            leading: Kirigami.Icon {
+                source: "dialog-warning"
+                implicitWidth: Kirigami.Units.iconSizes.small
+                implicitHeight: Kirigami.Units.iconSizes.small
+            }
+        }
+
+        // A trial: changes only in the folders listed; the rest of the OneDrive stays read-only
+        // here. Only two-way, where changes are made at all. Turning it on picks its first
+        // folder; its last folder can't be removed; turning it off asks first. Each change goes
+        // through the daemon, and the rows show what it says.
+        FormCard.FormDelegateSeparator {
+            visible: trialSwitch.visible
+        }
+        FormCard.FormSwitchDelegate {
+            id: trialSwitch
+            objectName: "trialSwitch"
+
+            readonly property bool on: page.account !== null && page.account.writeScopeEnabled
+
+            visible: twoWaySwitch.on && twoWaySwitch.shown
+            text: i18n("Only these folders can be changed")
+            description: on ? i18n("The rest of your OneDrive stays read-only on this computer.")
+                            : i18n("For a trial: changes are allowed only in folders you choose, and the rest of your OneDrive stays read-only here.")
+            enabled: page.available && !page.account.writeScopeChanging
+            checked: on
+            // The inner switch writes `checked` back, ending the binding: kept in step here.
+            onOnChanged: checked = on
+            onToggled: {
+                const wanted = checked;
+                checked = on;
+                if (wanted) {
+                    trialFolderDialog.openFor(page.account, page.sync);
+                } else {
+                    allowEverywhereDialog.open();
+                }
+            }
+        }
+        Repeater {
+            model: trialSwitch.visible && trialSwitch.on && page.account ? page.account.writePaths : []
+            delegate: FormCard.FormTextDelegate {
+                id: folderRow
+                objectName: "trialFolder"
+
+                required property string modelData
+                /// The last folder stays: removing it would refuse every change.
+                readonly property bool last: page.account !== null && page.account.writePaths.length <= 1
+
+                text: modelData
+                textItem.textFormat: Text.PlainText
+                textItem.elide: Text.ElideMiddle
+                icon.name: "folder"
+
+                HoverHandler {
+                    id: folderHover
+                }
+                QQC2.ToolTip.text: modelData.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+                QQC2.ToolTip.visible: folderHover.hovered && folderRow.textItem.truncated && !removeHover.hovered
+                QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+
+                // A disabled button takes no hover: the tooltip is its holder's.
+                trailing: Item {
+                    implicitWidth: removeButton.implicitWidth
+                    implicitHeight: removeButton.implicitHeight
+
+                    HoverHandler {
+                        id: removeHover
+                    }
+                    QQC2.ToolTip.text: folderRow.last ? i18nc("@info:tooltip", "The last folder stays. To allow changes everywhere, turn this off.")
+                                                      : i18nc("@info:tooltip", "Remove")
+                    QQC2.ToolTip.visible: removeHover.hovered
+                    QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+
+                    QQC2.Button {
+                        id: removeButton
+                        objectName: "removeTrialFolder"
+                        text: i18nc("@action:button", "Remove")
+                        icon.name: "list-remove"
+                        display: QQC2.AbstractButton.IconOnly
+                        enabled: !folderRow.last && !page.account.writeScopeChanging
+                        onClicked: page.account.removeFolder(folderRow.modelData)
+                    }
+                }
+            }
+        }
+        FormCard.FormButtonDelegate {
+            objectName: "addTrialFolder"
+            visible: trialSwitch.visible && trialSwitch.on
+            enabled: page.account !== null && !page.account.writeScopeChanging
+            text: i18nc("@action:button", "Add Folder…")
+            icon.name: "list-add"
+            onClicked: trialFolderDialog.openFor(page.account, page.sync)
         }
     }
 
@@ -523,6 +642,104 @@ FormCard.FormCardPage {
                 onTriggered: renameDialog.close()
             }
         ]
+    }
+
+    // A folder for the trial, picked in the OneDrive folder: one outside it, or the folder
+    // itself, opens the dialog again in the OneDrive folder, headed by why.
+    FolderDialog {
+        id: trialFolderDialog
+        objectName: "trialFolderDialog"
+
+        /// The account and its folder's sync it is open for; null once closed.
+        property QtObject account: null
+        property QtObject sync: null
+
+        function openFor(forAccount, forSync) {
+            account = forAccount;
+            sync = forSync;
+            title = i18nc("@title:window", "Choose a Folder That Can Be Changed");
+            currentFolder = forSync.rootUrl();
+            open();
+        }
+
+        /// The folder picked: allowed, or the dialog opened again when it is not in the OneDrive.
+        function pick(folder) {
+            const relative = sync ? sync.folderInside(folder) : "";
+            if (account && relative.length === 0) {
+                title = i18nc("@title:window", "Choose a Folder Inside Your OneDrive Folder");
+                currentFolder = sync.rootUrl();
+                // Not while the dialog that answered is still closing.
+                Qt.callLater(open);
+                return;
+            }
+            if (account) {
+                account.allowFolder(relative);
+            }
+            account = null;
+            sync = null;
+        }
+
+        onAccepted: pick(selectedFolder)
+        onRejected: {
+            account = null;
+            sync = null;
+        }
+
+        // Another account shown: not the question asked.
+        Connections {
+            target: Current
+            function onChanged() {
+                trialFolderDialog.account = null;
+                trialFolderDialog.sync = null;
+                trialFolderDialog.close();
+            }
+        }
+    }
+
+    // Ending the trial: every folder can be changed, and the list is forgotten.
+    Kirigami.PromptDialog {
+        id: allowEverywhereDialog
+        objectName: "allowEverywhereDialog"
+
+        title: i18nc("@title:window", "Allow Changes Everywhere?")
+        maximumWidth: Kirigami.Units.gridUnit * 25
+        subtitle: {
+            const text = i18n("Every folder in this OneDrive can then be changed from this computer, and the list of folders is forgotten.");
+            return page.holdOn ? text + " " + i18n("Large changes are still held for your review.") : text;
+        }
+        standardButtons: Kirigami.Dialog.NoButton
+        customFooterActions: [
+            Kirigami.Action {
+                objectName: "allowEverywhere"
+                text: i18nc("@action:button", "Allow Everywhere")
+                icon.name: "object-unlocked"
+                onTriggered: {
+                    page.account.clearWriteScope();
+                    allowEverywhereDialog.close();
+                }
+            },
+            Kirigami.Action {
+                text: i18nc("@action:button", "Cancel")
+                icon.name: "dialog-cancel"
+                onTriggered: allowEverywhereDialog.close()
+            }
+        ]
+
+        // Another account shown, or the trial ended elsewhere: not the question now.
+        Connections {
+            target: Current
+            function onChanged() {
+                allowEverywhereDialog.close();
+            }
+        }
+        Connections {
+            target: page.account
+            function onAccountChanged() {
+                if (!trialSwitch.on) {
+                    allowEverywhereDialog.close();
+                }
+            }
+        }
     }
 
     AnotherFolderDialog {

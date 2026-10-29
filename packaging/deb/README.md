@@ -23,7 +23,10 @@ must supply builds from the current HEAD and target architecture, with CMake
 configured for `/usr` and the distribution's Qt plugin directory. Existing
 test-only source edits are not included in the packages.
 
-Versions are `<Cargo version>~git<12-character HEAD>`. The binaries retain the
+Versions are `<Cargo version>+git<HEAD commit time, UTC YYYYMMDDhhmmss>.<12-character HEAD>`,
+so a later commit (at least a second after the previous one) installs as an upgrade, also over
+the earlier `~git<HEAD>` builds; `SOURCE_DATE_EPOCH` affects file times only. The
+binaries retain the
 version embedded by their original build (a plain upstream build shows
 `0.2.3-dev`). The maintainer is explicitly local, with a reserved `.invalid`
 contact address; override it with `KONEDRIVE_DEB_MAINTAINER='Name <email>'` if needed.

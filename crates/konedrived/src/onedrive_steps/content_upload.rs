@@ -423,6 +423,21 @@ impl ContentUpload {
         }
     }
 
+    /// Recheck after acquiring a transfer slot and before each mutating request. A
+    /// burst can trip the guard while an admitted worker waits for the pool or hashes.
+    fn check_change_guard(&self, item: &ItemVersions, target: &ContentTarget) -> Result<(), SendContentError> {
+        let Some(guard) = &self.graph.change_guard else { return Ok(()) };
+        let step = match target {
+            ContentTarget::NewFile(place) => konedrive_tree::OneDriveStep::SendNewFile { item: item.clone(), parent: place.parent.clone(), name: place.name.clone() },
+            ContentTarget::ExistingItem { .. } => konedrive_tree::OneDriveStep::SendContent { item: item.clone() },
+        };
+        match guard.admit(&step, (self.graph.clock)()) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(StepOutcome::NotRun(StepObstacle::SendingStopped).into()),
+            Err(detail) => Err(StepOutcome::Failed(StepFailure::Store { detail }).into()),
+        }
+    }
+
     /// The whole-seconds time of the content `item` sends.
     fn find_content_time(item: &ItemVersions) -> i64 {
         item.local.as_ref().and_then(|local| local.content.as_ref()).map_or(0, |content| content.mtime().0)
@@ -446,6 +461,7 @@ impl ContentUpload {
             ContentTarget::NewFile(place) => SentRequest::SendNewFile { parent: &place.parent, name: &place.name, sent_hash: &sent_hash },
             ContentTarget::ExistingItem { .. } => SentRequest::SendContent { sent_hash: &sent_hash },
         };
+        self.check_change_guard(item, target)?;
         let lost_detail = match self.graph.drive.upload_empty(upload_target, Self::find_content_time(item)).await {
             Ok(answer) => match to_confirmed_item(&answer, &self.graph.drive_id) {
                 Ok(made) => {
@@ -564,6 +580,7 @@ impl ContentUpload {
             }
             None => None,
         };
+        self.check_change_guard(item, target)?;
         let opened = match self.graph.drive.create_upload_session(upload_target, content.mtime().0).await {
             Ok(opened) => opened,
             Err(error) => {
@@ -659,7 +676,8 @@ impl ContentUpload {
             };
             hasher.update(&bytes);
             hashed = next + len;
-            match self.graph.drive.upload_chunk(address.as_str(), next, size, bytes).await {
+            self.check_change_guard(item, target)?;
+            match self.graph.drive.upload_chunk_once(address.as_str(), next, size, bytes).await {
                 // An answer that takes nothing: the session stays, to be gone on with.
                 Ok(ChunkOutcome::More(progress)) if progress.next <= next => {
                     return Err(StepOutcome::Refused(StepRefusal::Transient { detail: format!("the upload session still expects bytes from {} of {size}", progress.next) }).into());
@@ -826,7 +844,7 @@ impl ContentUpload {
                 if let Err(outcome) = &standing {
                     tracing::warn!("what OneDrive holds for item {id} with other content is not remembered: {outcome:?}");
                 }
-                if !matches!(standing, Ok(MismatchedItemStanding::OfFolder)) && super::write_scope::allows_confirmed(&self.graph, &self.write_scope, &sent.item).await {
+                if !matches!(standing, Ok(MismatchedItemStanding::OfFolder)) && super::write_scope::allows_confirmed(&self.graph, &self.write_scope, &sent.item).await && self.graph.admit_cleanup(&sent.item.item, sent.item.content.as_ref().map_or(0, |c| c.size()), &sent.item.etag) {
                     match self.graph.drive.delete_item(sent.item.item.item_id.as_str(), &sent.item.etag).await {
                         Ok(()) | Err(WriteError::NotFound) => {
                             let removed = sent.item.item.clone();
@@ -913,6 +931,15 @@ impl ContentUpload {
         }
         let removed = {
             let _slot = self.graph.drive.pool().acquire(Class::Metadata).await;
+            if !self.write_scope.get().unrestricted() {
+                let confirmed = to_confirmed_item(&found, &self.graph.drive_id).map_err(StepOutcome::Failed)?;
+                if !super::write_scope::allows_confirmed(&self.graph, &self.write_scope, &confirmed).await {
+                    return Err(StepOutcome::Refused(StepRefusal::Transient { detail: "an earlier upload left an item outside the account's write scope".into() }));
+                }
+            }
+            if !self.graph.admit_cleanup(&left.item, found.size.unwrap_or(u64::MAX), to_guard_of_answer(&found).as_str()) {
+                return Err(StepOutcome::NotRun(StepObstacle::SendingStopped));
+            }
             self.graph.drive.delete_item(left_id, to_guard_of_answer(&found).as_str()).await
         };
         match removed {

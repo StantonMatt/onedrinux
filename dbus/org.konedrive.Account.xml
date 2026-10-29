@@ -57,6 +57,20 @@
       <arg name="paths" type="as" direction="in"/>
     </method>
     <method name="ClearWriteScope"/>
+    <!-- Scope refusals only (not ordinary read-only mode). First immediately, later
+         reports at most every 10 seconds per account. Count is since the last report,
+         not cumulative; coalesced reports retain one representative path/folder/app.
+         Both paths are relative to the drive root. Folder is the existing containing
+         folder to add with SetWriteScope(existing WritePaths + folder); empty means
+         root, where Allow This Folder must not be offered. App is app:<desktop id> or
+         exe:<absolute executable>, empty when the process could not be identified.
+         Reports are ephemeral; the app merges notifications over its 10-minute window. -->
+    <signal name="WriteRefused">
+      <arg name="path" type="s"/>
+      <arg name="folder" type="s"/>
+      <arg name="app" type="s"/>
+      <arg name="count" type="t"/>
+    </signal>
     <property name="WritePaths" type="as" access="read"/>
     <property name="WriteScopeEnabled" type="b" access="read"/>
     <!-- The last element of this object's path: 12 lowercase hex
