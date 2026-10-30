@@ -6,9 +6,9 @@
 //! content in its last answer to a download of it, which the next download of it carries
 //! until it is answered; the handle each running download's task is aborted by, which
 //! download of its key it is, and whether anything but the plan asked for it; whether
-//! the mount stopped; and how many bytes of each item were read as ranges since the last
-//! download a read started. Changed by the downloader and by read alone, through the
-//! functions here; no I/O.
+//! the mount stopped; and which distinct bytes of each item and opened content were read
+//! as ranges since the last download a read started. Changed by the downloader and by
+//! read alone, through the functions here; no I/O.
 //!
 //! **Answers for:** who dedups (a download of the same
 //! item and content that runs is joined, whoever asks: a read, an open for writing,
@@ -55,9 +55,18 @@
 // test: the_unfinished_files_are_those_of_the_running_downloads_that_are_not_whole_and_of_the_failed_ones
 // test: whole_downloads_wait_to_be_shown_and_old_timers_never_show_a_new_run
 // test: a_range_and_a_whole_download_keep_the_shown_item_continuous
+// test: gwenviews_repeated_headers_and_png_chunk_scan_do_not_download_the_whole_file
+// test: reading_through_reaches_the_threshold_at_the_last_small_file_read_or_one_mib
+// test: repeating_a_range_a_thousand_times_does_not_download_but_a_whole_small_file_does
+// test: overlapping_adjacent_and_out_of_order_reads_count_only_the_union_inside_the_file
+// test: a_different_opened_content_resets_range_coverage_even_when_old_handles_read_again
+// test: capped_intervals_remain_a_subset_of_the_bytes_read_after_scattering_and_rereading
+// test: the_interval_cap_reduces_the_closest_pair_to_its_longer_interval
+// test: the_number_of_items_with_range_coverage_is_bounded_and_eviction_never_adds_bytes
 
 use std::collections::HashMap;
 use std::fs::File;
+use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -76,6 +85,54 @@ const UNFINISHED_FILES_KEPT: usize = 16;
 /// since. A read of a content that is remembered no more fetches ranges, as of any
 /// content, until the next whole download tells again.
 pub(super) const ANOTHER_CONTENTS_REMEMBERED: usize = 256;
+
+/// The most disjoint ranges remembered for one item. Losing a range only delays a
+/// whole download; a gap must never be counted as if the program had read it.
+const READ_INTERVALS_KEPT: usize = 64;
+
+/// The most items whose range coverage is remembered. Entries otherwise live until
+/// the threshold, a successful download or `forget_item`, as before.
+const READ_ITEMS_KEPT: usize = 4096;
+
+/// A conservative union of returned ranges of one opened content. Sorted, disjoint
+/// and non-adjacent; every byte kept here was returned to a program.
+struct ReadCoverage {
+    content: ContentVersion,
+    intervals: Vec<Range<u64>>,
+}
+
+impl ReadCoverage {
+    fn new(content: &ContentVersion) -> Self {
+        Self { content: content.clone(), intervals: Vec::new() }
+    }
+
+    /// Add only bytes inside the file, coalescing overlaps and adjacency. Beyond the
+    /// cap, reduce the closest separated pair to its longer interval (the later one
+    /// on a tie): a downward merge that forgets the shorter rather than filling a gap.
+    fn add(&mut self, from: u64, bytes: u64) -> u64 {
+        let mut range = from.min(self.content.size())..from.saturating_add(bytes).min(self.content.size());
+        if range.start < range.end {
+            let first = self.intervals.partition_point(|kept| kept.end < range.start);
+            let mut end = first;
+            while end < self.intervals.len() && self.intervals[end].start <= range.end {
+                range.start = range.start.min(self.intervals[end].start);
+                range.end = range.end.max(self.intervals[end].end);
+                end += 1;
+            }
+            self.intervals.splice(first..end, [range]);
+            if self.intervals.len() > READ_INTERVALS_KEPT {
+                let closest = self.intervals.windows(2).enumerate()
+                    .min_by_key(|(_, pair)| pair[1].start - pair[0].end)
+                    .map(|(at, _)| at).expect("more than one interval");
+                let left = &self.intervals[closest];
+                let right = &self.intervals[closest + 1];
+                let discard = if left.end - left.start <= right.end - right.start { closest } else { closest + 1 };
+                self.intervals.remove(discard);
+            }
+        }
+        self.intervals.iter().map(|range| range.end - range.start).sum()
+    }
+}
 
 /// What a download is of.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -288,7 +345,7 @@ pub(crate) struct ItemDownloadStates {
     states: std::sync::Mutex<States>,
     pub(crate) changes: Arc<crate::sync_parts::state_changes::StateChanges>,
     pub(super) range_reads: Arc<super::range_read_states::RangeReadStates>,
-    bytes_read_as_ranges: std::sync::Mutex<HashMap<LocalItemId, u64>>,
+    bytes_read_as_ranges: std::sync::Mutex<HashMap<LocalItemId, ReadCoverage>>,
     /// `[transfers] download_after`.
     download_after: u64,
     /// The number of the download started last.
@@ -697,15 +754,24 @@ impl ItemDownloadStates {
             || self.range_reads.is_hydrating(item)
     }
 
-    /// `bytes` more of `item` were read as ranges; whether that reaches the threshold at
-    /// which the file is downloaded whole ([`reaches_download_threshold`]).
+    /// `bytes` starting at `from` of the opened `content` were returned as ranges;
+    /// whether their distinct coverage reaches the whole-download threshold. A change
+    /// of content resets the item's coverage, also when old and new handles alternate.
     /// The count starts over once it answered yes: a download that ends without landing
-    /// is not started again by the next read, but by as many bytes read again.
-    pub(super) fn count_bytes_read(&self, item: LocalItemId, bytes: u64, file_size: u64) -> bool {
+    /// is not started again by the next read, but by as many distinct bytes read again.
+    pub(super) fn count_bytes_read(&self, item: LocalItemId, content: &ContentVersion, from: u64, bytes: u64) -> bool {
         let mut bytes_read_as_ranges = crate::panic::lock(&self.bytes_read_as_ranges);
-        let bytes_read = bytes_read_as_ranges.entry(item).or_default();
-        *bytes_read += bytes;
-        let is_reached = reaches_download_threshold(*bytes_read, self.download_after, file_size);
+        if !bytes_read_as_ranges.contains_key(&item) && bytes_read_as_ranges.len() >= READ_ITEMS_KEPT {
+            // No recency bookkeeping is needed: forgetting any item undercounts only.
+            if let Some(forgotten) = bytes_read_as_ranges.keys().next().copied() {
+                bytes_read_as_ranges.remove(&forgotten);
+            }
+        }
+        let coverage = bytes_read_as_ranges.entry(item).or_insert_with(|| ReadCoverage::new(content));
+        if coverage.content != *content {
+            *coverage = ReadCoverage::new(content);
+        }
+        let is_reached = reaches_download_threshold(coverage.add(from, bytes), self.download_after, content.size());
         if is_reached {
             bytes_read_as_ranges.remove(&item);
         }
@@ -757,9 +823,9 @@ pub(super) struct RunningDownloadFile {
     pub(super) written_up_to: u64,
 }
 
-/// Whether `bytes_read` bytes of a file `file_size` long, read as ranges, are enough for the
-/// whole file to be downloaded. A file smaller than `download_after` is downloaded once all
-/// of it was read: it would be fetched again at every read otherwise.
+/// Whether `bytes_read` distinct bytes of a file `file_size` long, read as ranges,
+/// are enough for the whole file to be downloaded. A file smaller than `download_after`
+/// is downloaded once all of it was read: it would be fetched again at every read otherwise.
 pub(super) fn reaches_download_threshold(bytes_read: u64, download_after: u64, file_size: u64) -> bool {
     bytes_read >= download_after.min(file_size)
 }

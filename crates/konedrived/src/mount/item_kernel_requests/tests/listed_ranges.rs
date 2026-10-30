@@ -119,3 +119,41 @@ fn a_491408_byte_screenshot_costs_one_range_for_22_reads_and_the_guard_counts_on
     assert_eq!(asked.iter().filter(|(_, route)| route.starts_with("dl/")).count(), 1);
     assert_eq!(asked.len(), 3, "without listed metadata, one metadata/body/metadata exchange for all 22 reads: {asked:?}");
 }
+
+/// Repeated reads of a cached small file still cost every requested byte to the guard,
+/// but cannot manufacture the distinct coverage needed to hydrate it.
+#[test]
+fn gwenview_repeated_small_screenshot_reads_stay_online_only_and_keep_guard_accounting() {
+    let size = 20187;
+    let bytes = vec![7; size];
+    let fixture = ItemFixture::new();
+    fixture.show_onedrive_directory("Screenshots");
+    let file = fixture.show_onedrive_file("Screenshots/small.png", &bytes).local_item_id;
+    let graph = fixture.runtime().block_on(fixture.start_fake_onedrive());
+    let mut setup = fixture.mount_setup();
+    setup.source = Arc::new(GraphSource::new(graph.client()));
+    let guard = Arc::new(DownloadGuard::new(true, GuardConfig::default()));
+    setup.download_guard = Arc::clone(&guard);
+    let (_mount, requests) = crate::mount::item_mount::build_order::build(setup, fixture.runtime()).unwrap();
+    let pid = std::process::id();
+    let opened = requests.open_to_read(file, Some(pid)).unwrap();
+    graph.with(|cloud| cloud.log.clear());
+    let mut reads = vec![(0, 16384)];
+    reads.extend([(0, 4096); 4]);
+    reads.extend([(0, 33), (33, 4096), (0, 16384)]);
+    let mut returned = 0;
+    for (from, size) in reads {
+        let ReadAnswer::Range(range) = requests.decide_read(opened.fh, from, size).unwrap() else { panic!("a range") };
+        let answer = fixture.runtime().block_on(requests.read_range(range, Some(pid))).unwrap();
+        assert_eq!(answer, bytes[from as usize..from as usize + size as usize]);
+        returned += answer.len() as u64;
+        assert!(!requests.download_states.is_downloading(file), "repeated header reads start no hydration");
+        assert_eq!(fixture.find_item(file).unwrap().content_presence, ContentPresence::NotOnDisk);
+    }
+    requests.answer_release(opened.fh);
+    let counted: Vec<_> = guard.apps().into_iter().filter(|app| app.files > 0).map(|app| (app.files, app.bytes)).collect();
+    assert_eq!(counted, [(1, returned)]);
+    assert!(returned > size as u64);
+    let asked = graph.with(|cloud| std::mem::take(&mut cloud.log));
+    assert_eq!(asked.len(), 2, "one listing and one small-file fetch: {asked:?}");
+}

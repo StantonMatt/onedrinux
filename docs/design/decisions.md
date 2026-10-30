@@ -150,12 +150,15 @@ security](#5-account-and-security), [the desktop](#6-the-desktop), [testing](#7-
 ### 2.5 A file that is not on disk is read as ranges, then downloaded whole past a threshold
 
 - **Decision.** An open of a file that is not on disk is answered at once. A read fetches the range
-  asked for from OneDrive; once the bytes read so reach `[transfers] download_after` (1 MiB unless
+  asked for from OneDrive; once the distinct bytes returned reach `[transfers] download_after` (1 MiB unless
   `config.toml` says otherwise), or the whole of a smaller file, the file is downloaded whole, and
   reads remain version-checked ranges until the verified file lands ([mount.md](mount.md) §5).
 - **Why.** A program that reads the start of a file (a file manager finding its type, a
   thumbnailer, `file`) costs a range, not the whole file. A program that reads the file through
-  gets it at the speed of one download, checked against its hash, and kept on disk. A read that
+  gets it at the speed of one download, checked against its hash, and kept on disk. Repeated
+  Gwenview header probes had caused 19 small screenshots to land on build `1983691`
+  (2026-10-30); overlapping reads now count only their union for one opened content.
+  A single 16 KiB read still covers a whole 10 KiB file and starts its download. A read that
   waits for OneDrive can be interrupted: the workspace uses `fuser` with one change, which hands the
   kernel's `INTERRUPT` to the daemon (`vendor/fuser/README.konedrive.md`). The daemon
   answers that read `EINTR` exactly once before aborting its task. Mount shutdown answers
@@ -163,7 +166,10 @@ security](#5-account-and-security), [the desktop](#6-the-desktop), [testing](#7-
   with no raw fuser reply left unanswered. No further vendor change is needed.
 - **Trade-off.** Each range's version is proven by the listed eTag and size or by metadata
   checks before and after its body (§2.15), but it has no independent whole-file hash proof
-  (F297). A patched copy of `fuser` is kept in the repository.
+  (F297). Coverage resets on a content change and after the threshold answers yes. It keeps
+  at most 64 coalesced intervals per item and 4,096 items, forgetting coverage downward
+  at either cap, so scattered reads can delay hydration ([mount.md](mount.md) §5.2).
+  A patched copy of `fuser` is kept in the repository.
 
 ### 2.6 A read never mixes two contents
 
@@ -303,7 +309,7 @@ security](#5-account-and-security), [the desktop](#6-the-desktop), [testing](#7-
   Cached pieces cost up to 64 MiB, shared with small files; expired bytes are freed on lookup
   or insertion, as well as when forgotten or signed out. Reading a few bytes can fetch up to
   one MiB ahead. The guard still counts requested bytes and `download_after` still counts
-  returned bytes, so the same program reads make the same admission and hydration decisions.
+  distinct returned bytes of the opened content (§2.5); prefetched bytes add no coverage.
   Whole hydration still fetches and verifies independently; reusing cached bytes for landing
   would need to preserve its hash, version and durability checks.
 

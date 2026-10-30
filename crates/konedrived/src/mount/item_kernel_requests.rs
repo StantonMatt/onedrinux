@@ -98,6 +98,7 @@
 // test: a_range_of_a_file_not_on_disk_per_case
 // test: a_removal_the_bridge_announces_per_case
 // test: a_read_of_a_small_file_not_on_disk_downloads_it_once_all_of_it_was_read
+// test: gwenview_repeated_small_screenshot_reads_stay_online_only_and_keep_guard_accounting
 // test: a_read_through_a_handle_whose_content_onedrive_changed_is_stale
 // test: a_file_not_on_disk_is_downloaded_before_it_is_opened_for_writing
 // test: a_download_that_fails_refuses_the_open_for_writing_and_the_truncation_with_its_errno
@@ -612,8 +613,8 @@ impl ItemKernelRequests {
     }
 
     /// The rest of a read as ranges, on the runtime: `ItemRangeFetcher::fetch_range`
-    /// (another content than the one opened is `ESTALE`), the bytes counted towards the
-    /// whole download (`count_bytes_read`, then `ItemDownloader::download` as
+    /// (another content than the one opened is `ESTALE`), the distinct returned ranges
+    /// counted towards the whole download (`count_bytes_read`, then `ItemDownloader::download` as
     /// `DownloadAsker::Read`, with no waiter, at the threshold). No row is read here. The
     /// caller keeps the task's abort handle for the kernel's interrupt
     /// (`interruptible_reads`).
@@ -654,7 +655,7 @@ impl ItemKernelRequests {
     pub(super) async fn read_range(&self, range: RangeToFetch, pid: Option<u32>) -> Result<Vec<u8>, Errno> {
         self.admit_remote(pid, &range, range.end.saturating_sub(range.from))?;
         let bytes = self.fetch_range(&range).await?;
-        if self.download_states.count_bytes_read(range.item, bytes.len() as u64, range.source.content.size()) {
+        if self.download_states.count_bytes_read(range.item, &range.source.content, range.from, bytes.len() as u64) {
             if !self.download_states.is_downloading(range.item) && self.downloader.read_fits(range.source.content.size()) {
                 if let Ok(charge) = self.charge_download(pid, &range) {
                     self.downloader.download_charged(range.download_at_threshold, None, charge);

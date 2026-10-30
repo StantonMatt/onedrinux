@@ -409,7 +409,8 @@ A file that is not on disk:
 - `item_downloader/space_checked.rs` — read and pin streams recheck the disk reserve; retry bytes
   are counted against the app's admission budget.
 - `item_download_states.rs` — `ItemDownloadStates`: the state of each file's download, by the
-  item and the content. `[tests]`
+  item and the content; bounded, coalesced coverage of distinct range bytes for the whole-download
+  threshold, reset on opened-content changes. `[tests]`
 - `item_download_landing.rs` — conditional landings and atomic resident replacements on one existing place-change record; the landing: the last step of every download, the file given
   its name and then the row saying on disk. `[tests]`
 - `item_free_up.rs` — free up space: the row first, then the downloaded copy goes; app reclamation also requires the attributed content and no open reader. `[tests]`
@@ -1355,7 +1356,8 @@ from schema 31, and atomic saves crossing upload requests, without a mount or ac
 - `crates/konedrived/src/mount/item_write_operations/write_scope.rs` — common scope admission
   used by kernel dispatch, carrying the request PID and existing containing folder into
   refusal reports; tests in `mount/item_kernel_requests/tests/write_scope.rs`.
-- `crates/konedrived/src/mount/item_kernel_requests/tests/listed_ranges.rs` — the 491,408-byte
+- `crates/konedrived/src/mount/item_kernel_requests/tests/listed_ranges.rs` — repeated small-image
+  headers stay online-only with unchanged guard accounting; the 491,408-byte
   screenshot's 22 probes use one block on both Graph paths and keep guard counters unchanged;
   range reads of a folder's small files through the Graph source over the fake OneDrive: one listing and one
   request a file, and the download guard's counts the same as through a source that asks for

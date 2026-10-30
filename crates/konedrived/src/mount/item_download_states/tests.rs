@@ -11,6 +11,10 @@ fn key(item: i64, ctag: &str) -> DownloadKey {
     DownloadKey { item: LocalItemId::new(item), content: ContentVersion::Hashed { size: 10, mtime: 1_700_000_000, mtime_nsec: 0, hash: None, ctag: Some(ctag.into()) } }
 }
 
+fn read_content(size: u64, ctag: &str) -> ContentVersion {
+    ContentVersion::Hashed { size, mtime: 1_700_000_000, mtime_nsec: 0, hash: None, ctag: Some(ctag.into()) }
+}
+
 /// The plan's pin, as its step asks: with the versions the step was planned from.
 fn plan_pin() -> DownloadAsker {
     let planned_from = ItemVersions {
@@ -177,17 +181,18 @@ fn a_failed_download_keeps_its_unfinished_file_for_the_next_asking_of_that_conte
 fn the_bytes_read_as_ranges_reach_the_threshold_once_and_are_forgotten_with_the_item() {
     let download_states = download_states();
     let item = LocalItemId::new(5);
-    assert!(!download_states.count_bytes_read(item, 60, 1000));
-    assert!(!download_states.count_bytes_read(LocalItemId::new(6), 60, 1000), "each item has a count of its own");
-    assert!(download_states.count_bytes_read(item, 40, 1000), "100 bytes of it were read");
+    assert!(!download_states.count_bytes_read(item, &read_content(1000, "c1"), 0, 60));
+    assert!(!download_states.count_bytes_read(LocalItemId::new(6), &read_content(1000, "c1"), 0, 60), "each item has a count of its own");
+    assert!(download_states.count_bytes_read(item, &read_content(1000, "c1"), 60, 40), "100 bytes of it were read");
+    assert!(!download_states.count_bytes_read(item, &read_content(1000, "c1"), 0, 60));
     download_states.forget_item(item);
-    assert!(!download_states.count_bytes_read(item, 60, 1000), "counted from nothing again");
+    assert!(!download_states.count_bytes_read(item, &read_content(1000, "c1"), 60, 40), "counted from nothing again");
     // A file smaller than the threshold reaches it once all of it was read.
-    assert!(download_states.count_bytes_read(LocalItemId::new(7), 30, 30));
+    assert!(download_states.count_bytes_read(LocalItemId::new(7), &read_content(30, "c1"), 0, 30));
     // A download that ended well ends the count too.
     let run = start_anew(&download_states, &key(5, "c1"));
     download_states.finish(&run, Ok(()));
-    assert!(!download_states.count_bytes_read(item, 60, 1000));
+    assert!(!download_states.count_bytes_read(item, &read_content(1000, "c1"), 0, 60));
     // The unfinished files of the item go with it, whatever content they were of; a
     // download of it that runs is left to its landing.
     let download_states = self::download_states();
@@ -432,12 +437,12 @@ async fn a_download_of_the_plans_is_told_when_anything_else_asks_for_it() {
 fn the_count_of_bytes_read_as_ranges_starts_over_once_it_reached_the_threshold() {
     let download_states = download_states();
     let item = LocalItemId::new(5);
-    assert!(!download_states.count_bytes_read(item, 99, 1000));
-    assert!(download_states.count_bytes_read(item, 1, 1000), "100 bytes of it were read: a download is started");
+    assert!(!download_states.count_bytes_read(item, &read_content(1000, "c1"), 0, 99));
+    assert!(download_states.count_bytes_read(item, &read_content(1000, "c1"), 99, 1), "100 bytes of it were read: a download is started");
     // The download ended without landing, or still runs: the next reads start none.
-    assert!(!download_states.count_bytes_read(item, 4, 1000));
-    assert!(!download_states.count_bytes_read(item, 95, 1000));
-    assert!(download_states.count_bytes_read(item, 1, 1000), "as many bytes read again");
+    assert!(!download_states.count_bytes_read(item, &read_content(1000, "c1"), 0, 4));
+    assert!(!download_states.count_bytes_read(item, &read_content(1000, "c1"), 4, 95));
+    assert!(download_states.count_bytes_read(item, &read_content(1000, "c1"), 99, 1), "as many bytes read again");
 }
 
 #[test]
@@ -634,4 +639,126 @@ async fn a_range_and_a_whole_download_keep_the_shown_item_continuous() {
     tokio::time::sleep(READ_LINGERS).await;
     tokio::task::yield_now().await;
     assert!(!states.is_hydrating(item));
+}
+
+/// The 2026-10-30 Gwenview trace: repeated header probes, then PNG chunks every 64 KiB.
+fn gwenview_reads(size: u64) -> Vec<(u64, u64)> {
+    let mut reads = vec![(0, 16384)];
+    reads.extend([(0, 4096); 4]);
+    reads.extend([(0, 33), (33, 4096)]);
+    reads.extend((65536..size).step_by(65536).map(|from| (from, 4096)));
+    reads.push((0, 16384));
+    reads
+}
+
+#[test]
+fn gwenviews_repeated_headers_and_png_chunk_scan_do_not_download_the_whole_file() {
+    for (size, distinct) in [(20187, 16384), (1360978, 98304)] {
+        let states = ItemDownloadStates::new(1 << 20);
+        let content = read_content(size, "c1");
+        let item = LocalItemId::new(5);
+        for (from, bytes) in gwenview_reads(size) {
+            assert!(!states.count_bytes_read(item, &content, from, bytes), "{bytes}@{from} of {size}");
+        }
+        let mut counts = crate::panic::lock(&states.bytes_read_as_ranges);
+        assert_eq!(counts.get_mut(&item).unwrap().add(0, 0), distinct);
+    }
+}
+
+#[test]
+fn reading_through_reaches_the_threshold_at_the_last_small_file_read_or_one_mib() {
+    for size in [30 * 1024, 3 * 1024 * 1024] {
+        let states = ItemDownloadStates::new(1 << 20);
+        let content = read_content(size, "c1");
+        let threshold = size.min(1 << 20);
+        for from in (0..threshold).step_by(4096) {
+            assert_eq!(states.count_bytes_read(LocalItemId::new(5), &content, from, 4096), from + 4096 >= threshold);
+        }
+    }
+}
+
+#[test]
+fn repeating_a_range_a_thousand_times_does_not_download_but_a_whole_small_file_does() {
+    let states = ItemDownloadStates::new(1 << 20);
+    let item = LocalItemId::new(5);
+    let content = read_content(30 * 1024, "c1");
+    for _ in 0..1000 {
+        assert!(!states.count_bytes_read(item, &content, 0, 4096));
+    }
+    assert!(states.count_bytes_read(item, &read_content(10 * 1024, "c2"), 0, 16384), "the read covers the whole 10 KiB file");
+}
+
+#[test]
+fn overlapping_adjacent_and_out_of_order_reads_count_only_the_union_inside_the_file() {
+    let mut coverage = ReadCoverage::new(&read_content(100, "c1"));
+    assert_eq!(coverage.add(40, 20), 20);
+    assert_eq!(coverage.add(10, 20), 40);
+    assert_eq!(coverage.add(20, 30), 50);
+    assert_eq!(coverage.add(0, 10), 60);
+    assert_eq!(coverage.add(60, u64::MAX), 100);
+    assert_eq!(coverage.intervals, [0..100]);
+    assert_eq!(coverage.add(u64::MAX, 4096), 100);
+    assert_eq!(coverage.add(5, 0), 100);
+}
+
+#[test]
+fn a_different_opened_content_resets_range_coverage_even_when_old_handles_read_again() {
+    let states = download_states();
+    let item = LocalItemId::new(5);
+    let first = read_content(1000, "c1");
+    let second = read_content(1000, "c2");
+    assert!(!states.count_bytes_read(item, &first, 0, 60));
+    assert!(!states.count_bytes_read(item, &second, 60, 40), "no bytes from the first content");
+    assert!(!states.count_bytes_read(item, &first, 0, 60), "no bytes from the second content");
+    assert!(states.count_bytes_read(item, &first, 60, 40));
+}
+
+#[test]
+fn capped_intervals_remain_a_subset_of_the_bytes_read_after_scattering_and_rereading() {
+    let size = 20000;
+    let mut coverage = ReadCoverage::new(&read_content(size, "c1"));
+    let mut read = vec![false; size as usize];
+    // Widely scattered reads, then re-read the discarded regions, with overlaps and
+    // bridges: any invented byte would be caught even if the total still undercounted.
+    for (from, bytes) in (0..500).map(|n| (n * 31, 1 + n % 7))
+        .chain((0..500).rev().map(|n| (n * 31, 13)))
+        .chain((0..size).step_by(19).map(|from| (from, 23))) {
+        let end = (from + bytes).min(size);
+        read[from as usize..end as usize].fill(true);
+        let counted = coverage.add(from, bytes);
+        assert!(coverage.intervals.len() <= READ_INTERVALS_KEPT);
+        assert!(counted <= read.iter().filter(|seen| **seen).count() as u64);
+        for range in &coverage.intervals {
+            assert!(read[range.start as usize..range.end as usize].iter().all(|seen| *seen));
+        }
+        assert!(coverage.intervals.windows(2).all(|pair| pair[0].end < pair[1].start));
+    }
+    assert_eq!(coverage.add(0, size), size, "reading the whole file restores any forgotten coverage");
+}
+
+#[test]
+fn the_interval_cap_reduces_the_closest_pair_to_its_longer_interval() {
+    for (first, second, kept) in [(0..2, 3..7, 3..7), (0..4, 5..7, 0..4)] {
+        let mut coverage = ReadCoverage::new(&read_content(10000, "c1"));
+        coverage.add(first.start, first.end - first.start);
+        coverage.add(second.start, second.end - second.start);
+        for n in 0..READ_INTERVALS_KEPT - 1 {
+            coverage.add(100 + n as u64 * 100, 10);
+        }
+        assert_eq!(coverage.intervals.len(), READ_INTERVALS_KEPT);
+        assert_eq!(coverage.intervals[0], kept, "the gap itself is never added");
+    }
+}
+
+#[test]
+fn the_number_of_items_with_range_coverage_is_bounded_and_eviction_never_adds_bytes() {
+    let states = download_states();
+    let content = read_content(1000, "c1");
+    for item in 0..READ_ITEMS_KEPT + 1 {
+        assert!(!states.count_bytes_read(LocalItemId::new(item as i64), &content, 0, 60));
+    }
+    assert_eq!(crate::panic::lock(&states.bytes_read_as_ranges).len(), READ_ITEMS_KEPT);
+    for item in 0..READ_ITEMS_KEPT + 1 {
+        assert!(!states.count_bytes_read(LocalItemId::new(item as i64), &content, 0, 60));
+    }
 }

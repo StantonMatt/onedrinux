@@ -608,9 +608,10 @@ stay. The filler also asks for nothing while the account is paused or holds back
 
 **What still reads a file.** For a name with no extension, or an ambiguous one, KIO reads the first
 bytes to learn the type (K1). Those bytes are a range read, not a download: the file is downloaded
-whole only once more than `[transfers] download_after` of it was read ([mount.md](mount.md) §5). A
-preview of any other kind of file, and the `xx-large` zoom, read the file. Turning previews off for
-the folder avoids those reads.
+whole when distinct returned bytes reach the smaller of `[transfers] download_after` and its
+size ([mount.md](mount.md) §5). Repeated header probes do not add coverage; a single read
+covering a whole small file does start its download. A preview of any other kind of file, and
+the `xx-large` zoom, read the file. Turning previews off for the folder avoids those reads.
 
 ## 9. Baloo
 

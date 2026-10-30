@@ -457,16 +457,35 @@ of the transfer pool as a file being opened does, until two seconds after its la
 
 ### 5.2 The threshold
 
-The bytes returned to programs as ranges are counted per item; bytes fetched ahead into
-aligned blocks are not counted. The download guard likewise continues to admit each program's
-requested bytes before fetching, including cache hits ([download-guard.md](download-guard.md)).
-Once returned bytes reach `[transfers] download_after` (1 MiB by default; 0 downloads at the
-first read), or the whole of a smaller file, the file is
-downloaded whole, with no waiter: reads continue as checked ranges until the verified backing
-file lands. The whole download still fetches afresh and checks quickXorHash; the in-memory
-range cache is not a verified landing source. Unfinished staging is never a read origin.
-A program that looks only at the start can fetch up to one aligned block, without starting
-that whole download.
+Distinct bytes returned to programs as ranges are counted per item and opened content:
+the union of the returned ranges, clipped to the file's size. Repeated or overlapping
+reads add only their new coverage; bytes fetched ahead into aligned blocks add nothing.
+The download guard continues to admit each program's requested bytes before fetching,
+including repeats and cache hits ([download-guard.md](download-guard.md)).
+Once distinct coverage reaches `min(download_after, file size)` (`[transfers] download_after`
+is 1 MiB by default; 0 downloads at the first read), the file is downloaded whole, with no
+waiter: reads continue as checked ranges until the verified backing file lands. One 16 KiB
+read of a 10 KiB file covers that whole file and therefore starts its whole download.
+The whole download still fetches afresh and checks quickXorHash; the in-memory range cache
+is not a verified landing source. Unfinished staging is never a read origin.
+
+Coverage starts over when the threshold answers yes, after a successful whole download,
+when the item is forgotten, or when a read names another opened `ContentVersion`. Old and
+new handles alternating can therefore undercount, but never combine different contents.
+Coverage lives with the mount, shared by readers of the same item and content. It keeps
+sorted, coalesced intervals, at most 64 per item. Above that cap the closest separated pair
+is reduced to its longer interval (the later on a tie): the shorter is forgotten and the
+gap is never counted. This downward merge can delay a download, never start one early.
+The map keeps at most 4,096 items; inserting another forgets an arbitrary existing entry,
+which likewise only undercounts. Neither bound changes the guard's accounting.
+
+Measured on build `1983691`, 2026-10-30: Gwenview opened one image in a folder of 653
+cloud-only PNGs and probed each image it passed with `16384@0`, four `4096@0` reads,
+`33@0`, `4096@33`, 4 KiB at each 64 KiB offset to the end, then `16384@0` again. It did
+not read those files through. Counting repeats had made 19 small screenshots (18–56 KB)
+land on disk; one 20,187-byte file returned 40,700 bytes across eight reads in the trace.
+The regression's stated header/stride pattern covers only 16,384 distinct bytes of a
+20,187-byte file, or 98,304 of a 1,360,978-byte file, and starts neither whole download.
 
 ### 5.3 The whole download
 
