@@ -31,6 +31,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <utility>
 
 namespace fake
 {
@@ -1021,7 +1022,9 @@ struct FakeGuardApp {
                  bool blocked = false,
                  const QString &reason = QString(),
                  qulonglong files = 0,
-                 qulonglong bytes = 0)
+                 qulonglong bytes = 0,
+                 bool runsPrograms = false,
+                 qulonglong blockId = 1)
         : identity(identity)
         , name(name)
         , policy(policy)
@@ -1029,6 +1032,8 @@ struct FakeGuardApp {
         , reason(reason)
         , files(files)
         , bytes(bytes)
+        , runsPrograms(runsPrograms)
+        , blockId(blockId)
     {
     }
 
@@ -1039,13 +1044,15 @@ struct FakeGuardApp {
     QString reason;
     qulonglong files;
     qulonglong bytes;
+    bool runsPrograms;
+    qulonglong blockId;
 };
 Q_DECLARE_METATYPE(FakeGuardApp)
 
 inline QDBusArgument &operator<<(QDBusArgument &argument, const FakeGuardApp &app)
 {
     argument.beginStructure();
-    argument << app.identity << app.name << app.policy << app.blocked << app.reason << app.files << app.bytes;
+    argument << app.identity << app.name << app.policy << app.blocked << app.reason << app.files << app.bytes << app.runsPrograms << app.blockId;
     argument.endStructure();
     return argument;
 }
@@ -1053,7 +1060,7 @@ inline QDBusArgument &operator<<(QDBusArgument &argument, const FakeGuardApp &ap
 inline const QDBusArgument &operator>>(const QDBusArgument &argument, FakeGuardApp &app)
 {
     argument.beginStructure();
-    argument >> app.identity >> app.name >> app.policy >> app.blocked >> app.reason >> app.files >> app.bytes;
+    argument >> app.identity >> app.name >> app.policy >> app.blocked >> app.reason >> app.files >> app.bytes >> app.runsPrograms >> app.blockId;
     argument.endStructure();
     return argument;
 }
@@ -1094,17 +1101,17 @@ public:
     }
 
     /// DownloadsBlocked as the daemon sends it; the row is the test's to set.
-    void sendBlocked(const QString &identity, const QString &name, qulonglong files, qulonglong bytes, const QString &reason)
+    void sendBlocked(const QString &identity, const QString &name, qulonglong files, qulonglong bytes, const QString &reason, bool runsPrograms = false, qulonglong blockId = 1)
     {
         auto signal = QDBusMessage::createSignal(fake::ManagerPath, Interface, QStringLiteral("DownloadsBlocked"));
-        signal << identity << name << QVariant::fromValue(files) << QVariant::fromValue(bytes) << reason;
+        signal << identity << name << QVariant::fromValue(files) << QVariant::fromValue(bytes) << reason << runsPrograms << QVariant::fromValue(blockId);
         fake::bus().send(signal);
     }
 
     void sendAppsChanged() { fake::bus().send(QDBusMessage::createSignal(fake::ManagerPath, Interface, QStringLiteral("AppsChanged"))); }
 
     /// A row blocked as the daemon blocks it, and its DownloadsBlocked.
-    void block(const QString &identity, const QString &name, qulonglong files, qulonglong bytes, const QString &reason = QStringLiteral("bulk"))
+    void block(const QString &identity, const QString &name, qulonglong files, qulonglong bytes, const QString &reason = QStringLiteral("bulk"), bool runsPrograms = false)
     {
         FakeGuardApp *row = find(identity);
         if (!row) {
@@ -1115,7 +1122,9 @@ public:
         row->reason = reason;
         row->files = files;
         row->bytes = bytes;
-        sendBlocked(identity, name, files, bytes, reason);
+        row->runsPrograms = runsPrograms;
+        row->blockId = ++m_lastBlock;
+        sendBlocked(identity, name, files, bytes, reason, runsPrograms, row->blockId);
     }
 
     FakeGuardApp *find(const QString &identity)
@@ -1128,7 +1137,18 @@ public:
         return nullptr;
     }
 
+    qulonglong m_lastBlock = 1;
     QList<FakeGuardApp> apps;
+    /// Hold list replies to exercise a block cleared before its refresh answers.
+    bool delayLists = false;
+    QList<QDBusMessage> pendingLists;
+    void answerLists()
+    {
+        const auto pending = std::exchange(pendingLists, {});
+        for (const auto &message : pending) {
+            fake::bus().send(message.createReply({QVariant::fromValue(apps)}));
+        }
+    }
     QStringList calls;
     /// Every method but ListApps is refused Failed with these words, when not empty, as when
     /// config.toml cannot be written.
@@ -1138,9 +1158,14 @@ public:
     qulonglong freedBytes = 0;
 
 public Q_SLOTS:
-    QList<FakeGuardApp> ListApps()
+    QList<FakeGuardApp> ListApps(const QDBusMessage &message)
     {
         calls << QStringLiteral("ListApps");
+        if (delayLists) {
+            message.setDelayedReply(true);
+            pendingLists << message;
+            return {};
+        }
         return apps;
     }
     void AllowApp(const QString &identity, bool always, const QDBusMessage &message)
@@ -1152,6 +1177,7 @@ public Q_SLOTS:
         FakeGuardApp *row = rowFor(identity);
         row->policy = always ? QStringLiteral("allowed-always") : QStringLiteral("allowed-session");
         row->blocked = false;
+        row->blockId = 0;
         row->reason.clear();
         sendAppsChanged();
     }

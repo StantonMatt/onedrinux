@@ -1,8 +1,8 @@
 # The download guard
 
 A read of a file that is not on disk costs network traffic and may start a whole download.
-An indexer, thumbnail worker, backup or recursive search must not quietly copy a large drive
-onto a small disk. `download_guard/` owns admission for those reads, shared by every account
+An indexer, thumbnail worker, agent or script must not quietly copy a large drive
+onto a small disk. Ordinary desktop apps can open and copy files without bulk limits. `download_guard/` owns admission for those reads, shared by every account
 through the daemon's one `ConfigStore`. It writes no tree row, conflict, sync failure or file.
 Explicit `Files.Hydrate`, `Pin` and `FreeUp` bypass admission; hydrate and pin also protect
 the requested copies from app-download reclamation.
@@ -15,7 +15,11 @@ innermost `app-<desktop-id>@<instance>.service` or `app-<desktop-id>-<instance>.
 `app:<desktop-id>` (systemd hex escapes decoded). Without an app unit, the identity is
 `exe:<absolute executable path>`. Separate launches of the same program share the budget;
 children of a desktop app share its app unit. A terminal's children may therefore share one
-budget. No parent command line, environment, file names or arguments are published.
+budget. The T3 Code agents' `app-t3code.slice/app-t3code-agents.slice/` and per-agent
+slices are not app units; a final `t3code-claude-<instance>.scope` therefore stays an `exe:`
+identity. A Konsole child inherits `app:org.kde.konsole`; a Flatpak scope such as
+`app-flatpak-com.visualstudio.code-123.scope` becomes `app:flatpak-com.visualstudio.code`.
+No parent command line, environment, file names or arguments are published.
 
 A cache of at most 1024 PIDs keeps the normalized facts. Every use rechecks the process start
 tick, executable, cgroup and KIO role; PID reuse, exec and changes of scope do not keep an old
@@ -32,9 +36,9 @@ The default reader list is data (`download_guard/identity.rs`):
   `thumbnail.so` plugin argument. Cached previews need no content; missing or stale previews
   open it ([kio-behavior.md](../kio-behavior.md) B). `kioworker` with `file.so` remains eligible:
   it serves a deliberate copy out of the folder. Both roles may share a launcher's app unit;
-  a thumbnail refusal does not itself block its file worker. File workers remain
-  subject to bulk limits because automated KIO clients can use them too; deliberate bulk copies
-  can use an app allowance.
+  a thumbnail refusal does not itself block its file worker. Dolphin's `file.so` copies
+  are ordinary desktop reads; a file worker in a guarded host or without an app unit is
+  still subject to bulk limits.
 - `baloo_file`, `baloo_file_extractor`: KDE's file indexer and content extractor, in addition
   to the existing folder exclusion ([desktop.md](desktop.md) §9).
 - `tracker-extract`, `tracker-extract-3`, `tracker-miner-fs`, `tracker-miner-fs-3`,
@@ -46,9 +50,41 @@ also over session and persistent allowances. Removing a reader deliberately or s
 guard off permits it. The existing account `thumbnails` setting still defaults to on: it
 controls the small Graph thumbnails the daemon fills, independently of local content readers.
 
+## Programs that run programs
+
+`download_guard/identity.rs` also owns `PROGRAM_HOSTS`: terminals, IDEs and agent hosts.
+The match ignores case and one `flatpak-` or `gnome-` launcher prefix; a final `*` matches
+an id prefix (the built-in `jetbrains-*` and `com.jetbrains.*`). The default includes Konsole,
+Yakuake, Kate, Kitty, Alacritty, GNOME Terminal, Ptyxis, Ghostty, WezTerm, Foot, Tilix,
+Terminator, XTerm, VS Code and its variants, VSCodium, KDevelop, JetBrains IDEs, T3 Code,
+Claude, ChatGPT, Codex, Cursor and Zed. `[download_guard_limits] program_hosts` replaces the
+entire list, including the JetBrains patterns. For example:
+
+```toml
+[download_guard_limits]
+program_hosts = ["org.kde.konsole", "code", "org.example.AgentHost", "com.jetbrains.*"]
+```
+
+With enforcement on, admission follows this order:
+
+1. An unidentified caller is refused.
+2. A background reader is refused, regardless of its app unit or allowances.
+3. A session allowance admits the caller without counting, including over an always block.
+4. An explicit always block refuses it.
+5. An always allowance admits it without counting.
+6. An ordinary `app:` identity (Gwenview, Okular, LibreOffice or Dolphin file copies) is
+   admitted without counting. Every `exe:` identity and a matching program host is guarded.
+7. A guarded caller's existing bulk block refuses it; otherwise its fetch is admitted only
+   within the unchanged limits below. Opening alone consumes no budget.
+
+Ordinary apps create no automatic `ListApps` row. Explicit session/always rules still have
+rows, as do background refusals. Guarded callers retain counters and blocks; Status continues
+to show only callers waiting for the user. Download attribution remains independent of
+admission rows: `FreeUpAppDownloads` can still use an ordinary app's identity explicitly.
+
 ## Admission and accounting
 
-Defaults: **30 distinct files or 2 GiB in 600 seconds**, per app across all mounted accounts.
+Defaults: **30 distinct files or 2 GiB in 600 seconds**, per guarded identity across all mounted accounts.
 The first 30 files and bytes up to the byte limit are admitted; a request that would exceed
 either is refused before content is fetched. Opening alone consumes no budget. File identity
 includes the account store and Graph item, never a display name or path in a notification.
@@ -135,12 +171,12 @@ The checked-in contract is [org.konedrive.DownloadGuard.xml](../../dbus/org.kone
 | `Enabled`, `MaxFiles`, `MaxBytes`, `WindowSeconds` | read-only properties: `b`, `u`, `t`, `u`; ordinary `PropertiesChanged` |
 | `SetEnabled` | `(b enabled)`; writes top-level `download_guard` |
 | `SetThresholds` | `(u max_files, t max_bytes, u window_seconds)`; all positive, written together |
-| `ListApps` | `() → a(sssbstt)`; identity, display name, policy, blocked, reason, files, bytes |
+| `ListApps` | `() → a(sssbsttbt)`; identity, display name, policy, blocked, reason, files, bytes, runs_programs, block_id |
 | `AllowApp` | `(s identity, b always)`; false: until daemon restart, preserving any always rule; true: persistent |
 | `BlockApp` | `(s identity)`; persistent, replacing an allowance |
 | `FreeUpAppDownloads` | `(s identity) → (t freed_files, t freed_bytes)`; reclaim safe session-attributed copies |
 | `ResetApp` | `(s identity)`; removes persistent/session rules, counters and remembered block |
-| `DownloadsBlocked` | signal `(s identity, s display_name, t files, t bytes, s reason)` |
+| `DownloadsBlocked` | signal `(s identity, s display_name, t files, t bytes, s reason, b runs_programs, t block_id)` |
 | `AppsChanged` | signal `()`; read `ListApps` again |
 
 Policies: `automatic`, `allowed-session`, `allowed-always`, `blocked-always`. Reasons: empty,
@@ -149,9 +185,22 @@ Policies: `automatic`, `allowed-session`, `allowed-always`, `blocked-always`. Re
 is off. Properties say whether enforcement is enabled. Display names are untrusted text: a
 normalized desktop id or executable basename, not a resolved desktop entry or localized label.
 
-Subscribe before calling `ListApps`, reconcile by identity, and deduplicate notifications:
-the list is authoritative when the UI was absent or a signal receiver lagged. One block
-transition emits one `DownloadsBlocked`. Settings/method calls emit their property or app-list
+`runs_programs` is the daemon's classification, used by admission and by the app for
+notification wording and the session-only popup action. The app keeps no host list of its
+own. Always Allow for a host remains in the window. `block_id` is a monotonic refusal
+transition in this daemon lifetime (zero before a runtime refusal). A blocked list row
+with an id greater than the last announced id for that identity is announced once; a rapid
+reset/reblock with identical counters still has a new id. The last announced id is kept
+across allowances, resets and reconnects to the same daemon, until its owner changes.
+
+Subscribe before calling `ListApps` and reconcile by identity. Both `DownloadsBlocked` and
+`AppsChanged` only trigger a list refresh; notifications come from the authoritative list.
+A stale signal for a block already allowed or reset therefore announces nothing. A newly
+listed bulk block or unidentified refusal is announced once, including at connect/reconnect.
+While enforcement is disabled, blocks are neither announced nor marked announced. Re-enabling
+refreshes the list so still-active blocks are announced once. The notifier also consumes an
+already-loaded list when attached. Background and explicit user blocks remain silent.
+One block transition emits one `DownloadsBlocked`. Settings/method calls emit their property or app-list
 changes. No daemon notification UI is built here. The app must explain background refusals,
 unknown identities and approvals, refresh after daemon restarts, and retry a failed user open
 once approved. The daemon does not automatically reopen applications or retry denied reads.
@@ -170,11 +219,12 @@ from a file read request.
 
 The pure identity, window, policy, persistence and space tests need no mount. Kernel-request
 fixtures check refusals leave rows untouched, local reads bypass inspection, explicit hydrate
-and pin bypass reader policy, and low-space reads remain ranges. A private session-bus test
-checks method behavior and live XML signatures. Attribution tests cover the global bound,
+and pin bypass reader policy, and low-space reads remain ranges. A private session-bus tests
+check method behavior, live XML signatures and forwarding a real admission block. Qt tests
+exercise live/missed blocks and KNotification delivery to a fake desktop notification service. Attribution tests cover the global bound,
 failed/cancelled transfers, explicit keep invalidation, identity/account separation and stale
 snapshots. Mount fixtures check reclamation skip rules, exact-once counting and expected content. CLI tests parse every guard command.
-`tests/fuse-probe/download_guard.sh` checks the cutoff, background/KIO roles, normal opens,
+`tests/fuse-probe/download_guard.sh` checks the cutoff, background/KIO roles, normal opens, an ordinary app scope reading 100 files without counting,
 explicit actions, low-space ranges, a new byte block on already-open handles, and mmap on
 a real FUSE mount over fake Graph, only in the VM. Its reclamation scenario checks exact
 file/allocated-byte totals, pins, explicit hydrate, open readers/writers, retries after close,

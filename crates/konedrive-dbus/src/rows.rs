@@ -138,6 +138,10 @@ pub struct GuardApp {
     pub reason: String,
     pub files: u64,
     pub bytes: u64,
+    /// The daemon classifies this app as a host for other programs.
+    pub runs_programs: bool,
+    /// A refusal transition in this daemon lifetime; zero before a runtime refusal.
+    pub block_id: u64,
 }
 
 /// A version held by ChangeGuard, or an already-sent operation in its separate history.

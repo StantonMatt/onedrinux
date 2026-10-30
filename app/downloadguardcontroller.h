@@ -31,6 +31,10 @@ struct GuardApp {
     /// What it was let download in the window (at its refusal, once blocked).
     qulonglong files = 0;
     qulonglong bytes = 0;
+    /// The daemon classifies this app as a host for other programs.
+    bool runsPrograms = false;
+    /// The daemon's refusal transition, for announcing each listed block once.
+    qulonglong blockId = 0;
 };
 Q_DECLARE_METATYPE(GuardApp)
 
@@ -85,11 +89,8 @@ public:
     /// A name the daemon passed on, fit to show: no control or direction characters, one line,
     /// at most 80 characters.
     static QString cleanName(const QString &name);
-    /// A terminal or an IDE: what runs in it shares its app unit, and so its identity
-    /// (download-guard.md), and allowing it always allows every program run in it.
-    static bool runsPrograms(const QString &identity);
-    /// runsPrograms() for QML: such an app is always allowed only from Settings.
-    Q_INVOKABLE bool hostsPrograms(const QString &identity) const { return runsPrograms(identity); }
+    /// The daemon's classification, shared with admission and notification wording.
+    Q_INVOKABLE bool hostsPrograms(const QString &identity) const;
 
     bool serviceAvailable() const { return m_serviceAvailable; }
     bool enabled() const { return m_enabled; }
@@ -105,7 +106,7 @@ public:
     QString freeUpResult() const { return m_freeUpResult; }
     QString freeingUp() const { return m_freeingUp; }
 
-    /// The app as last listed, or as its last DownloadsBlocked said; nullptr when unknown.
+    /// The app as last listed; nullptr when unknown.
     const GuardApp *app(const QString &identity) const;
     /// The apps as last listed.
     QList<GuardApp> listed() const { return m_apps; }
@@ -148,18 +149,18 @@ Q_SIGNALS:
     void appsChanged();
     void actionErrorChanged();
     void freeUpChanged();
-    /// DownloadsBlocked: `app` with the name and icon the window gives it.
+    /// A newly listed block while enabled, with the name and icon the window gives it.
     void downloadsBlocked(const GuardApp &app);
 
 private Q_SLOTS:
     void onPropertiesChanged(const QString &interfaceName, const QVariantMap &changed, const QStringList &invalidated);
-    void onDownloadsBlocked(const QString &identity, const QString &displayName, qulonglong files, qulonglong bytes, const QString &reason);
     void onAppsChanged();
 
 private:
     void fetchAll();
     void listApps();
     void takeApps(const QDBusMessage &reply);
+    void announceBlock(const GuardApp &app);
     void applyProperties(const QVariantMap &properties);
     void setServiceAvailable(bool available);
     void setActionError(const QString &message);
@@ -182,9 +183,9 @@ private:
     qulonglong m_maxBytes = 2ULL << 30;
     uint m_windowSeconds = 600;
     QList<GuardApp> m_apps;
-    /// When each app's last DownloadsBlocked came, in order: the newest block first.
-    QHash<QString, quint64> m_blockedOrder;
-    quint64 m_lastBlock = 0;
+    /// Last refusal announced for each identity in this daemon lifetime. Keep it after
+    /// allowance/reset and reconnects to the same daemon to avoid repeating a popup.
+    QHash<QString, qulonglong> m_announcedBlocks;
     /// The last ListApps asked: an answer to an older one is dropped.
     quint64 m_listAsked = 0;
     QString m_actionError;

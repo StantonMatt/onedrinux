@@ -3,8 +3,8 @@
   <!-- Machine-wide, at /org/konedrive/Accounts. No file paths or command lines. -->
   <interface name="org.konedrive.DownloadGuard">
     <method name="ListApps">
-      <!-- identity, display name, policy, blocked, reason, admitted files, reserved bytes -->
-      <arg name="apps" type="a(sssbstt)" direction="out"/>
+      <!-- identity, display name, policy, blocked, reason, admitted files, reserved bytes, runs programs (daemon classification), block id -->
+      <arg name="apps" type="a(sssbsttbt)" direction="out"/>
     </method>
     <method name="AllowApp">
       <arg name="identity" type="s" direction="in"/>
@@ -40,6 +40,9 @@
       <arg name="files" type="t"/>
       <arg name="bytes" type="t"/>
       <arg name="reason" type="s"/>
+      <arg name="runs_programs" type="b"/>
+      <!-- Per-daemon refusal transition; matches ListApps for once-only announcements. -->
+      <arg name="block_id" type="t"/>
     </signal>
     <signal name="AppsChanged"/>
   </interface>

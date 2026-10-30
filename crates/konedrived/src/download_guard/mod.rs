@@ -1,6 +1,10 @@
 //! Machine-wide admission of remote content requested by programs. Explicit Files calls
 //! and pins never enter here. No tree, sync state, file paths or content are changed.
 
+// test: ordinary_desktop_apps_read_without_counters_blocks_or_signals
+// test: program_hosts_and_executables_keep_the_default_thirty_file_limit
+// test: a_block_is_forwarded_to_the_private_bus_with_daemon_classification
+
 mod downloads;
 mod identity;
 mod space;
@@ -10,7 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use identity::{Caller, BACKGROUND_READERS};
+use identity::{Caller, BACKGROUND_READERS, PROGRAM_HOSTS, runs_programs};
 pub(crate) use identity::Callers;
 use konedrive_dbus::rows::GuardApp;
 use serde::{Deserialize, Serialize};
@@ -19,7 +23,7 @@ pub(crate) use space::{DiskReservations, SpaceReservation};
 use tokio::sync::broadcast;
 
 /// `[download_guard_limits]`. Missing fields retain their defaults. Reader names replace
-/// the built-in list, so a deliberate config edit can override background classification.
+/// the built-in lists, so a deliberate config edit can override reader or host classification.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GuardConfig {
@@ -29,6 +33,7 @@ pub struct GuardConfig {
     pub allowed_apps: Vec<String>,
     pub blocked_apps: Vec<String>,
     pub background_readers: Vec<String>,
+    pub program_hosts: Vec<String>,
 }
 
 impl Default for GuardConfig {
@@ -40,6 +45,7 @@ impl Default for GuardConfig {
             allowed_apps: Vec::new(),
             blocked_apps: Vec::new(),
             background_readers: BACKGROUND_READERS.iter().map(|s| (*s).into()).collect(),
+            program_hosts: PROGRAM_HOSTS.iter().map(|s| (*s).into()).collect(),
         }
     }
 }
@@ -86,6 +92,7 @@ struct App {
     name: String,
     session_allowed: bool,
     blocked: Option<String>,
+    block_id: u64,
     window: Window,
 }
 
@@ -100,6 +107,7 @@ pub struct DownloadGuard {
     callers: Callers,
     inner: Mutex<Inner>,
     news: broadcast::Sender<GuardApp>,
+    next_block: AtomicU64,
     pub(crate) downloads: Arc<AppDownloads>,
     pub(crate) disks: std::sync::Arc<DiskReservations>,
 }
@@ -137,12 +145,17 @@ impl DownloadCharge {
         app.window.bytes.push_back((now, now, extra));
         if app.window.total > limits.max_bytes && app.blocked.as_deref() != Some("bulk") {
             app.blocked = Some("bulk".into());
+            app.block_id = self.guard.next_block.fetch_add(1, Ordering::Relaxed);
             let _ = self.guard.news.send(row(&self.identity, app, &limits));
         }
     }
 }
 fn inner_enabled(limits: &GuardConfig, app: &App, identity: &str) -> bool {
-    !app.session_allowed && !limits.allowed_apps.iter().any(|id| id == identity)
+    guarded(identity, limits) && !app.session_allowed && !limits.allowed_apps.iter().any(|id| id == identity)
+}
+
+fn guarded(identity: &str, limits: &GuardConfig) -> bool {
+    !identity.starts_with("app:") || runs_programs(identity, &limits.program_hosts)
 }
 
 impl Default for DownloadGuard {
@@ -158,6 +171,7 @@ impl DownloadGuard {
             callers: Callers::default(),
             inner: Mutex::new(Inner { enabled, limits, apps: BTreeMap::new() }),
             news: broadcast::channel(128).0,
+            next_block: AtomicU64::new(1),
             disks: Default::default(),
             downloads: Default::default(),
         }
@@ -165,6 +179,14 @@ impl DownloadGuard {
     pub(crate) fn configure(&self, enabled: bool, limits: GuardConfig) {
         let mut inner = crate::panic::lock(&self.inner);
         inner.enabled = enabled;
+        // A host removed from the configured list becomes an ordinary app immediately;
+        // its former automatic block and budget no longer have meaning.
+        inner.apps.retain(|id, app| {
+            if guarded(id, &limits) { return true; }
+            app.window = Window::default();
+            if app.blocked.as_deref() == Some("bulk") { app.blocked = None; }
+            app.session_allowed || app.blocked.is_some() || limits.allowed_apps.contains(id) || limits.blocked_apps.contains(id)
+        });
         inner.limits = limits;
     }
     pub fn enabled(&self) -> bool {
@@ -210,6 +232,15 @@ impl DownloadGuard {
             return Ok(());
         }
         let limits = inner.limits.clone();
+        // Ordinary desktop apps neither consume a budget nor create meaningless seen rows.
+        // Background readers still take the same refusal path, even in an ordinary app unit.
+        if who.reader != "unidentified" && !limits.background_readers.contains(&who.reader)
+            && !guarded(&who.identity, &limits)
+            && !limits.blocked_apps.contains(&who.identity) && !limits.allowed_apps.contains(&who.identity)
+            && !inner.apps.get(&who.identity).is_some_and(|app| app.session_allowed)
+        {
+            return Ok(());
+        }
         let app = inner.apps.entry(who.identity.clone()).or_default();
         app.name = who.display_name;
         let reason = if who.reader == "unidentified" {
@@ -222,6 +253,8 @@ impl DownloadGuard {
             Some("user")
         } else if limits.allowed_apps.contains(&who.identity) {
             return Ok(());
+        } else if !guarded(&who.identity, &limits) {
+            return Ok(());
         } else if app.blocked.as_deref() == Some("bulk") {
             return Err(fuser::Errno::EACCES);
         } else if let Some((file, bytes)) = fetch {
@@ -232,6 +265,7 @@ impl DownloadGuard {
         if let Some(reason) = reason {
             if app.blocked.as_deref() != Some("bulk") && app.blocked.as_deref() != Some(reason) {
                 app.blocked = Some(reason.into());
+                app.block_id = self.next_block.fetch_add(1, Ordering::Relaxed);
                 let _ = self.news.send(row(&who.identity, app, &limits));
             }
             return Err(fuser::Errno::EACCES);
@@ -290,6 +324,8 @@ fn row(identity: &str, app: &App, limits: &GuardConfig) -> GuardApp {
         reason: app.blocked.clone().unwrap_or_else(|| if policy == "blocked-always" { "user".into() } else { String::new() }),
         files: app.window.files.len() as u64,
         bytes: app.window.total,
+        runs_programs: runs_programs(identity, &limits.program_hosts),
+        block_id: app.block_id,
     }
 }
 

@@ -512,10 +512,17 @@ GuardNotifier::GuardNotifier(DownloadGuardController *guard, NotificationSink *s
     connect(guard, &DownloadGuardController::downloadsBlocked, this, &GuardNotifier::onBlocked);
     connect(guard, &DownloadGuardController::appsChanged, this, &GuardNotifier::reconcile);
     connect(guard, &DownloadGuardController::changed, this, &GuardNotifier::reconcile);
+    // A controller may already have its first list when its notifier is attached.
+    for (const GuardApp &app : guard->listed()) {
+        if (app.blocked) { onBlocked(app); }
+    }
 }
 
 void GuardNotifier::onBlocked(const GuardApp &app)
 {
+    if (!m_guard || !m_guard->enabled() || !app.blocked) {
+        return;
+    }
     if (app.reason == QLatin1String("unidentified")) {
         post(app.identity,
              {QStringLiteral("downloadsBlocked"),
@@ -535,7 +542,7 @@ void GuardNotifier::onBlocked(const GuardApp &app)
     const QString window = m_guard->windowText();
     // A terminal or an IDE downloads for what runs in it, an agent's grep as much as the user's:
     // the words say so, and the notification offers no Always Allow, which would exempt all of it.
-    const bool host = DownloadGuardController::runsPrograms(app.identity);
+    const bool host = app.runsPrograms;
     QString text;
     if (app.files >= m_guard->maxFiles()) {
         text = host ? i18nc("@info notification: the terminal or IDE, how many files, how long",

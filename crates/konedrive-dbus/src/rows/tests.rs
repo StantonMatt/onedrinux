@@ -29,6 +29,7 @@ fn a_row_is_read_from_the_structure_the_xml_gives() {
     assert!(xml("UploadQueue").contains(&array_of(KeptBack::SIGNATURE)), "{}", KeptBack::SIGNATURE);
     assert!(xml("Conflicts").contains(&array_of(Conflict::SIGNATURE)), "{}", Conflict::SIGNATURE);
     assert!(xml("ActivityLog").contains(&array_of(Event::SIGNATURE)), "{}", Event::SIGNATURE);
+    assert!(xml("DownloadGuard").contains(&array_of(GuardApp::SIGNATURE)), "{}", GuardApp::SIGNATURE);
     assert!(xml("Transfers").contains(&array_of(Transfer::SIGNATURE)), "{}", Transfer::SIGNATURE);
 
     let changes: Vec<Change> = read(&(vec![(7u64, "create", "/f/a", "retry", 1u64, 2u64, "network", 99i64)],));
@@ -46,6 +47,9 @@ fn a_row_is_read_from_the_structure_the_xml_gives() {
     assert_eq!(events, [Event { at: 5, kind: s("downloaded"), path: s("/f/a"), detail: s("") }]);
     assert_eq!(read::<Freed>(&(1u32, 2u64, 3u32)), Freed { files: 1, bytes: 2, pinned: 3 });
     assert_eq!(read::<FreedSpace>(&(1u32, 2u64)), FreedSpace { files: 1, bytes: 2 });
+
+    let apps: Vec<GuardApp> = read(&(vec![("app:code", "Code", "automatic", true, "bulk", 30u64, 100u64, true, 7u64)],));
+    assert_eq!(apps, [GuardApp { identity: s("app:code"), display_name: s("Code"), policy: s("automatic"), blocked: true, reason: s("bulk"), files: 30, bytes: 100, runs_programs: true, block_id: 7 }]);
 
     // A property comes as a value.
     let value = OwnedValue::try_from(Value::from(vec![("/f/a", 1u64, 2u64)])).unwrap();

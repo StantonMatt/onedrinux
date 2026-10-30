@@ -52,7 +52,7 @@ DownloadGuardController::DownloadGuardController(const QDBusConnection &bus, QOb
     , m_bus(bus)
     , m_watcher(new QDBusServiceWatcher(DaemonController::ServiceName, bus, QDBusServiceWatcher::WatchForOwnerChange, this))
 {
-    // The signals first: the list read after them is never older than what they say.
+    // Subscribe first: signals only wake a refresh of the authoritative list.
     m_bus.connect(DaemonController::ServiceName,
                   DaemonController::ObjectPath,
                   QStringLiteral("org.freedesktop.DBus.Properties"),
@@ -64,12 +64,12 @@ DownloadGuardController::DownloadGuardController(const QDBusConnection &bus, QOb
                   InterfaceName,
                   QStringLiteral("DownloadsBlocked"),
                   this,
-                  SLOT(onDownloadsBlocked(QString, QString, qulonglong, qulonglong, QString)));
+                  SLOT(onAppsChanged()));
     m_bus.connect(DaemonController::ServiceName, DaemonController::ObjectPath, InterfaceName, QStringLiteral("AppsChanged"), this, SLOT(onAppsChanged()));
     connect(m_watcher, &QDBusServiceWatcher::serviceOwnerChanged, this, [this](const QString &, const QString &, const QString &newOwner) {
-        if (newOwner.isEmpty()) {
-            setServiceAvailable(false);
-        } else {
+        m_announcedBlocks.clear();
+        setServiceAvailable(false);
+        if (!newOwner.isEmpty()) {
             fetchAll();
         }
     });
@@ -103,50 +103,10 @@ QString DownloadGuardController::cleanName(const QString &name)
     return clean;
 }
 
-bool DownloadGuardController::runsPrograms(const QString &identity)
+bool DownloadGuardController::hostsPrograms(const QString &identity) const
 {
-    // Terminals, IDEs and agent hosts, by the desktop id of their app unit (without a launcher's
-    // prefix: Flatpak's, GNOME's); JetBrains' IDEs by theirs.
-    static const QStringList hosts = {QStringLiteral("org.kde.konsole"),
-                                      QStringLiteral("org.kde.yakuake"),
-                                      QStringLiteral("org.kde.kate"),
-                                      QStringLiteral("kitty"),
-                                      QStringLiteral("alacritty"),
-                                      QStringLiteral("org.alacritty.alacritty"),
-                                      QStringLiteral("org.gnome.terminal"),
-                                      QStringLiteral("org.gnome.ptyxis"),
-                                      QStringLiteral("com.mitchellh.ghostty"),
-                                      QStringLiteral("org.wezfurlong.wezterm"),
-                                      QStringLiteral("foot"),
-                                      QStringLiteral("footclient"),
-                                      QStringLiteral("com.gexperts.tilix"),
-                                      QStringLiteral("terminator"),
-                                      QStringLiteral("xterm"),
-                                      QStringLiteral("debian-xterm"),
-                                      QStringLiteral("debian-uxterm"),
-                                      QStringLiteral("code"),
-                                      QStringLiteral("code-oss"),
-                                      QStringLiteral("code-insiders"),
-                                      QStringLiteral("codium"),
-                                      QStringLiteral("com.visualstudio.code"),
-                                      QStringLiteral("com.vscodium.codium"),
-                                      QStringLiteral("org.kde.kdevelop"),
-                                      QStringLiteral("com.t3tools.t3code"),
-                                      QStringLiteral("t3code"),
-                                      QStringLiteral("t3code-url-handler"),
-                                      QStringLiteral("t3-code-nightly"),
-                                      QStringLiteral("codex-shared-client")};
-    if (!identity.startsWith(QLatin1String("app:"))) {
-        return false;
-    }
-    QString id = identity.mid(4).toLower();
-    for (const QLatin1String launcher : {QLatin1String("flatpak-"), QLatin1String("gnome-")}) {
-        if (id.startsWith(launcher)) {
-            id = id.mid(launcher.size());
-            break;
-        }
-    }
-    return hosts.contains(id) || id.startsWith(QLatin1String("jetbrains-")) || id.startsWith(QLatin1String("com.jetbrains."));
+    const GuardApp *known = app(identity);
+    return known && known->runsPrograms;
 }
 
 GuardApp DownloadGuardController::resolve(const QString &identity, const QString &displayName)
@@ -223,10 +183,11 @@ void DownloadGuardController::listApps()
 
 void DownloadGuardController::takeApps(const QDBusMessage &reply)
 {
-    if (reply.signature() != QLatin1String("a(sssbstt)")) {
+    if (reply.signature() != QLatin1String("a(sssbsttbt)")) {
         return;
     }
     QList<GuardApp> apps;
+    QList<GuardApp> newlyBlocked;
     const QDBusArgument argument = reply.arguments().constFirst().value<QDBusArgument>();
     argument.beginArray();
     while (!argument.atEnd()) {
@@ -237,8 +198,10 @@ void DownloadGuardController::takeApps(const QDBusMessage &reply)
         QString reason;
         qulonglong files = 0;
         qulonglong bytes = 0;
+        bool runsPrograms = false;
+        qulonglong blockId = 0;
         argument.beginStructure();
-        argument >> identity >> displayName >> policy >> blocked >> reason >> files >> bytes;
+        argument >> identity >> displayName >> policy >> blocked >> reason >> files >> bytes >> runsPrograms >> blockId;
         argument.endStructure();
         GuardApp app = named(identity, displayName);
         app.policy = policy;
@@ -246,16 +209,30 @@ void DownloadGuardController::takeApps(const QDBusMessage &reply)
         app.reason = reason;
         app.files = files;
         app.bytes = bytes;
+        app.runsPrograms = runsPrograms;
+        app.blockId = blockId;
+        if (app.blocked && app.blockId > m_announcedBlocks.value(identity)) {
+            newlyBlocked << app;
+        }
         apps << app;
     }
     argument.endArray();
     m_apps = apps;
-    // A block that is over takes its place in the order with it.
-    for (auto it = m_blockedOrder.begin(); it != m_blockedOrder.end();) {
-        const GuardApp *known = app(it.key());
-        it = known && stateOf(*known) == QLatin1String("blocked") ? std::next(it) : m_blockedOrder.erase(it);
-    }
     Q_EMIT appsChanged();
+    // Only ListApps announces a block, including one missed before we connected.
+    // A stale signal cannot revive a block the list no longer shows.
+    for (const GuardApp &blocked : std::as_const(newlyBlocked)) {
+        announceBlock(blocked);
+    }
+}
+
+void DownloadGuardController::announceBlock(const GuardApp &app)
+{
+    if (!m_enabled || !app.blocked || app.blockId <= m_announcedBlocks.value(app.identity)) {
+        return;
+    }
+    m_announcedBlocks.insert(app.identity, app.blockId);
+    Q_EMIT downloadsBlocked(app);
 }
 
 void DownloadGuardController::onPropertiesChanged(const QString &interfaceName, const QVariantMap &changed, const QStringList &invalidated)
@@ -263,9 +240,13 @@ void DownloadGuardController::onPropertiesChanged(const QString &interfaceName, 
     if (interfaceName != InterfaceName) {
         return;
     }
+    const bool wasEnabled = m_enabled;
     applyProperties(changed);
     if (!invalidated.isEmpty()) {
         fetchAll();
+    } else if (!wasEnabled && m_enabled) {
+        // Blocks seen while disabled were not announced; ask which are still active.
+        listApps();
     }
 }
 
@@ -292,30 +273,6 @@ void DownloadGuardController::applyProperties(const QVariantMap &p)
     }
 }
 
-void DownloadGuardController::onDownloadsBlocked(const QString &identity, const QString &displayName, qulonglong files, qulonglong bytes, const QString &reason)
-{
-    GuardApp blocked = named(identity, displayName);
-    const GuardApp *known = app(identity);
-    blocked.policy = known ? known->policy : QStringLiteral("automatic");
-    blocked.blocked = true;
-    blocked.reason = reason;
-    blocked.files = files;
-    blocked.bytes = bytes;
-    m_blockedOrder.insert(identity, ++m_lastBlock);
-    // In the list at once, until it is read again: what reads it meanwhile sees the block.
-    const auto it = std::find_if(m_apps.begin(), m_apps.end(), [&identity](const GuardApp &app) {
-        return app.identity == identity;
-    });
-    if (it != m_apps.end()) {
-        *it = blocked;
-    } else {
-        m_apps << blocked;
-    }
-    Q_EMIT downloadsBlocked(blocked);
-    Q_EMIT appsChanged();
-    listApps();
-}
-
 void DownloadGuardController::onAppsChanged()
 {
     listApps();
@@ -331,7 +288,6 @@ void DownloadGuardController::setServiceAvailable(bool available)
         // Blocks, allowances for this session and what was counted go with the daemon.
         ++m_listAsked;
         m_apps.clear();
-        m_blockedOrder.clear();
         m_freeingUp.clear();
         Q_EMIT freeUpChanged();
         Q_EMIT appsChanged();
@@ -516,7 +472,7 @@ QString DownloadGuardController::windowText() const
 
 QString DownloadGuardController::description() const
 {
-    return i18n("Indexing and previews never download files. An app that downloads more than %1 or %2 within %3 is blocked until you allow it.",
+    return i18n("Indexing and previews never download files. An agent, script, terminal or IDE that downloads more than %1 or %2 within %3 is blocked until you allow it.",
                 filesText(m_maxFiles),
                 bytesText(m_maxBytes),
                 windowText());
@@ -607,10 +563,8 @@ QList<GuardApp> DownloadGuardController::ordered() const
         if (ra != rb) {
             return ra < rb;
         }
-        const quint64 na = m_blockedOrder.value(a.identity);
-        const quint64 nb = m_blockedOrder.value(b.identity);
-        if (na != nb) {
-            return na > nb;
+        if (a.blockId != b.blockId) {
+            return a.blockId > b.blockId;
         }
         return QString::localeAwareCompare(a.name, b.name) < 0;
     });

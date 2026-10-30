@@ -24,7 +24,7 @@ pub trait DownloadGuard {
     #[zbus(property)]
     fn window_seconds(&self) -> zbus::Result<u32>;
     #[zbus(signal)]
-    fn downloads_blocked(&self, identity: String, display_name: String, files: u64, bytes: u64, reason: String) -> zbus::Result<()>;
+    fn downloads_blocked(&self, identity: String, display_name: String, files: u64, bytes: u64, reason: String, runs_programs: bool, block_id: u64) -> zbus::Result<()>;
     #[zbus(signal)]
     fn apps_changed(&self) -> zbus::Result<()>;
 }

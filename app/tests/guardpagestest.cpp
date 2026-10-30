@@ -461,7 +461,9 @@ private Q_SLOTS:
     {
         const QString konsole = QStringLiteral("app:org.kde.konsole");
         FakeDaemon fake;
-        prepare(fake, {blocked(konsole, QStringLiteral("Konsole"))});
+        auto host = blocked(konsole, QStringLiteral("Konsole"));
+        host.runsPrograms = true;
+        prepare(fake, {host});
         QVERIFY(fake.start());
         App app;
         QVERIFY(app.load());

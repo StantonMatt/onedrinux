@@ -17,14 +17,15 @@ pub(crate) async fn guard(daemon: &Daemon, command: GuardCmd) -> anyhow::Result<
         GuardCmd::Apps => {
             for app in guard.list_apps().await? {
                 println!(
-                    "{}\t{}\t{}\t{}\t{} files\t{} bytes\t{}",
+                    "{}\t{}\t{}\t{}\t{} files\t{} bytes\t{}\t{}",
                     app.identity,
                     app.display_name,
                     app.policy,
                     if app.blocked { "blocked" } else { "seen" },
                     app.files,
                     app.bytes,
-                    app.reason
+                    app.reason,
+                    if app.runs_programs { "program-host" } else if app.identity.starts_with("app:") { "ordinary-app" } else if app.identity == "unidentified" { "unidentified" } else { "executable" }
                 );
             }
         }

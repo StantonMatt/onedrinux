@@ -597,7 +597,10 @@ back at load (§4.2), and a migrated account's store, which is made anew (§9).
 
 Top-level `download_guard` defaults to true. `[download_guard_limits]` holds `max_files`
 (default 30), `max_bytes` (2147483648), `window_seconds` (600), `allowed_apps`, `blocked_apps`,
-and `background_readers` (the built-in reader list when absent; a supplied list replaces it).
+`background_readers` and `program_hosts` (each uses its built-in list when absent; a supplied
+list replaces it). The host list identifies terminals, IDEs and agent hosts; `exe:` callers
+are also guarded. Other desktop app units have no bulk limits, except explicit blocks;
+background-reader refusals retain their precedence.
 Always rules hold for every account. `ConfigStore` owns their atomic writes and the one shared
 guard, which each mount receives. Session approvals and counters live only in that guard.
 See [download-guard.md](download-guard.md) for policy precedence and the bus contract.

@@ -854,6 +854,21 @@ answer a user already knows, it is followed.
   transitions announce once; a whole download's final state and cache invalidation use
   one notification after its running state clears.
 
+### 6.13 Guard agents and scripts without obstructing ordinary desktop apps
+
+- **Decision.** Bulk download limits apply to executable identities without an app unit and
+  to app units of terminals, IDEs and agent hosts. The daemon owns the configurable host list
+  and supplies its classification to clients. Ordinary desktop apps read without counting;
+  background-reader refusals and explicit blocks still win. Session and always allowances
+  remain available for guarded callers ([download-guard.md](download-guard.md)).
+- **Why.** Gwenview's preview strip reached the 30-file limit while browsing screenshots,
+  breaking previews and subsequent opens. The guard exists to stop runaway agents and scripts
+  from filling the disk, and ordinary browsing and file copies must stay usable.
+- **Cost.** A program running inside an ordinary app's unit inherits that exemption; this
+  accidental-download guard is not a security boundary. A newly configured host takes the
+  same conservative limits as executable callers. Ordinary apps have no automatic admission
+  rows, though download attribution and explicit rules still work.
+
 ## 7. Testing
 
 ### 7.1 Every part is tested without a mount

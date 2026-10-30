@@ -65,8 +65,8 @@ fn open_does_not_charge_and_blocks_are_sticky_and_reported_once() {
 fn apps_share_no_budget_and_background_is_never_allowed() {
     let guard = DownloadGuard::new(true, limits());
     let now = Instant::now();
-    guard.decide(who("app:terminal", "rg"), Some(("a", 20)), now).unwrap();
-    guard.decide(who("app:editor", "editor"), Some(("b", 20)), now).unwrap();
+    guard.decide(who("app:org.kde.konsole", "rg"), Some(("a", 20)), now).unwrap();
+    guard.decide(who("app:code", "editor"), Some(("b", 20)), now).unwrap();
     guard.allow_session("app:dolphin");
     assert_eq!(guard.decide(who("app:dolphin", "kio-thumbnail"), Some(("c", 1)), now), Err(fuser::Errno::EACCES));
     // file.so is eligible even when the thumbnail worker shares the launcher unit.
@@ -151,4 +151,106 @@ fn a_session_approval_temporarily_overrides_an_always_block() {
     assert_eq!(guard.apps()[0].policy, "allowed-session");
     guard.reset(&app.identity);
     assert_eq!(guard.decide(app, None, Instant::now()), Err(fuser::Errno::EACCES));
+}
+
+#[test]
+fn ordinary_desktop_apps_read_without_counters_blocks_or_signals() {
+    let guard = Arc::new(DownloadGuard::default());
+    let mut news = guard.subscribe();
+    for id in ["app:org.kde.gwenview", "app:org.kde.okular", "app:libreoffice-writer", "app:org.kde.dolphin"] {
+        let app = who(id, "ordinary-reader");
+        for n in 0..100 {
+            guard.decide(app.clone(), Some((&format!("f{n}"), 1 << 30)), Instant::now()).unwrap();
+        }
+        // Retry traffic from whole downloads must not introduce counting either.
+        let charge = DownloadCharge { guard: Arc::clone(&guard), identity: id.into(), included: 1, received: AtomicU64::new(0) };
+        charge.received(10 << 30);
+    }
+    assert!(guard.apps().is_empty());
+    assert!(news.try_recv().is_err());
+}
+
+#[test]
+fn program_hosts_and_executables_keep_the_default_thirty_file_limit() {
+    for id in ["app:org.kde.konsole", "app:code", "app:cursor", "app:com.t3tools.T3Code", "exe:/opt/t3code/claude", "exe:/usr/bin/rg"] {
+        let guard = DownloadGuard::default();
+        let mut news = guard.subscribe();
+        let app = who(id, "reader");
+        for n in 0..30 {
+            guard.decide(app.clone(), Some((&format!("f{n}"), 1)), Instant::now()).unwrap();
+        }
+        assert_eq!(guard.decide(app.clone(), Some(("f31", 1)), Instant::now()), Err(fuser::Errno::EACCES), "{id}");
+        let block = news.try_recv().unwrap();
+        assert_eq!((block.files, block.bytes, block.reason.as_str()), (30, 30, "bulk"));
+        assert_eq!(block.runs_programs, id.starts_with("app:"));
+        assert!(news.try_recv().is_err());
+        guard.allow_session(id);
+        guard.decide(app, Some(("allowed", u64::MAX)), Instant::now()).unwrap();
+        assert_eq!(guard.apps()[0].files, 30, "an allowance bypasses counting");
+    }
+}
+
+#[test]
+fn explicit_blocks_and_background_refusals_win_for_ordinary_apps() {
+    let guard = DownloadGuard::new(true, GuardConfig { blocked_apps: vec!["app:org.kde.gwenview".into()], ..GuardConfig::default() });
+    assert_eq!(guard.decide(who("app:org.kde.gwenview", "gwenview"), None, Instant::now()), Err(fuser::Errno::EACCES));
+    assert_eq!(guard.apps()[0].reason, "user");
+    for reader in BACKGROUND_READERS {
+        let app = who("app:org.kde.okular", reader);
+        guard.allow_session(&app.identity);
+        assert_eq!(guard.decide(app, Some(("remote", 1)), Instant::now()), Err(fuser::Errno::EACCES), "{reader}");
+    }
+}
+
+#[test]
+fn configured_program_hosts_replace_defaults_including_jetbrains_patterns() {
+    let config: GuardConfig = toml::from_str("program_hosts = ['custom-host', 'example.*']").unwrap();
+    assert_eq!(config.max_files, 30);
+    let guard = DownloadGuard::new(true, config.clone());
+    for id in ["app:code", "app:org.kde.konsole", "app:jetbrains-idea"] {
+        guard.decide(who(id, "reader"), Some(("large", u64::MAX)), Instant::now()).unwrap();
+    }
+    assert!(guard.apps().is_empty());
+    for id in ["app:custom-host", "app:gnome-example.IDE", "exe:/bin/script"] {
+        assert_eq!(guard.decide(who(id, "reader"), Some(("large", u64::MAX)), Instant::now()), Err(fuser::Errno::EACCES));
+    }
+    let encoded = toml::to_string(&config).unwrap();
+    assert_eq!(toml::from_str::<GuardConfig>(&encoded).unwrap(), config);
+}
+
+#[test]
+fn removing_a_host_discards_its_automatic_block_and_counters() {
+    let guard = DownloadGuard::default();
+    guard.decide(who("app:code", "code"), Some(("large", u64::MAX)), Instant::now()).unwrap_err();
+    guard.configure(true, GuardConfig { program_hosts: vec![], ..GuardConfig::default() });
+    assert!(guard.apps().is_empty());
+    guard.decide(who("app:code", "code"), Some(("large", u64::MAX)), Instant::now()).unwrap();
+}
+
+/// Exercise the production broadcaster and D-Bus forwarder, not just their declared XML.
+#[tokio::test]
+async fn a_block_is_forwarded_to_the_private_bus_with_daemon_classification() {
+    use futures_util::StreamExt;
+    use konedrive_dbus::{download_guard::DownloadGuardProxy, testing::TestBus, SERVICE_NAME};
+    let dir = tempfile::tempdir().unwrap();
+    let paths = crate::config::Paths::in_dir(dir.path());
+    let config = crate::config::ConfigStore::open(&paths, async { false }).await;
+    let bus = TestBus::start();
+    let server = bus.connect().await;
+    server.request_name(SERVICE_NAME).await.unwrap();
+    crate::dbus::download_guard::start_signals(&server, &config);
+    let client = bus.connect().await;
+    let proxy = DownloadGuardProxy::builder(&client).cache_properties(zbus::proxy::CacheProperties::No).build().await.unwrap();
+    let mut blocks = proxy.receive_downloads_blocked().await.unwrap();
+    let mut changes = proxy.receive_apps_changed().await.unwrap();
+    let app = who("app:code", "Code");
+    config.guard().decide(app, Some(("large", u64::MAX)), Instant::now()).unwrap_err();
+    let signal = tokio::time::timeout(Duration::from_secs(2), blocks.next()).await.unwrap().unwrap();
+    let args = signal.args().unwrap();
+    assert_eq!((args.identity().as_str(), args.display_name().as_str(), args.reason().as_str()), ("app:code", "Code", "bulk"));
+    assert!(*args.runs_programs());
+    assert_eq!(*args.block_id(), config.guard().apps()[0].block_id);
+    assert!(*args.block_id() > 0);
+    assert_eq!((*args.files(), *args.bytes()), (0, 0));
+    tokio::time::timeout(Duration::from_secs(2), changes.next()).await.unwrap().unwrap();
 }

@@ -210,13 +210,13 @@ private Q_SLOTS:
         start();
         const QLocale locale;
         QCOMPARE(m_guard->description(),
-                 QStringLiteral("Indexing and previews never download files. An app that downloads more than 30 files or ") + locale.formattedDataSize(qint64(2 * GiB), 0)
+                 QStringLiteral("Indexing and previews never download files. An agent, script, terminal or IDE that downloads more than 30 files or ") + locale.formattedDataSize(qint64(2 * GiB), 0)
                      + QStringLiteral(" within 10 minutes is blocked until you allow it."));
         QSignalSpy changed(m_guard.get(), &DownloadGuardController::changed);
         m_daemon->guard->set({{QStringLiteral("MaxFiles"), 1u}, {QStringLiteral("MaxBytes"), QVariant::fromValue<qulonglong>(1536ULL << 20)}, {QStringLiteral("WindowSeconds"), 90u}});
         QTRY_COMPARE(m_guard->windowSeconds(), 90u);
         QCOMPARE(m_guard->description(),
-                 QStringLiteral("Indexing and previews never download files. An app that downloads more than 1 file or ") + locale.formattedDataSize(1536LL << 20)
+                 QStringLiteral("Indexing and previews never download files. An agent, script, terminal or IDE that downloads more than 1 file or ") + locale.formattedDataSize(1536LL << 20)
                      + QStringLiteral(" within 90 seconds is blocked until you allow it."));
         // The dialog's whole numbers.
         QCOMPARE(m_guard->maxGiB(), 2u);
@@ -354,31 +354,211 @@ private Q_SLOTS:
                      .arg(QLocale().formattedDataSize(qint64(2 * GiB), 0)));
     }
 
-    /// Terminals and IDEs by their desktop ids, as a Flatpak's too; an executable never is one,
-    /// since what runs without an app unit is named for itself.
+    /// The daemon's classification is authoritative, including configured hosts the app
+    /// has never heard of and a familiar host removed by the user's configuration.
     void whichAppsRunPrograms()
     {
-        for (const char *identity : {"app:org.kde.konsole", "app:org.kde.yakuake", "app:kitty", "app:Alacritty", "app:org.gnome.Ptyxis", "app:debian-xterm", "app:code",
-                                     "app:flatpak-com.visualstudio.code", "app:com.t3tools.T3Code", "app:t3code", "app:jetbrains-pycharm-ce", "app:org.kde.kate"}) {
-            QVERIFY2(DownloadGuardController::runsPrograms(QString::fromLatin1(identity)), identity);
-        }
-        for (const char *identity : {"app:org.kde.gwenview", "app:org.example.Copier", "app:org.kde.konsolekalendar", "exe:/usr/bin/konsole", "unidentified"}) {
-            QVERIFY2(!DownloadGuardController::runsPrograms(QString::fromLatin1(identity)), identity);
-        }
+        const QString custom = QStringLiteral("app:org.example.AgentHost");
+        const QString konsole = QStringLiteral("app:org.kde.konsole");
+        start({{custom, QStringLiteral("Custom host"), QStringLiteral("automatic"), true, QStringLiteral("bulk"), 30, 0, true},
+               {konsole, QStringLiteral("Konsole"), QStringLiteral("allowed-always"), false, QString(), 0, 0, false}});
+        QVERIFY(m_guard->hostsPrograms(custom));
+        QVERIFY(!m_guard->hostsPrograms(konsole));
+        QVERIFY(!m_guard->hostsPrograms(QStringLiteral("app:unknown")));
+        QCOMPARE(buttons(shownFor(custom)), QStringList(QStringLiteral("Allow for This Session")));
     }
 
-    /// Agent hosts and more terminals and IDEs run programs too, as does a terminal GNOME
-    /// launched, whose app unit carries GNOME's prefix.
+    /// A block signal refreshes the list, including the daemon's classification.
     void agentHostsAndLaunchedTerminalsRunPrograms()
     {
-        for (const char *identity : {"app:codex-shared-client", "app:t3code-url-handler", "app:org.kde.kdevelop", "app:com.mitchellh.ghostty", "app:org.wezfurlong.wezterm",
-                                     "app:foot", "app:com.gexperts.Tilix", "app:terminator", "app:code-insiders", "app:gnome-org.gnome.Ptyxis",
-                                     "app:gnome-com.mitchellh.ghostty"}) {
-            QVERIFY2(DownloadGuardController::runsPrograms(QString::fromLatin1(identity)), identity);
+        start();
+        const QString custom = QStringLiteral("app:gnome-org.example.AgentHost");
+        m_daemon->guard->block(custom, QStringLiteral("Agent host"), 30, 0, QStringLiteral("bulk"), true);
+        QTRY_VERIFY(m_guard->hostsPrograms(custom));
+        QCOMPARE(buttons(shownFor(custom)), QStringList(QStringLiteral("Allow for This Session")));
+        m_daemon->guard->block(QStringLiteral("app:code"), QStringLiteral("Code"), 30, 0, QStringLiteral("bulk"), false);
+        QTRY_COMPARE(m_sink.sent.size(), 2);
+        QVERIFY(!m_guard->hostsPrograms(QStringLiteral("app:code")));
+        QCOMPARE(buttons(shownFor(QStringLiteral("app:code"))).size(), 2);
+    }
+
+    void aBlockMissedBeforeConnectingIsAnnouncedOnce()
+    {
+        start({{Rg, QStringLiteral("rg"), QStringLiteral("automatic"), true, QStringLiteral("bulk"), 30, 0}});
+        QTRY_COMPARE(m_sink.sent.size(), 1);
+        m_daemon->guard->sendAppsChanged();
+        QTRY_VERIFY(m_daemon->guard->calls.count(QStringLiteral("ListApps")) >= 2);
+        QTest::qWait(50);
+        QCOMPARE(m_sink.sent.size(), 1);
+        m_daemon->stop();
+        QTRY_VERIFY(!m_guard->serviceAvailable());
+        QVERIFY(m_daemon->start());
+        QTRY_COMPARE(m_sink.sent.size(), 2);
+        m_daemon->guard->sendAppsChanged();
+        QTRY_VERIFY(m_daemon->guard->calls.count(QStringLiteral("ListApps")) >= 4);
+        QTest::qWait(50);
+        QCOMPARE(m_sink.sent.size(), 2);
+    }
+
+    void aMissedSignalIsRecoveredFromTheAuthoritativeList()
+    {
+        start();
+        m_daemon->guard->apps = {{Rg, QStringLiteral("rg"), QStringLiteral("automatic"), true, QStringLiteral("bulk"), 30, 0}};
+        m_daemon->guard->sendAppsChanged(); // As when the daemon's broadcast receiver lagged.
+        QTRY_COMPARE(m_sink.sent.size(), 1);
+        m_daemon->guard->sendAppsChanged();
+        QTRY_VERIFY(m_daemon->guard->calls.count(QStringLiteral("ListApps")) >= 3);
+        QTest::qWait(50);
+        QCOMPARE(m_sink.sent.size(), 1);
+        m_guard->allowApp(Rg, false);
+        QTRY_VERIFY(m_sink.shown.isEmpty());
+        m_daemon->guard->find(Rg)->policy = QStringLiteral("automatic");
+        m_daemon->guard->block(Rg, QStringLiteral("rg"), 30, 0);
+        QTRY_COMPARE(m_sink.sent.size(), 2);
+        m_daemon->guard->sendAppsChanged();
+        QTest::qWait(50);
+        QCOMPARE(m_sink.sent.size(), 2);
+    }
+
+    void aRecoveredBlockAndItsLateSignalNotifyOnlyOnce()
+    {
+        start({{Rg, QStringLiteral("rg"), QStringLiteral("automatic"), true, QStringLiteral("bulk"), 30, 0, false, 7}});
+        QTRY_COMPARE(m_sink.sent.size(), 1);
+        m_daemon->guard->sendBlocked(Rg, QStringLiteral("rg"), 30, 0, QStringLiteral("bulk"), false, 7);
+        QTest::qWait(100);
+        QCOMPARE(m_sink.sent.size(), 1);
+        // A new transition still notifies even when a rapid reset/reblock had no list
+        // between them, and its counters happen to be identical.
+        m_daemon->guard->find(Rg)->blockId = 8;
+        m_daemon->guard->sendBlocked(Rg, QStringLiteral("rg"), 30, 0, QStringLiteral("bulk"), false, 8);
+        QTRY_COMPARE(m_sink.sent.size(), 2);
+        m_daemon->guard->sendBlocked(Rg, QStringLiteral("rg"), 30, 0, QStringLiteral("bulk"), false, 7);
+        QTest::qWait(100);
+        QCOMPARE(m_sink.sent.size(), 2);
+        QCOMPARE(m_guard->app(Rg)->blockId, 8ULL);
+        m_guard->allowApp(Rg, false);
+        QTRY_VERIFY(m_sink.shown.isEmpty());
+        m_daemon->guard->sendBlocked(Rg, QStringLiteral("rg"), 30, 0, QStringLiteral("bulk"), false, 8);
+        QTest::qWait(100);
+        QCOMPARE(m_sink.sent.size(), 2);
+        QVERIFY(!m_guard->app(Rg)->blocked);
+    }
+
+    void aSignalClearedBeforeTheListAnswersDoesNotNotify_data()
+    {
+        QTest::addColumn<bool>("reset");
+        QTest::newRow("allow") << false;
+        QTest::newRow("reset") << true;
+    }
+
+    void aSignalClearedBeforeTheListAnswersDoesNotNotify()
+    {
+        QFETCH(bool, reset);
+        start();
+        auto *daemon = m_daemon->guard;
+        daemon->delayLists = true;
+        daemon->block(Rg, QStringLiteral("rg"), 30, 0);
+        const auto blocked = *daemon->find(Rg);
+        QTRY_COMPARE(daemon->pendingLists.size(), 1);
+        QCOMPARE(m_sink.sent.size(), 0);
+        if (reset) {
+            m_guard->resetApp(Rg);
+        } else {
+            m_guard->allowApp(Rg, false);
         }
-        for (const char *identity : {"app:gnome-org.gnome.Nautilus", "app:gnome-org.kde.gwenview"}) {
-            QVERIFY2(!DownloadGuardController::runsPrograms(QString::fromLatin1(identity)), identity);
+        QTRY_COMPARE(daemon->pendingLists.size(), 2);
+        daemon->delayLists = false;
+        daemon->answerLists();
+        QTRY_VERIFY(reset ? !m_guard->app(Rg) : m_guard->app(Rg) && !m_guard->app(Rg)->blocked);
+        QCOMPARE(m_sink.sent.size(), 0);
+        // The first signal may instead be queued until after the cleared list answered.
+        const auto listed = daemon->calls.count(QStringLiteral("ListApps"));
+        daemon->sendBlocked(Rg, blocked.name, blocked.files, blocked.bytes, blocked.reason, blocked.runsPrograms, blocked.blockId);
+        QTRY_VERIFY(daemon->calls.count(QStringLiteral("ListApps")) > listed);
+        QTest::qWait(50);
+        QCOMPARE(m_sink.sent.size(), 0);
+        QVERIFY(reset ? !m_guard->app(Rg) : !m_guard->app(Rg)->blocked);
+    }
+
+    void aSignalWaitsForTheListAndAnnouncesOnlyOnce()
+    {
+        start();
+        auto *daemon = m_daemon->guard;
+        daemon->delayLists = true;
+        daemon->block(Rg, QStringLiteral("rg"), 30, 0);
+        QTRY_COMPARE(daemon->pendingLists.size(), 1);
+        QCOMPARE(m_sink.sent.size(), 0);
+        daemon->delayLists = false;
+        daemon->answerLists();
+        QTRY_COMPARE(m_sink.sent.size(), 1);
+        daemon->sendAppsChanged();
+        QTest::qWait(50);
+        QCOMPARE(m_sink.sent.size(), 1);
+    }
+
+    void aBlockWhileDisabledNotifiesOnceWhenEnabled_data()
+    {
+        QTest::addColumn<bool>("signal");
+        QTest::newRow("signal") << true;
+        QTest::newRow("missed-signal") << false;
+    }
+
+    void aBlockWhileDisabledNotifiesOnceWhenEnabled()
+    {
+        QFETCH(bool, signal);
+        start();
+        auto *daemon = m_daemon->guard;
+        daemon->set({{QStringLiteral("Enabled"), false}});
+        QTRY_VERIFY(!m_guard->enabled());
+        if (signal) {
+            daemon->block(Rg, QStringLiteral("rg"), 30, 0);
+        } else {
+            daemon->apps = {{Rg, QStringLiteral("rg"), QStringLiteral("automatic"), true, QStringLiteral("bulk"), 30, 0}};
+            daemon->sendAppsChanged();
         }
+        QTRY_VERIFY(m_guard->app(Rg) && m_guard->app(Rg)->blocked);
+        QCOMPARE(m_sink.sent.size(), 0);
+        // Only PropertiesChanged, with no AppsChanged, accompanies re-enabling.
+        daemon->set({{QStringLiteral("Enabled"), true}});
+        QTRY_COMPARE(m_sink.sent.size(), 1);
+        daemon->sendAppsChanged();
+        QTest::qWait(50);
+        QCOMPARE(m_sink.sent.size(), 1);
+        daemon->set({{QStringLiteral("Enabled"), false}});
+        QTRY_VERIFY(!m_guard->enabled());
+        daemon->set({{QStringLiteral("Enabled"), true}});
+        QTest::qWait(50);
+        QCOMPARE(m_sink.sent.size(), 1);
+    }
+
+    void reconnectingToTheSameDaemonDoesNotRepeatABlock()
+    {
+        start({{Rg, QStringLiteral("rg"), QStringLiteral("automatic"), true, QStringLiteral("bulk"), 30, 0}});
+        QTRY_COMPARE(m_sink.sent.size(), 1);
+        auto bus = fake::bus();
+        auto invalidated = QDBusMessage::createSignal(fake::ManagerPath, QStringLiteral("org.freedesktop.DBus.Properties"), QStringLiteral("PropertiesChanged"));
+        invalidated << FakeDownloadGuard::Interface << QVariantMap() << QStringList{QStringLiteral("Enabled")};
+        // A failed GetAll, followed by recovery, without changing the daemon owner.
+        bus.unregisterObject(fake::ManagerPath);
+        QVERIFY(bus.send(invalidated));
+        QTRY_VERIFY(!m_guard->serviceAvailable());
+        QVERIFY(bus.registerObject(fake::ManagerPath, m_daemon.get(), QDBusConnection::ExportAdaptors));
+        QVERIFY(bus.send(invalidated));
+        QTRY_VERIFY(m_guard->serviceAvailable());
+        QTRY_VERIFY(m_guard->app(Rg) && m_guard->app(Rg)->blocked);
+        QCOMPARE(m_sink.sent.size(), 1);
+    }
+
+    void aNotifierAttachedAfterTheListStillAnnouncesTheBlock()
+    {
+        start({{Rg, QStringLiteral("rg"), QStringLiteral("automatic"), true, QStringLiteral("bulk"), 30, 0}});
+        m_notifier.reset();
+        m_sink = RecordingSink();
+        m_notifier = std::make_unique<GuardNotifier>(m_guard.get(), &m_sink);
+        QCOMPARE(m_sink.sent.size(), 1);
+        m_daemon->guard->sendAppsChanged();
+        QTest::qWait(50);
+        QCOMPARE(m_sink.sent.size(), 1);
     }
 
     /// A terminal downloads for whatever runs in it, an agent's grep as much as the user's: the
@@ -388,7 +568,7 @@ private Q_SLOTS:
     {
         start();
         const QString konsole = QStringLiteral("app:org.kde.konsole");
-        m_daemon->guard->block(konsole, QStringLiteral("Konsole"), 31, 412ULL << 20);
+        m_daemon->guard->block(konsole, QStringLiteral("Konsole"), 31, 412ULL << 20, QStringLiteral("bulk"), true);
         QTRY_COMPARE(m_sink.sent.size(), 1);
         Notice notice = m_sink.sent.constLast();
         QCOMPARE(notice.title, QStringLiteral("Too many downloads in Konsole"));
@@ -399,7 +579,7 @@ private Q_SLOTS:
         QTRY_VERIFY(m_daemon->guard->calls.contains(QStringLiteral("AllowApp:%1:session").arg(konsole)));
 
         const QString code = QStringLiteral("app:code");
-        m_daemon->guard->block(code, QStringLiteral("<i>Code</i>"), 7, 2 * GiB - 1);
+        m_daemon->guard->block(code, QStringLiteral("<i>Code</i>"), 7, 2 * GiB - 1, QStringLiteral("bulk"), true);
         QTRY_COMPARE(m_sink.sent.size(), 2);
         notice = m_sink.sent.constLast();
         QCOMPARE(notice.text,
@@ -408,7 +588,7 @@ private Q_SLOTS:
                      .arg(QLocale().formattedDataSize(qint64(2 * GiB - 1))));
         QCOMPARE(buttons(notice), QStringList(QStringLiteral("Allow for This Session")));
 
-        m_daemon->guard->block(QStringLiteral("app:kitty"), QStringLiteral("kitty"), 0, 0);
+        m_daemon->guard->block(QStringLiteral("app:kitty"), QStringLiteral("kitty"), 0, 0, QStringLiteral("bulk"), true);
         QTRY_COMPARE(m_sink.sent.size(), 3);
         QCOMPARE(m_sink.sent.constLast().text,
                  QStringLiteral("A program in kitty tried to download a file larger than %1 from OneDrive. To save space, downloads in kitty are blocked until you allow them.")

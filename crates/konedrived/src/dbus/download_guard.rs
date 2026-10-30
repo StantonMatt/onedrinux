@@ -101,6 +101,8 @@ impl DownloadGuard {
         files: u64,
         bytes: u64,
         reason: &str,
+        runs_programs: bool,
+        block_id: u64,
     ) -> zbus::Result<()>;
     #[zbus(signal)]
     pub(crate) async fn apps_changed(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
@@ -118,12 +120,17 @@ pub(crate) fn start_signals(connection: &Connection, config: &ConfigStore) {
         loop {
             match news.recv().await {
                 Ok(app) => {
-                    let _ = DownloadGuard::downloads_blocked(&emitter, &app.identity, &app.display_name, app.files, app.bytes, &app.reason)
-                        .await;
-                    let _ = DownloadGuard::apps_changed(&emitter).await;
+                    if let Err(error) = DownloadGuard::downloads_blocked(&emitter, &app.identity, &app.display_name, app.files, app.bytes, &app.reason, app.runs_programs, app.block_id).await {
+                        tracing::warn!(%error, block_id = app.block_id, "could not publish a download block");
+                    }
+                    if let Err(error) = DownloadGuard::apps_changed(&emitter).await {
+                        tracing::warn!(%error, "could not publish the changed download guard list");
+                    }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    let _ = DownloadGuard::apps_changed(&emitter).await;
+                    if let Err(error) = DownloadGuard::apps_changed(&emitter).await {
+                        tracing::warn!(%error, "could not publish the download guard list after lagging");
+                    }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }

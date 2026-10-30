@@ -1,5 +1,8 @@
 //! Caller facts from procfs, never from the mounted folder. Arguments are not published.
 
+// test: t3_agents_konsole_children_and_flatpak_scopes_keep_their_identities
+// test: host_matching_keeps_launch_prefixes_case_and_jetbrains_rules
+
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
@@ -29,6 +32,58 @@ pub(super) const BACKGROUND_READERS: &[&str] = &[
     "tumblerd",
     "ffmpegthumbnailer",
 ];
+
+/// Desktop ids whose app units are shared with programs they run. A final `*` matches
+/// a prefix; Flatpak/GNOME launcher prefixes and case are ignored when matching.
+pub(super) const PROGRAM_HOSTS: &[&str] = &[
+    "org.kde.konsole",
+    "org.kde.yakuake",
+    "org.kde.kate",
+    "kitty",
+    "alacritty",
+    "org.alacritty.alacritty",
+    "org.gnome.terminal",
+    "org.gnome.ptyxis",
+    "com.mitchellh.ghostty",
+    "org.wezfurlong.wezterm",
+    "foot",
+    "footclient",
+    "com.gexperts.tilix",
+    "terminator",
+    "xterm",
+    "debian-xterm",
+    "debian-uxterm",
+    "code",
+    "code-oss",
+    "code-insiders",
+    "codium",
+    "com.visualstudio.code",
+    "com.vscodium.codium",
+    "org.kde.kdevelop",
+    "com.t3tools.t3code",
+    "t3code",
+    "t3code-url-handler",
+    "t3-code-nightly",
+    "codex-shared-client",
+    "com.anthropic.claude",
+    "chatgpt",
+    "cursor",
+    "com.todesktop.230313mzl4w4u92",
+    "zed",
+    "dev.zed.zed",
+    "jetbrains-*",
+    "com.jetbrains.*",
+];
+
+pub(super) fn runs_programs(identity: &str, hosts: &[String]) -> bool {
+    let Some(id) = identity.strip_prefix("app:") else { return false };
+    let id = id.to_lowercase();
+    let id = id.strip_prefix("flatpak-").or_else(|| id.strip_prefix("gnome-")).unwrap_or(&id);
+    hosts.iter().any(|host| {
+        let host = host.to_lowercase();
+        host.strip_suffix('*').map_or(id == host, |prefix| id.starts_with(prefix))
+    })
+}
 
 #[derive(Default)]
 pub(crate) struct Callers(Mutex<HashMap<u32, Cached>>);

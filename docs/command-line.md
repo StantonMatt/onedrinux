@@ -156,13 +156,15 @@ hold for every account.
 ## Download guard
 
 The guard is on by default, across every account. It refuses background readers of files
-that are not on this computer. An app that would read more than 30 distinct files or 2 GiB
-within 10 minutes is blocked until allowed or reset; files already downloaded stay readable.
+that are not on this computer. Agents, scripts, terminals and IDEs are blocked before reading
+more than 30 distinct files or 2 GiB within 10 minutes, until allowed or reset. Ordinary desktop
+apps such as Gwenview, Okular and LibreOffice, and Dolphin file copies, have no bulk limit.
+Files already downloaded stay readable.
 
 ```
 konedrivectl guard status
 konedrivectl guard apps
-konedrivectl guard allow 'app:org.kde.okular'             # this daemon session
+konedrivectl guard allow 'app:org.kde.konsole'            # this daemon session
 konedrivectl guard allow 'exe:/usr/bin/rg' --always      # persist the allowance
 konedrivectl guard block 'exe:/usr/bin/backup-tool'      # persist the block
 konedrivectl guard free 'exe:/usr/bin/rg'                # free what its reads downloaded
@@ -172,8 +174,10 @@ konedrivectl guard enable off                           # or on; persisted
 ```
 
 Use the exact identity printed by `guard apps`. The columns are identity, display name,
-policy, blocked/seen, admitted files, reserved bytes and reason. Byte totals include requests
-and whole-download reservations, not only traffic received. Thresholds must be positive.
+policy, blocked/seen, admitted files, reserved bytes, reason and classification (`program-host`,
+`ordinary-app`, `executable` or `unidentified`). Host classification comes from the daemon;
+executable identities are guarded directly. Ordinary desktop apps appear only with an explicit
+rule or a background refusal. Byte totals include requests and whole-download reservations, not only traffic received. Thresholds must be positive.
 These commands refuse `--account` and ignore `KONEDRIVE_ACCOUNT`.
 
 `guard free ID` prints the files and allocated bytes actually freed across accounts. It

@@ -324,11 +324,10 @@ To move or remove something in OneDrive, do it while the service runs.
 ## Downloads requested by programs
 
 The download guard is on by default. It prevents thumbnailers and indexers from fetching
-cloud-only content, and stops an app before it reads more than 30 distinct files or 2 GiB in
-10 minutes. This also limits recursive searches and backups. Files already on this computer
-remain readable. Opening a file in its app still fetches it within those limits; a large file
-or bulk copy can need an allowance. KIO file copies work, while Dolphin's automatic MIME
-sniffing and thumbnail workers cannot fetch content. Some ambiguous file types can therefore
+cloud-only content, and stops agents, scripts, terminals and IDEs before they read more than
+30 distinct files or 2 GiB in 10 minutes. Files already on this computer remain readable.
+Ordinary desktop apps such as Gwenview, Okular and LibreOffice can open files without a bulk
+limit, as can Dolphin file copies. Dolphin's automatic MIME sniffing and thumbnail workers cannot fetch content. Some ambiguous file types can therefore
 show a generic icon until opened or explicitly downloaded.
 
 If an open says "Permission denied", `konedrivectl guard apps` shows the caller and reason.
@@ -345,8 +344,9 @@ older kernel, hydrate the file explicitly first.
 
 ## When an app's downloads are blocked
 
-When an app downloads more than the limits allow, a notification says so ("Too many downloads by
-Konsole"), and the app cannot download anything more from OneDrive until you choose:
+When an agent or script downloads more than the limits allow, a notification says so
+("Too many downloads in Konsole"), and the app cannot download anything more from OneDrive
+until you choose:
 
 - **Allow for This Session**: it downloads freely until the KOneDrive service restarts, normally
   until you log out.
@@ -355,7 +355,9 @@ Konsole"), and the app cannot download anything more from OneDrive until you cho
 - **Free Up What It Downloaded**: what its reads downloaded since the service started becomes
   online-only again, except files that are open, changed or kept on this device. It stays blocked.
 
-After allowing it, open the file again in the app: a refused read is not retried by itself.
+A terminal, IDE or agent host offers only **Allow for This Session** in the notification;
+**Always Allow** stays in Settings. After allowing it, open the file again in the app: a
+refused read is not retried by itself.
 
 The notification goes after a while; the app stays on the Status page under **Blocked apps** until
 you choose, and in **Settings → Sync** under **Blocked and Allowed Apps**, with the same buttons

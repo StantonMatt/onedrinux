@@ -30,9 +30,38 @@ PY
         check "file $n fetched no content" "$(onedrive count GET dl/F$n)" 0
     done
     check_holds "the block is recorded" "$(daemon guard apps)" "true bulk 30"
+    check_holds "the cutoff reader is an executable identity" "$(daemon guard apps)" "exe:$(readlink -f /usr/bin/python3)"
     check "refusal changes no folder error" "$(daemon status | sed 's/.*last error //')" '""'
     check_holds "refusal records no failed file activity" "$(daemon activity)" "Downloaded"
     check "no guard refusal is a sync failure" "$(daemon activity | grep -c 'kind: Failed')" 0
+}
+
+an_ordinary_app_unit_reads_a_hundred_files_without_a_bulk_block() {
+    begin_folder
+    for n in $(seq 1 100); do seed_file F$n R f$n.txt "file $n"; done
+    register_folder read-only
+    check_within 20 "all hundred names are shown" bulk_files_are_shown 100
+    # A real app scope in the guest's cgroup namespace exercises procfs classification.
+    # No systemd, host session or user application is involved.
+    mkdir -p /mnt/guard-cgroups
+    mount -t cgroup2 none /mnt/guard-cgroups
+    local app_group=/mnt/guard-cgroups/app-org.kde.gwenview-123.scope result
+    mkdir "$app_group"
+    result=$(bash -c 'echo $$ > "$1/cgroup.procs"; shift; exec "$@"' bash "$app_group" $U python3 - "$F" <<'PYCODE'
+import sys
+with open('/proc/self/cgroup') as cgroup:
+    assert 'app-org.kde.gwenview-123.scope' in cgroup.read()
+for n in range(1, 101):
+    with open(f'{sys.argv[1]}/f{n}.txt', 'rb') as f:
+        assert f.read() == f'file {n}'.encode()
+print('100 files read')
+PYCODE
+)
+    rmdir "$app_group"
+    umount /mnt/guard-cgroups
+    check "an ordinary desktop app reads past thirty files" "$result" "100 files read"
+    check "the ordinary app creates no admission row" "$(daemon guard apps)" ""
+    check "the last file was fetched" "$([ "$(onedrive count GET dl/F100)" -gt 0 ] && echo yes)" yes
 }
 
 missing_names_do_not_consume_or_bypass_the_download_limit() {
@@ -285,6 +314,7 @@ download_guard() {
     ip link set lo up
     for name in \
         a_bulk_reader_is_cut_off_at_the_default_file_limit \
+        an_ordinary_app_unit_reads_a_hundred_files_without_a_bulk_block \
         missing_names_do_not_consume_or_bypass_the_download_limit \
         background_readers_are_refused_before_fetch_and_local_content_still_works \
         normal_open_and_kio_file_copy_still_hydrate \

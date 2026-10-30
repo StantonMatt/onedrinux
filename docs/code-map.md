@@ -139,12 +139,13 @@ The directories below are in layer order: a directory uses only the directories 
 
 The machine-wide [download guard](design/download-guard.md), shared by every mount.
 
-- `mod.rs` — app policies, sliding admission windows, byte reservations and block records. `[tests]`
+- `mod.rs` — host-only app policy, sliding admission windows, byte reservations and block records. `[tests]`
+- `tests.rs` — ordinary apps without counting, guarded cutoffs, policy precedence, configured hosts and real block-signal forwarding.
 - `downloads/tests.rs` — attribution capacity, invalidation and landing-ticket tests.
 - `downloads.rs` — bounded session attribution of whole read downloads, landing tickets and explicit-keep invalidation. `[tests]`
-- `identity/tests.rs` — caller identity, systemd units and KIO reader-role tests.
+- `identity/tests.rs` — caller identity, agent slices, terminal/Flatpak scopes, host matching and KIO reader-role tests.
 - `space/tests.rs` — shared disk-reservation and concurrent allocation tests.
-- `identity.rs` — procfs caller facts, systemd app identities, KIO roles and the reader list. `[tests]`
+- `identity.rs` — procfs caller facts, systemd app identities, KIO roles and the configurable reader/host lists. `[tests]`
 - `space.rs` — allocations shared by reads, pins and explicit hydrate on the same filesystem. `[tests]`
 
 ### `crates/konedrived/src/account/`
@@ -669,7 +670,7 @@ what is decided and what is said, with nothing read from the daemon.
 - `browser.rs` — opening the sign-in page.
 - `status.rs` — `status`.
 - `settings.rs` — `settings`.
-- `guard.rs` — `guard`: status, app list, allowances, blocks, reset, thresholds and `free ID` reclamation.
+- `guard.rs` — `guard`: status, app list with daemon host classification, allowances, blocks, reset, thresholds and `free ID` reclamation.
 - `sync/mod.rs` — `sync`: `status`, `anyway --all`, and which of the two groups a command is in.
 - `sync/folder.rs` — the `sync` commands on the chosen account's folder.
 - `sync/path.rs` — the `sync` commands that take a path.
@@ -706,6 +707,7 @@ Integration tests: the compiled binary against a daemon on a private bus.
 
 - `common/mod.rs` — what they share: the daemon, started as `konedrived` starts it.
 - `accounts_cli.rs` — several accounts.
+- `guard_cli.rs` — download guard rows and configured host classification over a private bus.
 - `login.rs` — `login` when the sign-in is cancelled elsewhere.
 - `status.rs` — `status`.
 - `mode_cli.rs` — `account mode`, and the token export's `--read-write`.
@@ -1131,7 +1133,8 @@ Each has its file in `crates/konedrived/src/dbus/`.
 - `reasontextstest.cpp` — every reason reads as it did before its sentence was generated.
 - `modelstest.cpp` — the transfer, activity and conflict models.
 - `notifiertest.cpp` — `Notifier`.
-- `downloadguardtest.cpp` — `DownloadGuardController`, `GuardNotifier`.
+- `downloadguardtest.cpp` — `DownloadGuardController`, `GuardNotifier`, daemon-owned host classification and once-only recovery of missed blocks.
+- `notificationdeliverytest.cpp` — KNotification delivery of live and missed blocks to a fake desktop notification service on a private bus.
 - `guardpagestest.cpp` — the download guard on Settings, Status and OneDrive Settings.
 - `changeguardtest.cpp` — `ChangeGuardController`, `HeldChanges`, `ChangeNotifier`, and Status
   while changes are held.
@@ -1218,7 +1221,7 @@ suite".
 - `file_writes.sh` — the group `file_writes`: what a program's changes become in OneDrive.
 - `file_reads.sh` — the group `file_reads`: reads, downloads, free-up; an interrupted libc
   pread receives EINTR promptly without an unanswered FUSE reply warning.
-- `download_guard.sh` — the group `download_guard`: app-download reclamation and its keep/open skip rules, bulk and background refusals, explicit actions,
+- `download_guard.sh` — the group `download_guard`: app-download reclamation and its keep/open skip rules, bulk and background refusals, an ordinary app scope reading 100 files without counting, explicit actions,
   initial-placement readiness, missing-name accounting, low-space ranges, already-open handles and mmap.
 - `daemon_restarts.sh` — the group `daemon_restarts`: stops and kills in the middle of work.
 - `crash_consistency.sh` — by-name-only group: two boots on one disk with guest SysRq power loss, edit/rename/missing-copy recovery and a mid-migration cut.
