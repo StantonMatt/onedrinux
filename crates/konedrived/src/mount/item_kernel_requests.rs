@@ -238,6 +238,7 @@ pub(super) enum ReadAnswer {
 pub(super) struct RangeToFetch {
     pub(super) item: LocalItemId,
     pub(super) source: RangeSource,
+    pub(super) scan_file: Option<super::read_ahead::ScanFile>,
     pub(super) from: u64,
     pub(super) end: u64,
     /// The whole download of the content the range is of: started when this read reaches
@@ -604,7 +605,11 @@ impl ItemKernelRequests {
             let download = if self.download_states.is_another_content(&key) {
                 ContentDownload::AnotherContent
             } else { ContentDownload::None };
-            let to_fetch = |from, end| RangeToFetch { item, from, end, download_at_threshold: ItemToDownload { item, onedrive_item: source.onedrive_item.clone(), content: content.clone() }, source: source.clone() };
+            let scan_file = match &row {
+                super::item_lookup::NodeRow::Shown(row) => super::read_ahead::ScanFile::of(row),
+                _ => None,
+            };
+            let to_fetch = |from, end| RangeToFetch { item, from, end, scan_file: scan_file.clone(), download_at_threshold: ItemToDownload { item, onedrive_item: source.onedrive_item.clone(), content: content.clone() }, source: source.clone() };
             return match decide_range_origin(content.size(), download, offset, size) {
                 RangeOrigin::Nothing => Ok(ReadAnswer::Bytes(Vec::new())),
                 RangeOrigin::OneDrive { from, end } => Ok(ReadAnswer::Range(to_fetch(from, end))),
@@ -616,7 +621,8 @@ impl ItemKernelRequests {
 
     /// The rest of a read as ranges, on the runtime: `ItemRangeFetcher::fetch_range`
     /// (another content than the one opened is `ESTALE`), the distinct returned ranges
-    /// counted towards the whole download (`count_bytes_read`, then `ItemDownloader::download` as
+    /// counted towards the whole download except for an active desktop folder scan
+    /// (`count_bytes_read`, then `ItemDownloader::download` as
     /// `DownloadAsker::Read`, with no waiter, at the threshold). No row is read here. The
     /// caller keeps the task's abort handle for the kernel's interrupt
     /// (`interruptible_reads`).
@@ -655,13 +661,19 @@ impl ItemKernelRequests {
     }
 
     pub(super) async fn read_range(&self, range: RangeToFetch, pid: Option<u32>) -> Result<Vec<u8>, Errno> {
+        let caller = pid.filter(|pid| !self.inotify_bridge.is_own_thread(*pid))
+            .and_then(|pid| self.download_guard.read_ahead_caller(pid));
+        self.read_range_as(range, pid, caller).await
+    }
+
+    async fn read_range_as(&self, range: RangeToFetch, pid: Option<u32>, caller: Option<crate::download_guard::ReadAheadCaller>) -> Result<Vec<u8>, Errno> {
         self.admit_remote(pid, &range, range.end.saturating_sub(range.from))?;
-        let mut head = pid.filter(|pid| !self.inotify_bridge.is_own_thread(*pid))
-            .and_then(|pid| self.download_guard.read_ahead_caller(pid))
-            .and_then(|caller| self.read_ahead.as_ref()?.head(caller, range.item, &range.source.content, range.from));
+        let mut head = caller.and_then(|caller| self.read_ahead.as_ref()?.head(
+            caller, range.item, &range.source.content, range.scan_file.as_ref()?, range.from));
+        let skip_count = head.as_ref().is_some_and(|head| head.skip_count);
         let bytes = self.fetch_range(&range).await?;
         if let Some(head) = &mut head { head.completed = true; }
-        if self.download_states.count_bytes_read(range.item, &range.source.content, range.from, bytes.len() as u64) {
+        if !skip_count && self.download_states.count_bytes_read(range.item, &range.source.content, range.from, bytes.len() as u64) {
             if !self.download_states.is_downloading(range.item) && self.downloader.read_fits(range.source.content.size()) {
                 if let Ok(charge) = self.charge_download(pid, &range) {
                     self.downloader.download_charged(range.download_at_threshold, None, charge);

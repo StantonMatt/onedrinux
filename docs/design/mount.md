@@ -481,8 +481,9 @@ A piece is the whole file through 256 KiB, otherwise the first aligned 1 MiB blo
 The window therefore accounts for at most 16 MiB inside the existing 64 MiB range
 store, leaving room for consumed pieces and ordinary reads. Six overlapping requests
 hide the observed per-file latency while bounding network concurrency. `[transfers]
-read_ahead` selects 0–16 files (default 16); zero disables the worker and retains the
-original foreground range-reader lifecycle. Out-of-range values are clamped with a warning.
+read_ahead` selects 0–16 files (default 16); zero disables both speculation and scan
+threshold suppression, so every foreground range counts as before. Out-of-range values
+are clamped with a warning.
 
 Read-ahead has its own six-request limit and takes no foreground pool or range-reader
 slot. A real read of a held piece needs no network slot, and a real read reaching a
@@ -494,11 +495,32 @@ state, and speculation uses only the listed eTag, size and download URL proof of
 never the metadata fallback. It retains exactly the same single-version binding (F297).
 
 Speculation touches no disk, download-guard budget, `download_after` coverage, whole
-download or hydrating state. Its messages are debug read-ahead messages. Later program
-reads undergo ordinary admission and counting, including hits in memory. A failed or
-cancelled foreground read cancels its scan; policy changes, three seconds without a
-head, mount stop and sign-out cancel pending work too. One scan lasts at most five
-minutes, and cached pieces retain the range store's existing five-minute expiry.
+download or hydrating state. Its messages are debug read-ahead messages. Real reads
+still undergo ordinary guard admission and charging, including hits in memory.
+
+Once the second distinct head activates a scan, every range read by that desktop
+identity in that folder skips `download_after` counting, including non-head reads and
+files with other extensions. Bytes remain in the existing memory store; no whole
+download is started by those reads, even when a tiny file is read in full. Detection
+lives in a mutex-held record updated synchronously before the foreground fetch, using
+folder facts from the row that decided its range origin. The activating read is already
+covered even if the async scheduling task has not run or its queue is full. No lock is
+held across an await. The decision belongs to that admitted read; completing it later
+does not replay its skipped coverage. A debug message announces suppression once per scan.
+
+The first file was read before the scan existed and can still land normally; a started
+whole download is never cancelled retroactively. A tiny image deliberately viewed during
+an active scan is also not kept and may need fetching again next time. Other identities
+and folders count normally. When a scan expires, is cancelled, loses policy eligibility
+or is replaced, subsequent reads count again; coverage accumulated before the scan stays,
+and skipped coverage is never added later. A guard notification ends the scan only when the
+scanning identity is no longer eligible; the guard also notifies on every refusal of other
+readers, which must not end it.
+
+A failed or cancelled foreground read cancels its scan; the scanning identity losing
+eligibility, three seconds without a head, mount stop and sign-out cancel pending work
+too. One scan lasts at most five minutes, and cached pieces retain the range store's
+existing five-minute expiry.
 The fake-server regression scans 40 mixed-size PNGs with 300 ms content latency and
 requires at least four times the speed with exactly one content request per file.
 The VM scenario exercises this through actual FUSE readdir and an app-scoped caller.
@@ -513,9 +535,11 @@ including repeats and cache hits ([download-guard.md](download-guard.md)).
 Once distinct coverage reaches `min(download_after, file size)` (`[transfers] download_after`
 is 1 MiB by default; 0 downloads at the first read), the file is downloaded whole, with no
 waiter: reads continue as checked ranges until the verified backing file lands. One 16 KiB
-read of a 10 KiB file covers that whole file and therefore starts its whole download.
-The whole download still fetches afresh and checks quickXorHash; the in-memory range cache
-is not a verified landing source. Unfinished staging is never a read origin.
+read of a 10 KiB file covers that whole file and therefore starts its whole download,
+except for reads admitted during an active desktop scan by that identity in that folder
+(§5.1.1). That exception applies even with `download_after = 0`; `read_ahead = 0`
+disables it along with speculation. The whole download still fetches afresh and checks
+quickXorHash; the in-memory range cache is not a verified landing source. Unfinished staging is never a read origin.
 
 Coverage starts over when the threshold answers yes, after a successful whole download,
 when the item is forgotten, or when a read names another opened `ContentVersion`. Old and

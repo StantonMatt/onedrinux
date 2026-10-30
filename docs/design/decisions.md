@@ -957,3 +957,18 @@ A MIME override would depend on a particular Qt/database ambiguity and would not
 other serial header scans. A persistent header cache would add disk state, version
 invalidation and privacy/lifetime rules; it remains a possible later step. This change
 uses the proven listed-range path and the current bounded five-minute memory cache.
+
+After freeing the same folder on build `412dea0`, opening one image made 167 tiny
+files land within about 12 seconds (1.5 MiB), while all 486 files of at least 24 KB
+stayed cloud-only. A 16 KiB MIME sniff covers a tiny file in full, and additional
+Exiv2 probes can cover others: distinct coverage alone cannot distinguish them from
+viewing a file. The daemon now skips whole-download coverage for every read by the
+scanning desktop identity in its active folder, including the second head that
+activates it. Detection is synchronous before fetching; async prefetch scheduling
+cannot race the threshold decision. Admission, charging and bytes returned are unchanged.
+
+The first file can still land before detection. A tiny image viewed during the scan
+is not kept, so it may be fetched again next time. This is the trade-off for keeping
+folder probes in memory without changing another program or the OS. Expiry, cancellation,
+the scanning identity losing eligibility and replacing the scan restore ordinary counting; skipped bytes are never
+counted later. `[transfers] read_ahead = 0` disables both behaviours.

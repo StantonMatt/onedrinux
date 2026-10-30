@@ -406,10 +406,12 @@ A file that is not on disk:
   pool admission and early refusals do not count. Tests in `range_read_states/tests.rs`
   and `item_kernel_requests/tests/fetch_states.rs` cover quick, overlapping and slow
   fetches, disk/memory answers, errors, stale content, interrupts and throttle waits.
-- `read_ahead.rs` — one short desktop folder scan, readdir snapshots, a bounded
-  speculative window and cancellation; uses the existing in-memory range store.
+- `read_ahead.rs` — synchronous desktop scan detection and threshold suppression,
+  readdir snapshots, a bounded speculative window and cancellation; uses the existing
+  in-memory range store.
 - `item_kernel_requests/tests/read_ahead.rs` — 300 ms/40-file timing and request
-  regression, exclusions, guard and idle cancellation, foreground priority.
+  regression, exclusions, guard and idle cancellation, foreground priority, small-file
+  scan suppression and an unpolled-actor/full-queue regression.
 - `range_readers.rs` — the files being read as ranges, which go before the background
   downloads. `[tests]`
 - `item_downloader.rs` — `ItemDownloader`: a file downloaded whole into the backing directory,
@@ -1230,7 +1232,8 @@ suite".
   whole download, changes from OneDrive, a directory that cannot be removed, Forget with unsent
   changes.
 - `file_writes.sh` — the group `file_writes`: what a program's changes become in OneDrive.
-- `file_reads.sh` — the group `file_reads`: reads, downloads, free-up; an interrupted libc
+- `file_reads.sh` — the group `file_reads`: reads, downloads, free-up, desktop scans
+  of tiny files whose full reads stay in memory after activation; an interrupted libc
   pread receives EINTR promptly without an unanswered FUSE reply warning.
 - `download_guard.sh` — the group `download_guard`: app-download reclamation and its keep/open skip rules, bulk and background refusals, an ordinary app scope reading 100 files without counting, explicit actions,
   initial-placement readiness, missing-name accounting, low-space ranges, already-open handles and mmap.

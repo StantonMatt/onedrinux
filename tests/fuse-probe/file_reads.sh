@@ -371,12 +371,58 @@ PYCODE
     check "no whole download is staged" "$(daemon staged)" '[]'
 }
 
+# Tiny MIME/metadata reads may cover a whole file. Only the first file, read
+# before a scan exists, may land; all later bytes remain in the range store.
+a_desktop_scan_of_tiny_files_keeps_only_the_first() {
+    begin_folder
+    for n in $(seq -w 00 09); do
+        seed_random T$n R "$n.png" "$((512 + 10#$n * 3072))"
+    done
+    register_folder read-only
+    tiny_names_are_shown() { [ "$(user 'ls | wc -l')" -eq 10 ]; }
+    check_within 20 "all tiny scan names are shown" tiny_names_are_shown
+    mkdir -p /mnt/tiny-scan-cgroups
+    mount -t cgroup2 none /mnt/tiny-scan-cgroups
+    local app_group=/mnt/tiny-scan-cgroups/app-org.kde.gwenview-123.scope result
+    mkdir "$app_group"
+    result=$(bash -c 'echo $$ > "$1/cgroup.procs"; shift; exec "$@"' bash "$app_group" $U python3 - "$F" "$SRC" <<'PYCODE'
+import os, pathlib, sys
+folder, seeds = map(pathlib.Path, sys.argv[1:])
+entries = [entry for entry in os.scandir(folder) if entry.name.endswith('.png')]
+assert len(entries) == 10
+for entry in entries:
+    expected = (seeds / ('seed-T' + entry.name[:2])).read_bytes()
+    fd = os.open(entry.path, os.O_RDONLY)
+    try:
+        assert os.pread(fd, 16384, 0) == expected[:16384], entry.name
+        for at in range(0, len(expected), 4096):
+            assert os.pread(fd, 4096, at) == expected[at:at + 4096], entry.name
+    finally:
+        os.close(fd)
+assert all(entry.stat().st_blocks == 0 for entry in entries[1:])
+print(entries[0].name)
+PYCODE
+)
+    rmdir "$app_group"
+    umount /mnt/tiny-scan-cgroups
+    first_tiny_is_local() { [ "$(state_of "$result")" = hydrated ]; }
+    check_within 20 "the first file may land before detection" first_tiny_is_local
+    check "ten range reads and only one whole download" "$(onedrive count GET dl/)" 11
+    for n in $(seq -w 00 09); do
+        if [ "$n.png" != "$result" ]; then
+            check "tiny file $n has no whole download" "$(onedrive count GET dl/T$n)" 1
+            check "tiny file $n stays cloud-only" "$(state_of "$n.png")" online-only
+        fi
+    done
+}
+
 # The group: every scenario of reading beside a fault.
 file_reads() {
     echo "==== reading beside a fault ===="
     ip link set lo up
     for name in \
         a_desktop_folder_scan_reads_ahead_without_landing_files \
+        a_desktop_scan_of_tiny_files_keeps_only_the_first \
         an_interrupted_range_read_answers_eintr_without_dropping_its_reply \
         download_cut_off_gives_no_wrong_bytes \
         download_cut_off_keeps_what_it_has_and_goes_on_from_there \

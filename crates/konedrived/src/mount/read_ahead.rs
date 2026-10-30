@@ -2,15 +2,19 @@
 //!
 //! One scan per mount bounds speculation across programs and folders. Its 16-file
 //! window holds at most 16 MiB, with six requests in flight, independently of the
-//! foreground transfer pool. No range reader, threshold counter or disk file is touched.
+//! foreground transfer pool. Scan reads skip the whole-download threshold; no disk file is touched.
 
 // test: a_desktop_scan_reads_forty_heads_at_least_four_times_faster_with_one_request_each
 // test: a_scan_only_fetches_matching_cloud_files_within_its_window
 // test: blocking_or_stopping_a_scan_cancels_pending_read_ahead
 // test: a_real_read_does_not_wait_for_other_prefetches
+// test: read_ahead_activating_tiny_read_skips_counting_without_polling_the_actor
+// test: read_ahead_scan_reads_small_files_in_full_without_keeping_them
+// test: read_ahead_lifecycle_changes_end_synchronous_suppression
+// test: read_ahead_skips_non_head_ranges_and_preserves_pre_scan_coverage
 
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::{future::BoxFuture, stream::FuturesUnordered, StreamExt};
@@ -35,28 +39,83 @@ enum Event {
         item: LocalItemId,
         content: ContentVersion,
         at: Instant,
+        scan: ScanRecord,
+        extension: String,
     },
 }
 
-/// A cancelled or failed foreground read cancels its scan too.
+/// Folder facts from the same row that decided the foreground range's origin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ScanFile {
+    folder: LocalItemId,
+    extension: Option<String>,
+}
+
+impl ScanFile {
+    pub(super) fn of(row: &Item) -> Option<Self> {
+        (row.kind == ItemKind::File && row.content_presence == ContentPresence::NotOnDisk)
+            .then_some(())?;
+        Some(Self {
+            folder: row.local.as_ref()?.place.as_ref()?.parent_local_item_id,
+            extension: extension(row),
+        })
+    }
+}
+
+#[derive(Clone)]
+struct ScanRecord {
+    id: u64,
+    caller: ReadAheadCaller,
+    folder: LocalItemId,
+    first: LocalItemId,
+    active: bool,
+    began: Instant,
+    last: Instant,
+}
+
+/// Detection is synchronous; the actor only schedules speculation. No lock spans an await.
+struct ScanState {
+    scan: Option<ScanRecord>,
+    next: u64,
+    stopped: bool,
+}
+
+impl ScanState {
+    fn refresh(&mut self, guard: &DownloadGuard) {
+        if self.scan.as_ref().is_some_and(|s| {
+            s.last.elapsed() >= IDLE || s.began.elapsed() >= LIFETIME || !guard.permits_read_ahead(&s.caller)
+        }) {
+            self.scan = None;
+        }
+    }
+}
+
+/// A cancelled or failed foreground read cancels only the scan it belonged to.
 pub(super) struct HeadRead {
-    cancel: watch::Sender<Option<(String, Instant)>>,
-    identity: String,
+    state: Arc<Mutex<ScanState>>,
+    cancel: watch::Sender<u64>,
+    scan: u64,
+    pub(super) skip_count: bool,
     pub(super) completed: bool,
 }
 
 impl Drop for HeadRead {
     fn drop(&mut self) {
         if !self.completed {
-            self.cancel
-                .send_replace(Some((self.identity.clone(), Instant::now())));
+            let mut state = crate::panic::lock(&self.state);
+            if state.scan.as_ref().is_some_and(|s| s.id == self.scan) {
+                state.scan = None;
+            }
+            self.cancel.send_replace(self.scan);
         }
     }
 }
 
 pub(super) struct ReadAhead {
     events: mpsc::Sender<Event>,
-    cancel: watch::Sender<Option<(String, Instant)>>,
+    cancel: watch::Sender<u64>,
+    state: Arc<Mutex<ScanState>>,
+    guard: Arc<DownloadGuard>,
     task: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -69,12 +128,18 @@ impl ReadAhead {
         runtime: &tokio::runtime::Handle,
     ) -> Self {
         let (events, receiver) = mpsc::channel(64);
-        let (cancel, cancelled) = watch::channel(None);
+        let (cancel, cancelled) = watch::channel(0);
+        let state = Arc::new(Mutex::new(ScanState {
+            scan: None,
+            next: 0,
+            stopped: window == 0,
+        }));
         let task = (window > 0).then(|| {
             runtime.spawn(run(
                 store,
                 source,
-                guard,
+                Arc::clone(&guard),
+                Arc::clone(&state),
                 window.min(crate::config::READ_AHEAD),
                 receiver,
                 cancelled,
@@ -83,6 +148,8 @@ impl ReadAhead {
         Self {
             events,
             cancel,
+            state,
+            guard,
             task,
         }
     }
@@ -91,33 +158,75 @@ impl ReadAhead {
         let _ = self.events.try_send(Event::Listed(folder, items));
     }
 
+    /// Observe every admitted desktop range before fetching it. The activating head
+    /// already skips counting even if the scheduling task has never been polled.
     pub(super) fn head(
         &self,
         caller: ReadAheadCaller,
         item: LocalItemId,
         content: &ContentVersion,
+        file: &ScanFile,
         from: u64,
     ) -> Option<HeadRead> {
-        if self.task.is_none() || from >= HEAD_END || content.size() == 0 {
+        let mut state = crate::panic::lock(&self.state);
+        state.refresh(&self.guard);
+        if state.stopped || !self.guard.permits_read_ahead(&caller) {
             return None;
         }
-        let identity = caller.identity().to_owned();
-        self.events
-            .try_send(Event::Head {
-                caller,
-                item,
-                content: content.clone(),
-                at: Instant::now(),
-            })
-            .ok()?;
+        let at = Instant::now();
+        let same = state
+            .scan
+            .as_ref()
+            .is_some_and(|s| s.folder == file.folder && s.caller.identity() == caller.identity());
+        if from < HEAD_END && content.size() > 0 {
+            if let Some(ext) = &file.extension {
+                if !same {
+                    state.next += 1;
+                    state.scan = Some(ScanRecord {
+                        id: state.next,
+                        caller: caller.clone(),
+                        folder: file.folder,
+                        first: item,
+                        active: false,
+                        began: at,
+                        last: at,
+                    });
+                }
+                let s = state.scan.as_mut()?;
+                if !s.active && item != s.first {
+                    s.active = true;
+                    tracing::debug!(folder = %s.folder, identity = s.caller.identity(),
+                        "folder scan reads are served in memory and are not kept on disk");
+                }
+                s.last = at;
+                // A full scheduling queue may drop speculation, never scan detection.
+                let _ = self.events.try_send(Event::Head {
+                    caller: s.caller.clone(),
+                    item,
+                    content: content.clone(),
+                    at,
+                    scan: s.clone(),
+                    extension: ext.clone(),
+                });
+            }
+        }
+        let s = state
+            .scan
+            .as_ref()
+            .filter(|s| s.folder == file.folder && s.caller.identity() == caller.identity())?;
         Some(HeadRead {
+            state: Arc::clone(&self.state),
             cancel: self.cancel.clone(),
-            identity,
+            scan: s.id,
+            skip_count: s.active,
             completed: false,
         })
     }
 
     pub(super) fn stop(&self) {
+        let mut state = crate::panic::lock(&self.state);
+        state.stopped = true;
+        state.scan = None;
         if let Some(task) = &self.task {
             task.abort();
         }
@@ -131,13 +240,8 @@ impl Drop for ReadAhead {
 }
 
 struct Scan {
-    caller: ReadAheadCaller,
-    folder: LocalItemId,
-    first: LocalItemId,
-    active: bool,
+    record: ScanRecord,
     extensions: HashSet<String>,
-    began: Instant,
-    last: Instant,
     window: Vec<Item>,
     attempted: HashSet<(LocalItemId, ContentVersion)>,
 }
@@ -180,9 +284,10 @@ async fn run(
     store: Store,
     source: Arc<dyn ContentSource>,
     guard: Arc<DownloadGuard>,
+    state: Arc<Mutex<ScanState>>,
     window: usize,
     mut events: mpsc::Receiver<Event>,
-    mut cancelled: watch::Receiver<Option<(String, Instant)>>,
+    mut cancelled: watch::Receiver<u64>,
 ) {
     let mut policy = guard.read_ahead_changes();
     let mut scan: Option<Scan> = None;
@@ -195,13 +300,15 @@ async fn run(
             biased;
             changed = policy.changed() => {
                 if changed.is_err() { return; }
-                if scan.as_ref().is_some_and(|s| !guard.permits_read_ahead(&s.caller)) {
+                // The guard also notifies on every refusal; only the scan's own caller losing
+                // permission ends it.
+                if scan.as_ref().is_some_and(|s| !guard.permits_read_ahead(&s.record.caller)) {
                     pending.clear(); scan = None; listing = None;
                 }
             }
             changed = cancelled.changed() => {
                 if changed.is_err() { return; }
-                if scan.as_ref().is_some_and(|s| cancelled.borrow().as_ref().is_some_and(|(id, _)| id == s.caller.identity())) {
+                if scan.as_ref().is_some_and(|s| *cancelled.borrow() == s.record.id) {
                     pending.clear(); scan = None; listing = None;
                 }
             }
@@ -209,30 +316,31 @@ async fn run(
                 let Some(event) = event else { return; };
                 match event {
                     Event::Listed(folder, items) => { listing = Some((folder, items)); if scan.is_none() { idle = Instant::now() + IDLE; } }
-                    Event::Head { caller, item, content, at } => {
-                        if !guard.permits_read_ahead(&caller) || at.elapsed() >= IDLE
-                            || cancelled.borrow().as_ref().is_some_and(|(id, when)| id == caller.identity() && at <= *when) { continue; }
+                    Event::Head { caller, item, content, at, scan: record, extension: ext } => {
+                        let current = {
+                            let mut state = crate::panic::lock(&state);
+                            state.refresh(&guard);
+                            state.scan.as_ref().is_some_and(|s| s.id == record.id)
+                        };
+                        if !current || !guard.permits_read_ahead(&caller) || at.elapsed() >= IDLE { continue; }
                         let facts = store.read_items(move |reader| {
                             let Some(row) = reader.find_item(item)? else { return Ok(None); };
                             if row.content_presence != ContentPresence::NotOnDisk || row.kind != ItemKind::File
                                 || row.local.as_ref().and_then(|local| local.content.as_ref()) != Some(&content) { return Ok(None); }
                             let Some(place) = row.local.as_ref().and_then(|local| local.place.as_ref()) else { return Ok(None); };
-                            let Some(ext) = extension(&row) else { return Ok(None); };
                             let folder = place.parent_local_item_id;
-                            Ok(Some((folder, ext, reader.list_children(folder)?)))
+                            Ok(Some((folder, reader.list_children(folder)?)))
                         }).await;
-                        let Ok(Some((folder, ext, rows))) = facts else { continue; };
-                        let same = scan.as_ref().is_some_and(|s| s.folder == folder && s.caller.identity() == caller.identity()
-                            && at.saturating_duration_since(s.last) < IDLE && at.saturating_duration_since(s.began) < LIFETIME);
-                        if !same {
+                        let Ok(Some((folder, rows))) = facts else { continue; };
+                        if folder != record.folder { continue; }
+                        if scan.as_ref().is_none_or(|s| s.record.id != record.id) {
                             pending.clear();
-                            scan = Some(Scan { caller, folder, first: item, active: false, extensions: HashSet::new(), began: at, last: at, window: Vec::new(), attempted: HashSet::new() });
+                            scan = Some(Scan { record: record.clone(), extensions: HashSet::new(), window: Vec::new(), attempted: HashSet::new() });
                         }
                         let s = scan.as_mut().unwrap();
-                        s.active |= item != s.first;
-                        s.last = at;
+                        s.record = record;
                         s.extensions.insert(ext);
-                        idle = (at + IDLE).min(s.began + LIFETIME);
+                        idle = (at + IDLE).min(s.record.began + LIFETIME);
                         let ordered = listing.as_ref().filter(|(id, _)| *id == folder).map(|(_, rows)| rows.as_slice()).unwrap_or(&rows);
                         s.window = ordered.iter().position(|row| row.local_item_id == item).map(|at| ordered[at + 1..].iter()
                             .filter(|row| row.kind == ItemKind::File && row.content_presence == ContentPresence::NotOnDisk
@@ -248,11 +356,19 @@ async fn run(
             }
             _ = pending.next(), if !pending.is_empty() => {}
         }
+        let current = {
+            let mut state = crate::panic::lock(&state);
+            state.refresh(&guard);
+            state.scan.as_ref().map(|s| s.id)
+        };
+        if scan.as_ref().is_some_and(|s| Some(s.record.id) != current) {
+            pending.clear();
+            scan = None;
+        }
         if let Some(s) = scan.as_mut().filter(|s| {
-            s.active
-                && s.last.elapsed() < IDLE
-                && s.began.elapsed() < LIFETIME
-                && guard.permits_read_ahead(&s.caller)
+            s.record.active
+                && Some(s.record.id) == current
+                && guard.permits_read_ahead(&s.record.caller)
         }) {
             for row in &s.window {
                 if pending.len() >= CONCURRENT {
@@ -269,8 +385,8 @@ async fn run(
                     store.clone(),
                     Arc::clone(&source),
                     Arc::clone(&guard),
-                    s.caller.clone(),
-                    s.folder,
+                    s.record.caller.clone(),
+                    s.record.folder,
                     row.local_item_id,
                 );
                 pending.push(Box::pin(async move {
