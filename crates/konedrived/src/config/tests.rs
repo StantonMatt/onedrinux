@@ -434,3 +434,14 @@ async fn an_unreadable_or_newer_file_poisons_the_store() {
         assert!(!crate::config::migrate::v1_copy(&paths.config_file).exists(), "never migrated");
     }
 }
+
+#[test]
+fn the_read_ahead_window_is_read_clamped_and_round_tripped() {
+    for (setting, expected) in [(None, 16), (Some(-1), 0), (Some(0), 0), (Some(6), 6), (Some(1000), 16)] {
+        let text = format!("config_version = 2\n{}", setting.map(|value| format!("[transfers]\nread_ahead = {value}")).unwrap_or_default());
+        let config: Config = toml::from_str(&text).unwrap();
+        assert_eq!(config.read_ahead(), expected);
+        let round: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert_eq!(config, round);
+    }
+}

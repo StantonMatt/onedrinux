@@ -229,3 +229,14 @@ explicit actions, low-space ranges, a new byte block on already-open handles, an
 a real FUSE mount over fake Graph, only in the VM. Its reclamation scenario checks exact
 file/allocated-byte totals, pins, explicit hydrate, open readers/writers, retries after close,
 and unchanged cloud copies with no Graph deletion.
+
+## Folder-scan read-ahead
+
+Admitted head reads by an identified ordinary `app:` caller can start a short folder
+scan ([mount.md](mount.md) §5.1.1). Speculation never consumes guard files or bytes,
+creates an app row, starts a whole download or reports hydration. Executable identities,
+program hosts, background readers and unidentified callers never trigger it, even when
+allowed. A policy block cancels pending speculation immediately; an always block also
+suppresses speculation when a session allowance still permits explicit reads. Real reads
+of prefetched bytes pass through ordinary admission and accounting, just like other
+memory hits. `[transfers] read_ahead = 0` disables speculation.

@@ -66,6 +66,7 @@ pub(super) struct PartsToStop {
     pub(super) write_operation_thread: Arc<WriteOperationThread>,
     pub(super) inotify_bridge: Arc<ItemInotifyBridge>,
     pub(super) downloader: Arc<ItemDownloader>,
+    pub(super) read_ahead: Arc<super::super::read_ahead::ReadAhead>,
     /// What a test of the stop looks at: the downloader aborts what it holds.
     #[cfg(test)]
     pub(super) download_states: Arc<ItemDownloadStates>,
@@ -86,7 +87,7 @@ pub(in crate::mount) fn build(setup: ItemMountSetup, runtime: tokio::runtime::Ha
 
 /// Steps 1 to 7 over a backing directory that is open and has its write bits.
 fn build_over(backing_directory: Arc<BackingDirectory>, setup: ItemMountSetup, runtime: tokio::runtime::Handle) -> Result<(ItemMount, ItemKernelRequests), ItemMountError> {
-    let ItemMountSetup { root, store_path, store, drive_id, source, report, pool, split_download_share, download_after, download_guard, change_guard, free_space_reserve, tree_lock, ignore, write_scope, sync_plan_wake, running_steps, published_plan, take_down_report, clock } = setup;
+    let ItemMountSetup { root, store_path, store, drive_id, source, report, pool, split_download_share, download_after, read_ahead, download_guard, change_guard, free_space_reserve, tree_lock, ignore, write_scope, sync_plan_wake, running_steps, published_plan, take_down_report, clock } = setup;
     let folder = root.path;
     let mount_started_at = clock();
     let upload_rules = Arc::new(UploadRules::new(Arc::clone(&ignore)).with_write_scope(write_scope));
@@ -130,8 +131,9 @@ fn build_over(backing_directory: Arc<BackingDirectory>, setup: ItemMountSetup, r
 
     let inotify_bridge = Arc::new(ItemInotifyBridge::new(folder.clone()));
     let range_readers = Arc::new(RangeReaders::new(Arc::clone(&pool), runtime.clone()).with_read_states(Arc::clone(&download_states.range_reads)));
-    let range_fetcher = Arc::new(ItemRangeFetcher::new(range_readers, Arc::clone(&source), report.throttle_wait.clone()));
+    let range_fetcher = Arc::new(ItemRangeFetcher::new(range_readers, Arc::clone(&source), report.throttle_wait.clone()).with_read_ahead(read_ahead > 0));
     let download_landing = Arc::new(ItemDownloadLanding::new(Arc::clone(&place_changes), store.clone(), Arc::clone(&running_steps), Arc::clone(&mount_take_down), Arc::clone(&item_handles))?);
+    let read_ahead = Arc::new(super::super::read_ahead::ReadAhead::new(store.clone(), Arc::clone(&source), Arc::clone(&download_guard), read_ahead, &runtime));
     let downloader = Arc::new(ItemDownloader::new(
         Arc::clone(&backing_directory),
         Arc::clone(&download_states),
@@ -228,6 +230,7 @@ fn build_over(backing_directory: Arc<BackingDirectory>, setup: ItemMountSetup, r
         store.clone(),
     );
     kernel_requests.download_guard = download_guard;
+    kernel_requests.read_ahead = Some(Arc::clone(&read_ahead));
     let mount = ItemMount {
         backing_directory,
         access_mode_switch,
@@ -241,6 +244,7 @@ fn build_over(backing_directory: Arc<BackingDirectory>, setup: ItemMountSetup, r
             write_operation_thread,
             inotify_bridge,
             downloader,
+            read_ahead,
             #[cfg(test)]
             download_states,
             read_connections,

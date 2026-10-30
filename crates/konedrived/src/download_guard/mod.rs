@@ -8,6 +8,8 @@
 mod downloads;
 mod identity;
 mod space;
+mod read_ahead;
+pub(crate) use read_ahead::ReadAheadCaller;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -103,6 +105,7 @@ struct Inner {
 }
 
 pub struct DownloadGuard {
+    read_ahead_changes: tokio::sync::watch::Sender<()>,
     pub(crate) changing: Mutex<()>,
     callers: Callers,
     inner: Mutex<Inner>,
@@ -167,6 +170,7 @@ impl Default for DownloadGuard {
 impl DownloadGuard {
     pub fn new(enabled: bool, limits: GuardConfig) -> Self {
         Self {
+            read_ahead_changes: tokio::sync::watch::channel(()).0,
             changing: Mutex::new(()),
             callers: Callers::default(),
             inner: Mutex::new(Inner { enabled, limits, apps: BTreeMap::new() }),
@@ -188,6 +192,7 @@ impl DownloadGuard {
             app.session_allowed || app.blocked.is_some() || limits.allowed_apps.contains(id) || limits.blocked_apps.contains(id)
         });
         inner.limits = limits;
+        self.read_ahead_changes.send_replace(());
     }
     pub fn enabled(&self) -> bool {
         crate::panic::lock(&self.inner).enabled
@@ -268,6 +273,7 @@ impl DownloadGuard {
                 app.block_id = self.next_block.fetch_add(1, Ordering::Relaxed);
                 let _ = self.news.send(row(&who.identity, app, &limits));
             }
+            self.read_ahead_changes.send_replace(());
             return Err(fuser::Errno::EACCES);
         }
         Ok(())
@@ -300,9 +306,11 @@ impl DownloadGuard {
         }
         app.session_allowed = true;
         app.blocked = None;
+        self.read_ahead_changes.send_replace(());
     }
     pub(crate) fn reset(&self, identity: &str) {
         crate::panic::lock(&self.inner).apps.remove(identity);
+        self.read_ahead_changes.send_replace(());
     }
 }
 

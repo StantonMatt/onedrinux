@@ -42,6 +42,7 @@ mod backing_directory;
 mod backing_directory_check;
 mod errno;
 mod range_readers;
+mod read_ahead;
 mod range_read_states;
 mod stale_mount;
 // The tidy step after the daemon's end (`konedrived --tidy`, the unit's `ExecStopPost`): it reads

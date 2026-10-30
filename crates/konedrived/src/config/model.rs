@@ -83,10 +83,16 @@ pub struct TransfersConfig {
     /// [`DOWNLOAD_AFTER`] when missing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) download_after: Option<i64>,
+    /// Files ahead of a desktop folder scan; 0 disables it, clamped to 0–16.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) read_ahead: Option<i64>,
 }
 
 /// `[transfers] download_after` when `config.toml` does not say: 1 MiB.
 pub const DOWNLOAD_AFTER: u64 = 1 << 20;
+
+/// At most 16 MiB of speculative head pieces in the 64 MiB range store.
+pub const READ_AHEAD: usize = 16;
 
 /// How many gigabytes of the free space of the disk an account's folder is on the
 /// downloads of its pinned files and read-triggered whole copies leave, when its section names none.
@@ -109,6 +115,16 @@ impl Config {
     /// `[transfers] download_after`, in bytes; a negative number counts as 0.
     pub(crate) fn download_after(&self) -> u64 {
         self.transfers.as_ref().and_then(|t| t.download_after).map_or(DOWNLOAD_AFTER, |bytes| bytes.max(0) as u64)
+    }
+
+    /// The scan window, bounded independently of the number of simultaneous programs.
+    pub(crate) fn read_ahead(&self) -> usize {
+        let value = self.transfers.as_ref().and_then(|t| t.read_ahead).unwrap_or(READ_AHEAD as i64);
+        let clamped = value.clamp(0, READ_AHEAD as i64) as usize;
+        if value != clamped as i64 {
+            tracing::warn!("[transfers] read_ahead = {value} is outside 0-{READ_AHEAD}; using {clamped}");
+        }
+        clamped
     }
 
     /// Each account's large-stream limit (the streams of large sync transfers, never an

@@ -941,3 +941,19 @@ cloud content because its MIME sniffing is automatic; KIO file workers remain el
 user copies. `EACCES` describes a policy refusal without implying a broken or conflicting file.
 The read-triggered downloader also leaves the account's disk reserve, independently of the
 guard switch. The UI receives structured app identities and reasons, never file paths or args.
+
+## Reading ahead across a folder scan (2026-10-30)
+
+Gwenview's Qt/KIO MIME sniffing reads each PNG's first 16 KiB serially: 653 cloud-only
+files at about 360 ms each took about four minutes to list. The daemon detects two
+head reads by an admitted desktop identity in one folder and fetches the next matching
+files' first pieces concurrently into its existing version-checked memory store
+([mount.md](mount.md) §5.1.1). One 16-file window and six concurrent requests per mount
+bound speculation. Guarded callers never trigger it, and speculative bytes count toward
+neither admission budgets nor whole-download thresholds.
+
+The requirement is to work on any computer without modifying programs or the OS.
+A MIME override would depend on a particular Qt/database ambiguity and would not help
+other serial header scans. A persistent header cache would add disk state, version
+invalidation and privacy/lifetime rules; it remains a possible later step. This change
+uses the proven listed-range path and the current bounded five-minute memory cache.

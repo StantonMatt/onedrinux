@@ -73,6 +73,7 @@ impl SyncService {
             pool: Arc::clone(&self.pool),
             split_download_share: Arc::clone(&self.parts),
             download_after: self.wiring.transfers.download_after,
+            read_ahead: self.wiring.transfers.read_ahead,
             download_guard: Arc::clone(&self.wiring.persist.store.download_guard),
             change_guard: match self.wiring.persist.store.change_guard(&self.wiring.persist.account) {
                 Ok(guard) => Some(guard),

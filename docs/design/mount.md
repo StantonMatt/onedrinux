@@ -455,6 +455,54 @@ While a file is read as ranges it holds one slot
 of the transfer pool as a file being opened does, until two seconds after its last read
 (`range_readers.rs`): what a program reads goes before the background downloads.
 
+### 5.1.1 Reading ahead during a desktop folder scan
+
+On 2026-10-30, opening one image in Gwenview in a folder of 653 cloud-only PNGs
+made Qt/KIO sniff the first 16 KiB of each file serially. At about 360 ms a request,
+listing took about four minutes. Aligned blocks save repeated probes of one file;
+reading ahead hides the latency between different files without changing Qt, MIME
+rules or the computer's configuration.
+
+`mount/read_ahead.rs` recognizes head reads (starting below 1 MiB) of two distinct
+cloud-only files in the same folder, by the same admitted desktop guard identity,
+within three seconds. Repeats of the first file alone do not trigger it. Executable
+identities, program hosts, background readers, unknown callers and the daemon's own
+bridge never qualify, even with a session or always allowance. A block stops a scan,
+including an always block temporarily overridden for explicit reads by a session allowance.
+
+The window is the next 16 eligible files in readdir order, with at most six requests
+at once. Readdir's handle snapshot is used when available; otherwise `list_children`
+gives the same `ORDER BY local_name`. Only cloud-only files with an extension already
+seen in this scan qualify, case-insensitively. Each is rechecked against its current row
+before fetching. At most one scan runs per mount, so other programs and folders cannot
+multiply the speculative memory budget. Switching scans cancels the previous work.
+
+A piece is the whole file through 256 KiB, otherwise the first aligned 1 MiB block.
+The window therefore accounts for at most 16 MiB inside the existing 64 MiB range
+store, leaving room for consumed pieces and ordinary reads. Six overlapping requests
+hide the observed per-file latency while bounding network concurrency. `[transfers]
+read_ahead` selects 0–16 files (default 16); zero disables the worker and retains the
+original foreground range-reader lifecycle. Out-of-range values are clamped with a warning.
+
+Read-ahead has its own six-request limit and takes no foreground pool or range-reader
+slot. A real read of a held piece needs no network slot, and a real read reaching a
+pending piece joins that request before taking any foreground slot, instead of fetching it twice. A joined real read retains the shared fetch when the scan is cancelled or replaced;
+stopping speculation cannot force that read to retry. Other foreground
+requests can start while all six prefetches are in flight. This isolates slot admission;
+network bandwidth is still shared. The source respects authentication and account throttle
+state, and speculation uses only the listed eTag, size and download URL proof of §5.1,
+never the metadata fallback. It retains exactly the same single-version binding (F297).
+
+Speculation touches no disk, download-guard budget, `download_after` coverage, whole
+download or hydrating state. Its messages are debug read-ahead messages. Later program
+reads undergo ordinary admission and counting, including hits in memory. A failed or
+cancelled foreground read cancels its scan; policy changes, three seconds without a
+head, mount stop and sign-out cancel pending work too. One scan lasts at most five
+minutes, and cached pieces retain the range store's existing five-minute expiry.
+The fake-server regression scans 40 mixed-size PNGs with 300 ms content latency and
+requires at least four times the speed with exactly one content request per file.
+The VM scenario exercises this through actual FUSE readdir and an app-scoped caller.
+
 ### 5.2 The threshold
 
 Distinct bytes returned to programs as ranges are counted per item and opened content:
@@ -571,8 +619,9 @@ OneDrive has another content than the one it was opened as:
 
 ### 5.6 The transfer pool, a throttle, a pause
 
-Every transfer of an account takes a slot of its transfer pool (`konedrive-graph/src/pool.rs`):
-downloads, ranges, uploads and metadata requests. The pool starts at 16 slots and grows by one for
+Foreground and sync transfers take a slot of the account's pool (`konedrive-graph/src/pool.rs`):
+downloads, uncached ranges, uploads and metadata requests. Speculative read-ahead has its
+own six-request limit (§5.1.1); held or joined pieces need no additional foreground slot. The pool starts at 16 slots and grows by one for
 each transfer that succeeds while work waits and every slot is busy, up to `[transfers] max` (32 by
 default, 1 to 256). A `429` or `503` halves it, once per burst, and no slot is handed out for the
 whole `Retry-After` (10 s when none is given); for five minutes after that wait it grows by one

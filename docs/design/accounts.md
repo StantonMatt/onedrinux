@@ -139,7 +139,7 @@ Keys the example leaves out, each absent until it is set (`config/model.rs`):
 
 - at the top: `pause_on_metered` (absent: `true`) and `on_battery` (absent or unknown:
   `power-saver`), the automatic hold's settings for every account ([writes.md](writes.md) §6.3);
-  `[transfers]` with `max`, `large` and `download_after` ([mount.md](mount.md) §5);
+  `[transfers]` with `max`, `large`, `download_after` and `read_ahead` ([mount.md](mount.md) §5);
   `write_test_drive_ids`, the drives a development build may export a read-write token for
   (§10), which decides no account's mode;
 - in an account: `ignore` and `machine_name` ([writes.md](writes.md) §3, §5), `thumbnails` (absent:

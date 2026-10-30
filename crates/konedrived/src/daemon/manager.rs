@@ -279,7 +279,7 @@ impl AccountManager {
             onedrive,
             baloo: (self.options.baloo)(),
             desktop_bus: self.desktop_bus.clone(),
-            transfers: Transfers { ceiling: config.transfer_ceiling(), large: config.transfer_large(), download_after: config.download_after() },
+            transfers: Transfers { ceiling: config.transfer_ceiling(), large: config.transfer_large(), download_after: config.download_after(), read_ahead: config.read_ahead() },
             ..Wiring::new(Arc::clone(&self.registry), Arc::clone(&account) as Arc<dyn crate::account::FolderAccount>, persist)
         });
         // A switch to read-only asks the folder what waits to be uploaded (`docs/design/writes.md` §2.3).

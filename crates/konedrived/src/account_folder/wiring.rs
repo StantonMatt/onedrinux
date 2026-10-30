@@ -55,11 +55,13 @@ pub struct Transfers {
     /// How much of a file that is not downloaded is read before it is downloaded
     /// whole (`download_after`).
     pub(crate) download_after: u64,
+    /// The bounded folder-scan window; zero disables read-ahead.
+    pub(crate) read_ahead: usize,
 }
 
 impl Default for Transfers {
     fn default() -> Self {
-        Self { ceiling: konedrive_graph::pool::DEFAULT_CEILING, large: konedrive_graph::pool::DEFAULT_LARGE, download_after: crate::config::DOWNLOAD_AFTER }
+        Self { ceiling: konedrive_graph::pool::DEFAULT_CEILING, large: konedrive_graph::pool::DEFAULT_LARGE, download_after: crate::config::DOWNLOAD_AFTER, read_ahead: crate::config::READ_AHEAD }
     }
 }
 

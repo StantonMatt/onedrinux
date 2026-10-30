@@ -42,6 +42,10 @@
 // test: the_careful_path_fetches_and_remembers_whole_blocks
 // test: a_later_block_cannot_switch_the_version_even_after_cache_eviction
 // test: an_incomplete_block_is_never_cached_or_partly_answered
+// test: read_ahead_uses_only_listed_proof_and_never_falls_back_to_metadata
+// test: read_ahead_and_a_real_read_share_one_request_and_keep_the_single_version_binding
+// test: signing_out_cancels_speculative_bodies
+// test: a_real_read_keeps_its_joined_request_when_speculation_is_cancelled
 
 mod links;
 mod read_blocks;
@@ -52,6 +56,7 @@ use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 
 use async_trait::async_trait;
+use futures_util::{future::{BoxFuture, Shared}, FutureExt};
 
 use super::source::{ContentSource, Fetched, ListedContent, SourceError, Version};
 use konedrive_graph::drive::{DriveClient, DriveError, DriveItem};
@@ -85,11 +90,19 @@ enum ListedBinding {
     AskMetadata,
 }
 
+/// A listed piece stays in flight while either speculation or a real read needs it.
+struct Prepared { read: Shared<BoxFuture<'static, Result<bool, SourceError>>> }
+type PreparedKey = (String, ContentVersion, u64, u64);
+
+#[derive(Clone)]
 pub(crate) struct GraphSource {
     drive: DriveClient,
+    /// Listed pieces in flight, shared while speculation or real readers need them.
+    pending: Arc<std::sync::Mutex<std::collections::HashMap<PreparedKey, std::sync::Weak<Prepared>>>>,
+    invalidated: Arc<tokio::sync::Notify>,
     /// By item and opened content, the version its ranges are bound to. An expired URL
     /// never lets a later range of the same opened content silently switch versions.
-    ranges: std::sync::Mutex<std::collections::HashMap<String, std::collections::HashMap<ContentVersion, Bound>>>,
+    ranges: Arc<std::sync::Mutex<std::collections::HashMap<String, std::collections::HashMap<ContentVersion, Bound>>>>,
     /// Serializes cache publication with token invalidation; never held across await.
     cache_use: Arc<std::sync::Mutex<()>>,
     links: Arc<DownloadLinks>,
@@ -105,13 +118,46 @@ impl GraphSource {
         let cache_use = Arc::new(std::sync::Mutex::new(()));
         let clear_use = Arc::clone(&cache_use);
         let (clear_links, clear_files) = (Arc::clone(&links), Arc::clone(&read_blocks));
+        let invalidated = Arc::new(tokio::sync::Notify::new());
+        let cancel = Arc::clone(&invalidated);
         let on_invalidate: Arc<konedrive_graph::token::InvalidateHook> = Arc::new(move || {
             let _cache_use = crate::panic::lock(&clear_use);
+            cancel.notify_waiters();
             clear_links.clear();
             clear_files.clear();
         });
         drive.on_token_invalidate(&on_invalidate);
-        Self { drive, ranges: Default::default(), cache_use, links, read_blocks, _on_invalidate: on_invalidate }
+        Self { drive, pending: Default::default(), invalidated, ranges: Default::default(), cache_use, links, read_blocks, _on_invalidate: on_invalidate }
+    }
+
+    fn prepared_key(item_id: &str, opened_as: &ContentVersion, from: u64, end: u64) -> PreparedKey {
+        let (from, end) = covering(from, end, opened_as.size());
+        (item_id.to_owned(), opened_as.clone(), from, end)
+    }
+
+    fn listed_read(&self, item_id: &str, opened_as: &ContentVersion, listed: &ListedContent, from: u64, end: u64) -> Arc<Prepared> {
+        let mut pending = crate::panic::lock(&self.pending);
+        pending.retain(|_, weak| weak.strong_count() > 0);
+        let entry = pending.entry(Self::prepared_key(item_id, opened_as, from, end)).or_default();
+        if let Some(read) = entry.upgrade() { return read; }
+        let (source, item_id, opened_as, listed) = (self.clone(), item_id.to_owned(), opened_as.clone(), listed.clone());
+        // The map owns only a weak reference, and this future owns no Prepared. The
+        // last interested reader dropping it cancels the HTTP request without a task.
+        let read = async move {
+            let cancelled = source.invalidated.notified();
+            tokio::pin!(cancelled);
+            cancelled.as_mut().enable();
+            if !source.drive.cached_content_allowed() { return Ok(false); }
+            if source.cached_range(&item_id, &opened_as, from, end).is_some() { return Ok(true); }
+            tokio::select! {
+                biased;
+                _ = cancelled => Err(SourceError::SignedOut("the listed read's authentication was invalidated".into())),
+                answer = source.read_listed(&item_id, &opened_as, &listed, from, end) => answer.map(|answer| answer.is_some()),
+            }
+        }.boxed().shared();
+        let prepared = Arc::new(Prepared { read });
+        *entry = Arc::downgrade(&prepared);
+        prepared
     }
 
     /// A range of `opened_as` by the listed version, in one request: `None` when it cannot
@@ -263,26 +309,45 @@ impl GraphSource {
 #[async_trait]
 impl ContentSource for GraphSource {
     async fn read_range(&self, item_id: &str, opened_as: &ContentVersion, listed: Option<&ListedContent>, from: u64, end: u64) -> Result<Fetched, SourceError> {
-        // No secret lookup or refresh on the fast path. Without a fresh token the
-        // authenticated path reports SignedOut (or refreshes), as before.
-        let allowed = {
-            let _cache_use = crate::panic::lock(&self.cache_use);
-            let allowed = self.drive.cached_content_allowed();
-            if !allowed {
-                self.links.clear();
-                self.read_blocks.clear();
-            } else if let Some(answer) = self.read_blocks.find(item_id, opened_as, from, end) {
-                return Ok(answer);
-            }
-            allowed
-        };
-        if !allowed { return self.read_checked(item_id, opened_as, from, end).await; }
+        if let Some(answer) = self.cached_range(item_id, opened_as, from, end) { return Ok(answer); }
+        if !self.drive.cached_content_allowed() { return self.read_checked(item_id, opened_as, from, end).await; }
         if let Some(listed) = listed {
-            if let Some(fetched) = self.read_listed(item_id, opened_as, listed, from, end).await? {
-                return Ok(fetched);
-            }
+            let prepared = self.listed_read(item_id, opened_as, listed, from, end);
+            prepared.read.clone().await?;
+            if let Some(answer) = self.cached_range(item_id, opened_as, from, end) { return Ok(answer); }
         }
         self.read_checked(item_id, opened_as, from, end).await
+    }
+
+    fn cached_range(&self, item_id: &str, opened_as: &ContentVersion, from: u64, end: u64) -> Option<Fetched> {
+        let _cache_use = crate::panic::lock(&self.cache_use);
+        if !self.drive.cached_content_allowed() {
+            self.links.clear();
+            self.read_blocks.clear();
+            return None;
+        }
+        self.read_blocks.find(item_id, opened_as, from, end)
+    }
+
+    async fn prepared_range(&self, item_id: &str, opened_as: &ContentVersion, from: u64, end: u64) -> Option<Fetched> {
+        if let Some(answer) = self.cached_range(item_id, opened_as, from, end) { return Some(answer); }
+        let prepared = crate::panic::lock(&self.pending).get(&Self::prepared_key(item_id, opened_as, from, end)).and_then(std::sync::Weak::upgrade)?;
+        // A real read keeps polling the shared request if the scan is cancelled or
+        // replaced. Only speculative owners dropping cannot force a foreground retry.
+        let _ = prepared.read.clone().await;
+        self.cached_range(item_id, opened_as, from, end)
+    }
+
+    async fn read_ahead(&self, item_id: &str, opened_as: &ContentVersion, listed: &ListedContent) {
+        if !self.drive.cached_content_allowed() || self.drive.pool().throughput().retry_after > 0 { return; }
+        let end = opened_as.size().min(read_blocks::BLOCK);
+        if end == 0 || self.cached_range(item_id, opened_as, 0, end).is_some() { return; }
+        let prepared = self.listed_read(item_id, opened_as, listed, 0, end);
+        match prepared.read.clone().await {
+            Ok(true) => tracing::debug!("read ahead of {item_id}: first {end} bytes retained"),
+            Ok(false) => {},
+            Err(error) => tracing::debug!("read ahead of {item_id} stopped: {error}"),
+        }
     }
 
     fn forget(&self, item_id: &str) {

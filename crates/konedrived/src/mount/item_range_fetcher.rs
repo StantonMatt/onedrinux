@@ -4,7 +4,8 @@
 //! **State owned:** none of its own: the files being read as ranges are `range_readers`',
 //! keyed by the binding's item id (`RangeSource::onedrive_item`), which is what the
 //! content source is asked by; what the content source remembers between two reads is
-//! the source's.
+//! the source's. With read-ahead enabled, a held or pending listed piece is joined
+//! before taking a pool slot; it still passes the same content-fact checks.
 //!
 //! **Answers for:** a read of a file not on disk: the ranges come from OneDrive
 //! (`docs/design/mount.md` §5.1); the
@@ -85,6 +86,7 @@ pub(crate) struct ItemRangeFetcher {
     range_readers: Arc<RangeReaders>,
     source: Arc<dyn ContentSource>,
     throttle_wait: ThrottleWait,
+    cached_reads: bool,
 }
 
 impl ItemRangeFetcher {
@@ -92,8 +94,12 @@ impl ItemRangeFetcher {
     /// daemon's leaves (the steps towards the folder call `forget_ranges`); `fetch_range`
     /// with the reading requests.
     pub(super) fn new(range_readers: Arc<RangeReaders>, source: Arc<dyn ContentSource>, throttle_wait: ThrottleWait) -> Self {
-        ItemRangeFetcher { range_readers, source, throttle_wait }
+        ItemRangeFetcher { range_readers, source, throttle_wait, cached_reads: false }
     }
+
+    /// Scan hits need no network slot. With read-ahead disabled, retain the original
+    /// range-reader lifecycle exactly.
+    pub(super) fn with_read_ahead(mut self, enabled: bool) -> Self { self.cached_reads = enabled; self }
 
     /// The bytes of `source` from `from` up to `end`, all of them: an answer that ends
     /// before `end` fails the read (`EIO`), and no part of it is given. Asks the content source by the
@@ -123,8 +129,13 @@ impl ItemRangeFetcher {
         let onedrive_item_id = source.onedrive_item.item_id.as_str();
         let asked = std::time::Instant::now();
         let asking = async {
+            if self.cached_reads {
+                if let Some(fetched) = self.source.prepared_range(onedrive_item_id, &source.content, from, end).await {
+                    return (Ok(fetched), None);
+                }
+            }
             let active_read = self.range_readers.begin_read(onedrive_item_id).await;
-            (self.source.read_range(onedrive_item_id, &source.content, source.listed.as_ref(), from, end).await, active_read)
+            (self.source.read_range(onedrive_item_id, &source.content, source.listed.as_ref(), from, end).await, Some(active_read))
         };
         let (fetched, _active_read) = match self.throttle_wait.ask_unless_refused(ContentAsker::Program, asking).await {
             Ok(answered) => answered,
@@ -172,7 +183,7 @@ impl ItemRangeFetcher {
             tracing::warn!("item {item}: asked for {wanted} bytes at {from} and the answer of OneDrive ended after {}", bytes.len());
             return Err(RangeRefusal::Failed { errno: libc::EIO });
         }
-        tracing::info!("{} bytes at {from} of item {item} came from OneDrive in {} ms ({} ms to the answer)", bytes.len(), asked.elapsed().as_millis(), answered.as_millis());
+        if _active_read.is_some() { tracing::info!("{} bytes at {from} of item {item} came from OneDrive in {} ms ({} ms to the answer)", bytes.len(), asked.elapsed().as_millis(), answered.as_millis()); }
         Ok(bytes)
     }
 

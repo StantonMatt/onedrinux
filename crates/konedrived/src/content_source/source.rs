@@ -14,7 +14,7 @@ mod target;
 pub(crate) use download::download_staged;
 pub(crate) use parts::{Share, Split};
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub(crate) enum SourceError {
     #[error("{0}")]
     NotFound(String),
@@ -109,6 +109,20 @@ pub(crate) trait ContentSource: Send + Sync {
     async fn read_range(&self, item_id: &str, _opened_as: &konedrive_tree::ContentVersion, _listed: Option<&ListedContent>, from: u64, end: u64) -> Result<Fetched, SourceError> {
         self.fetch(item_id, from, Some(end)).await
     }
+
+    /// A proven memory hit, without taking a transfer slot. Authentication and opened
+    /// generation checks are the same as for `read_range`.
+    fn cached_range(&self, _item_id: &str, _opened_as: &konedrive_tree::ContentVersion, _from: u64, _end: u64) -> Option<Fetched> { None }
+
+    /// A held piece, or one an existing request is preparing. Joining that work must
+    /// start no network request, so a foreground caller needs no second transfer slot.
+    async fn prepared_range(&self, item_id: &str, opened_as: &konedrive_tree::ContentVersion, from: u64, end: u64) -> Option<Fetched> {
+        self.cached_range(item_id, opened_as, from, end)
+    }
+
+    /// Speculatively retain the first piece, only by listed version proof. Unsupported
+    /// sources do nothing; this must never fall back to metadata or write to disk.
+    async fn read_ahead(&self, _item_id: &str, _opened_as: &konedrive_tree::ContentVersion, _listed: &ListedContent) {}
 
     /// The item changed or is gone: whatever the source remembered of it is dropped.
     fn forget(&self, _item_id: &str) {}

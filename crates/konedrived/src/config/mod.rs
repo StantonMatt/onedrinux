@@ -28,7 +28,7 @@ pub(crate) use write_scope::{WriteScope, WriteScopeSource};
 pub(crate) use atomic::write_atomic;
 pub use config_trouble::{AccountHold, ConfigTrouble};
 pub use ids::{AccountId, DriveId};
-pub use model::{DOWNLOAD_AFTER, 
+pub use model::{DOWNLOAD_AFTER, READ_AHEAD,
     check_label, is_valid_client_id, signed_in_label, AccountConfig, Config, HoldSettings, Mode, OnBattery, Origin, RootConfig,
     TransfersConfig, CONFIG_VERSION, DEFAULT_CLIENT_ID, DEFAULT_FREE_SPACE_RESERVE_GB, FALLBACK_LABEL, MIGRATED_LABEL,
 };

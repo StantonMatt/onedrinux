@@ -317,11 +317,66 @@ os.close(fd)" "$F/slow.bin" "$SRC" &
     check "a later read still gives the right bytes" "$(is_seed slow.bin X && echo equal)" equal
 }
 
+# An actual app scope and FUSE readdir exercise the automatic trigger, not a test
+# injection. Every first 16 KiB read must share its prefetched piece, without hydration.
+a_desktop_folder_scan_reads_ahead_without_landing_files() {
+    begin_folder
+    for n in $(seq -w 0 39); do
+        if [ $((10#$n % 2)) -eq 0 ]; then
+            seed_random P$n R "$n.png" 24576
+        else
+            seed_random P$n R "$n.PNG" 1072032
+        fi
+    done
+    seed_random J R other.jpg 24576
+    onedrive folder D R directory.png > /dev/null
+    register_folder read-only
+    scan_names_are_shown() { [ "$(user 'ls | wc -l')" -eq 42 ]; }
+    check_within 20 "all scan names are shown" scan_names_are_shown
+    onedrive delay GET dl/ 300 100 > /dev/null
+    mkdir -p /mnt/scan-cgroups
+    mount -t cgroup2 none /mnt/scan-cgroups
+    local app_group=/mnt/scan-cgroups/app-org.kde.gwenview-123.scope result
+    mkdir "$app_group"
+    result=$(bash -c 'echo $$ > "$1/cgroup.procs"; shift; exec "$@"' bash "$app_group" $U python3 - "$F" "$SRC" <<'PYCODE'
+import os, pathlib, sys, time
+folder, seeds = map(pathlib.Path, sys.argv[1:])
+# Preserve the order answered by FUSE; a directory with the same suffix is skipped.
+entries = [entry for entry in os.scandir(folder) if entry.name.lower().endswith('.png') and entry.is_file()]
+assert len(entries) == 40
+began = time.monotonic()
+for entry in entries:
+    fd = os.open(entry.path, os.O_RDONLY)
+    try:
+        answer = os.pread(fd, 16384, 0)
+    finally:
+        os.close(fd)
+    with open(seeds / ('seed-P' + entry.name[:2]), 'rb') as expected:
+        assert answer == expected.read(16384), entry.name
+assert all(entry.stat().st_blocks == 0 for entry in entries)
+print('40 correct cloud-only heads')
+print(f'scan seconds: {time.monotonic() - began:.3f}', file=sys.stderr)
+PYCODE
+)
+    rmdir "$app_group"
+    umount /mnt/scan-cgroups
+    check "the app reads the right heads and no file lands" "$result" '40 correct cloud-only heads'
+    check "every file costs exactly one content request" "$(onedrive count GET dl/)" 40
+    for n in $(seq -w 0 39); do
+        check "file $n shares its one request with demand" "$(onedrive count GET dl/P$n)" 1
+    done
+    check "a JPEG is not prefetched" "$(onedrive count GET dl/J)" 0
+    check "a directory is not prefetched" "$(onedrive count GET dl/D)" 0
+    check "speculation creates no admission counters" "$(daemon guard apps)" ''
+    check "no whole download is staged" "$(daemon staged)" '[]'
+}
+
 # The group: every scenario of reading beside a fault.
 file_reads() {
     echo "==== reading beside a fault ===="
     ip link set lo up
     for name in \
+        a_desktop_folder_scan_reads_ahead_without_landing_files \
         an_interrupted_range_read_answers_eintr_without_dropping_its_reply \
         download_cut_off_gives_no_wrong_bytes \
         download_cut_off_keeps_what_it_has_and_goes_on_from_there \

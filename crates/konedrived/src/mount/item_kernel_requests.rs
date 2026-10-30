@@ -383,6 +383,7 @@ pub(crate) struct ItemKernelRequests {
     reply_attributes: Arc<WriteReplyAttributes>,
     store: Store,
     pub(super) download_guard: Arc<crate::download_guard::DownloadGuard>,
+    pub(super) read_ahead: Option<Arc<super::read_ahead::ReadAhead>>,
 }
 
 impl ItemKernelRequests {
@@ -407,7 +408,7 @@ impl ItemKernelRequests {
         store: Store,
     ) -> Self {
         let reply_attributes = Arc::new(WriteReplyAttributes { store: store.clone(), lookup: Arc::clone(&lookup) });
-        Self { lookup, read_connections, place_changes, item_handles, write_operations, write_operation_thread, inotify_bridge, downloader, download_states, range_fetcher, free_up, access_mode_switch, reply_attributes, store, download_guard: Arc::new(crate::download_guard::DownloadGuard::default()) }
+        Self { read_ahead: None, lookup, read_connections, place_changes, item_handles, write_operations, write_operation_thread, inotify_bridge, downloader, download_states, range_fetcher, free_up, access_mode_switch, reply_attributes, store, download_guard: Arc::new(crate::download_guard::DownloadGuard::default()) }
     }
 
     /// lookup. For the inotify bridge's own thread (`ItemInotifyBridge::is_own_thread` of
@@ -467,6 +468,7 @@ impl ItemKernelRequests {
         }
         let listed = Arc::new(self.lookup.list_entries(node)?);
         self.item_handles.keep_listed_items(fh, Arc::clone(&listed));
+        if let Some(ahead) = &self.read_ahead { ahead.listed(node, Arc::clone(&listed)); }
         Ok(listed)
     }
 
@@ -654,7 +656,11 @@ impl ItemKernelRequests {
 
     pub(super) async fn read_range(&self, range: RangeToFetch, pid: Option<u32>) -> Result<Vec<u8>, Errno> {
         self.admit_remote(pid, &range, range.end.saturating_sub(range.from))?;
+        let mut head = pid.filter(|pid| !self.inotify_bridge.is_own_thread(*pid))
+            .and_then(|pid| self.download_guard.read_ahead_caller(pid))
+            .and_then(|caller| self.read_ahead.as_ref()?.head(caller, range.item, &range.source.content, range.from));
         let bytes = self.fetch_range(&range).await?;
+        if let Some(head) = &mut head { head.completed = true; }
         if self.download_states.count_bytes_read(range.item, &range.source.content, range.from, bytes.len() as u64) {
             if !self.download_states.is_downloading(range.item) && self.downloader.read_fits(range.source.content.size()) {
                 if let Ok(charge) = self.charge_download(pid, &range) {

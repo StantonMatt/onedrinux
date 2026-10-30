@@ -522,6 +522,7 @@ impl ItemFixture {
             pool: Arc::clone(&self.pool),
             split_download_share: Arc::clone(&self.split_download_share),
             download_after: DOWNLOAD_AFTER,
+            read_ahead: crate::config::READ_AHEAD,
             change_guard: self.place_changes.change_guard.clone(),
             download_guard: Arc::new(crate::download_guard::DownloadGuard::default()),
             free_space_reserve: Arc::new(|| 0),

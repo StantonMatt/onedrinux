@@ -148,6 +148,9 @@ The machine-wide [download guard](design/download-guard.md), shared by every mou
 - `identity.rs` — procfs caller facts, systemd app identities, KIO roles and the configurable reader/host lists. `[tests]`
 - `space.rs` — allocations shared by reads, pins and explicit hydrate on the same filesystem. `[tests]`
 
+- `read_ahead.rs` — uncharged desktop scan eligibility and live policy notifications.
+- `read_ahead/tests.rs` — host/background exclusions, allowances and blocks.
+
 ### `crates/konedrived/src/account/`
 
 One account: its sign-in, mode, state, quota, cached profile, stored secret.
@@ -245,6 +248,9 @@ Where a download gets its bytes from, and the download of a whole file.
   answers and version changes across blocks and eviction.
 - `tracked.rs` — `Tracked`: a content source that reports what it fetches to `Transfers`.
   `[tests]`
+
+- `graph_source/tests/read_ahead.rs` — listed-only speculation, request sharing,
+  version changes, sign-out and shared request ownership through scan cancellation.
 
 ### `crates/konedrived/src/local/`
 
@@ -400,6 +406,10 @@ A file that is not on disk:
   pool admission and early refusals do not count. Tests in `range_read_states/tests.rs`
   and `item_kernel_requests/tests/fetch_states.rs` cover quick, overlapping and slow
   fetches, disk/memory answers, errors, stale content, interrupts and throttle waits.
+- `read_ahead.rs` — one short desktop folder scan, readdir snapshots, a bounded
+  speculative window and cancellation; uses the existing in-memory range store.
+- `item_kernel_requests/tests/read_ahead.rs` — 300 ms/40-file timing and request
+  regression, exclusions, guard and idle cancellation, foreground priority.
 - `range_readers.rs` — the files being read as ranges, which go before the background
   downloads. `[tests]`
 - `item_downloader.rs` — `ItemDownloader`: a file downloaded whole into the backing directory,

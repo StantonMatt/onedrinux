@@ -90,6 +90,8 @@ pub(crate) struct ItemMountSetup {
     pub(crate) free_space_reserve: Arc<dyn Fn() -> u64 + Send + Sync>,
     /// `[transfers] download_after`.
     pub(crate) download_after: u64,
+    /// The bounded folder-scan window; zero disables read-ahead.
+    pub(crate) read_ahead: usize,
     /// The folder's tree lock: each job of the write-operation thread runs under it, and
     /// each commit of a step.
     pub(crate) tree_lock: Arc<tokio::sync::Mutex<()>>,
@@ -251,6 +253,7 @@ impl ItemMount {
         let session = crate::panic::lock(&self.session).take();
         let parts = &self.parts_to_stop;
         // No write operation, landing or step towards the folder runs from here on.
+        parts.read_ahead.stop();
         parts.write_operation_thread.stop();
         parts.inotify_bridge.stop();
         parts.downloader.stop();
