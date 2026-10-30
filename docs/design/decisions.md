@@ -784,12 +784,20 @@ answer a user already knows, it is followed.
 
 - **Decision.** The daemon writes OneDrive's own thumbnails into the freedesktop cache at the sizes
   `normal`, `large` and `x-large`, from one `c512x512` request per file; `xx-large` is not filled
-  ([desktop.md](desktop.md) §8).
+  ([desktop.md](desktop.md) §8). Each size gets KIO's FullyEncoded URI name and, when different,
+  Gwenview 25.12's PrettyDecoded name, with the matching URI tag. The startup/timer cache scan
+  repairs missing or stale names locally from their current counterpart, in batches of 200
+  marks; it asks Graph only when neither name has a size. Current PNGs from other writers stay.
 - **Why.** Dolphin draws a correctly tagged cached thumbnail without opening the file, so previews
   cost no download. One request per file serves the three sizes; a 1024 px request would be four
-  times the bytes for a size used only at maximum zoom.
-- **Trade-off.** At maximum zoom KIO makes its own thumbnail and reads the file; type detection of
-  files without a telling extension still reads them (K1).
+  times the bytes for a size used only at maximum zoom. Gwenview hashes literal spaces and
+  Unicode instead of KIO's escaped spelling ([kio-behavior.md](../kio-behavior.md) §A); its thumbnail strip otherwise
+  reads the originals despite a complete KIO cache. Existing caches are upgraded without
+  fetching their images again.
+- **Trade-off.** Names with spaces or Unicode cost two cache PNGs per size, but no extra Graph
+  request. Invalid UTF-8 names keep KIO's name alone, since Qt replaces invalid bytes. At maximum
+  zoom KIO makes its own thumbnail and reads the file; type detection of files without a telling
+  extension still reads them (K1).
 
 ### 6.8 Keep Baloo out of the folder, and touch only the daemon's own exclusion
 

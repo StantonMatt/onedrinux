@@ -47,6 +47,50 @@ itself rather than asking KIO to generate the file — so this gap does not carr
 strategy. It is flagged here as a fact about KIO 6.30's own xx-large thumbnailing, not explained
 further.
 
+A source check of [KIO's `PreviewJob`](https://invent.kde.org/frameworks/kio/-/blob/master/src/gui/previewjob.cpp)
+(`setup`, `cachedThumbnailQueue`) also uses
+`url.toEncoded(QUrl::RemovePassword | QUrl::FullyEncoded)`, confirming the existing spelling;
+that check found no third spelling.
+
+**Gwenview uses a second spelling.** The reported 2026-10-30 investigation on build
+`eb88da5` found 161 Gwenview-written `large` thumbnails whose `Thumb::URI` contained literal
+spaces. The daemon's percent-encoded names were already present, but Gwenview ignored them and
+read the original images for its thumbnail strip. This is supplied incident evidence; the
+implementation checks below used synthetic paths and isolated caches, without reading that folder.
+
+[Gwenview release/25.12, `thumbnailprovider.cpp`](https://invent.kde.org/graphics/gwenview/-/blob/release/25.12/lib/thumbnailprovider/thumbnailprovider.cpp)
+lines 71–75 define `generateOriginalUri` with
+`return url.adjusted(QUrl::RemovePassword).url();`. Lines 77–83 hash
+`QFile::encodeName(uri)` with MD5. The default `.url()` format is `PrettyDecoded`:
+spaces and valid Unicode stay decoded, whereas `%`, `#`, `?`, square/curly brackets, caret,
+backtick, pipe, quotes, angle brackets, backslash and ASCII controls stay escaped. A tiny Qt
+6.10.2 probe using `QUrl::fromLocalFile` and that exact expression confirmed these spellings
+(the full table is a Rust regression beside `a_file_uri_escapes_what_a_path_segment_cannot_hold`):
+
+| Path | Gwenview URI |
+| --- | --- |
+| `/h/plain.jpg` | `file:///h/plain.jpg` |
+| `/h/with space.jpg` | `file:///h/with space.jpg` |
+| `/h/фото.jpg` | `file:///h/фото.jpg` |
+| `/h/😀.jpg` | `file:///h/😀.jpg` |
+| `/h/100%.jpg` | `file:///h/100%25.jpg` |
+| `/h/[ ].jpg` | `file:///h/%5B %5D.jpg` |
+| `/h/tab\t.jpg` (tab byte) | `file:///h/tab%09.jpg` |
+
+Lines 459–460 accept a cache entry whose `Thumb::URI` and seconds `Thumb::MTime` match,
+with `Thumb::Size` absent/zero or equal to the source size. Missing image dimensions are
+accepted (lines 461–482). The group is chosen by pixel size including device pixel ratio;
+up to 128/256/512 px means `normal`/`large`/`x-large`.
+
+The daemon therefore writes each size under both names when they differ, tagging each PNG
+with its own spelling and the same mtime. The MD5 input is UTF-8; Unicode `Thumb::URI` uses PNG
+iTXt, readable by Qt. Equal spellings get one PNG. Invalid UTF-8 path bytes get only the existing
+KIO name: Qt substitutes U+FFFD, losing byte identity, so the second name is deliberately skipped.
+On the first cache scan after startup, and every ten minutes, a missing or stale name is repaired
+from the current PNG under the other name at the same size without contacting Graph. A current
+PNG written by Gwenview is kept; a stale one is atomically replaced from its current counterpart,
+or refreshed through Graph if neither name has that size. The mark stays during a local repair.
+
 ## B. Does a cached thumbnail keep the file closed?
 
 ```

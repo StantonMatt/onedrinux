@@ -493,8 +493,8 @@ Baloo, KDE's directory notifications and thumbnails.
 - `mod.rs` — the list of the modules.
 - `baloo.rs` — keeps KDE's file indexer out of a sync folder. `[tests]`
 - `dirnotify.rs` — telling KDE's programs to read directories again (`org.kde.KDirNotify`).
-- `thumbs.rs` — thumbnails from OneDrive, written into the freedesktop thumbnail cache.
-  `[tests]`
+- `thumbs.rs` — thumbnails from OneDrive, written under KIO's and Gwenview's URI names;
+  bounded startup/timer scans repair missing cache names locally. `[tests]`
 - `thumbs/request_start.rs` — `decide_request_start`: whether a thumbnail request may start
   now. `[tests]`
 

@@ -1,7 +1,7 @@
 //! Thumbnails from OneDrive: Graph's own thumbnail of every file of a type a thumbnail is
 //! made for — images, videos and documents (the store's `HAS_THUMBNAIL_TYPE`) — written
-//! into the freedesktop thumbnail cache under the name KIO looks for
-//! (`docs/kio-behavior.md`), so that Dolphin draws it without opening — and so
+//! into the freedesktop thumbnail cache under the names KIO and Gwenview look for
+//! (`docs/kio-behavior.md`), so that previews draw without opening — and so
 //! downloading — the file. In the background, a few requests at once and none while
 //! anything else has work for OneDrive ([`request_start`]): a thumbnail is a request to the
 //! Graph API, and takes no slot of the account's transfer pool.
@@ -20,12 +20,21 @@
 //!
 //! The cache itself is looked at in the first drain after the folder's sync started and
 //! in the one the ten-minute timer starts ([`DrainCause`]): a written thumbnail of which
-//! the cache lacks a size ([`decide_cached_thumbnail`]) has its mark forgotten, and the
-//! same drain makes it again.
+//! the cache lacks a size under either name is repaired from the other name locally. If
+//! neither name has that size, its mark is forgotten ([`decide_cached_thumbnail`]), and
+//! the same drain makes it again. The scan and repairs use batches of 200 marks.
 //!
 //! How many thumbnails are being downloaded now is `Transfers.ThumbnailDownloads`
 //! (`TransferStatus::thumbnail_downloads`), written here as each request starts and ends.
 
+// test: a_gwenview_uri_matches_qt_pretty_decoded
+// test: spaces_and_unicode_get_both_cache_names_and_plain_names_get_one
+// test: the_first_drain_upgrades_old_names_in_batches_without_graph_or_forgetting_marks
+// test: either_names_missing_size_is_repaired_but_a_size_missing_from_both_is_fetched
+// test: current_gwenview_pngs_are_left_alone_and_stale_ones_are_replaced_locally
+// test: a_current_gwenview_png_is_kept_when_both_viewers_share_the_name
+// test: a_failed_or_cancelled_local_repair_keeps_its_mark_without_graph
+// test: renaming_a_file_writes_both_new_names_and_removal_does_not_fetch_it
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -82,6 +91,31 @@ pub(crate) fn file_uri(path: &Path) -> String {
     out
 }
 
+/// For absolute Unix paths below the sync root, Gwenview 25.12's
+/// `url.adjusted(QUrl::RemovePassword).url()`: PrettyDecoded
+/// keeps spaces and valid Unicode, but escapes ASCII outside the path's allowed bytes.
+/// Invalid UTF-8 paths have only the KIO name: Qt's replacement characters lose identity.
+fn gwenview_uri(path: &Path) -> Option<String> {
+    let mut out = String::from("file://");
+    for ch in path.to_str()?.chars() {
+        if !ch.is_ascii() || ch == ' ' || ch.is_ascii_alphanumeric() || "-._~/!$&'()*+,;=:@".contains(ch) {
+            out.push(ch);
+        } else {
+            out.push_str(&format!("%{:02X}", ch as u32));
+        }
+    }
+    Some(out)
+}
+
+/// One name when the spellings agree; otherwise KIO first, Gwenview second.
+fn thumbnail_uris(file: &Path) -> Vec<String> {
+    let mut uris = vec![file_uri(file)];
+    if let Some(uri) = gwenview_uri(file).filter(|uri| uri != &uris[0]) {
+        uris.push(uri);
+    }
+    uris
+}
+
 pub(crate) struct ThumbnailFiller {
     drive: DriveClient,
     store: Store,
@@ -136,15 +170,16 @@ enum CandidateOutcome {
 /// Whether the cache holds a file's thumbnail whole.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CachedThumbnail {
-    /// The PNG of every size the filler writes ([`SIZES`]) is there.
+    /// The current PNG of every size ([`SIZES`]) is there under every URI spelling.
     Whole,
-    /// The PNG of one size or more is not: the thumbnail is made again, since KIO makes a
-    /// size it does not find by reading the file.
+    /// A size is missing under both names and could not be repaired locally: the
+    /// thumbnail is made again, since a viewer makes a missing size by reading the file.
     Missing,
 }
 
 /// What making a thumbnail from the bytes Graph gave back can fail at, once
 /// there are bytes to work with at all.
+#[derive(Debug)]
 enum FillError {
     /// The bytes are not a usable image: corrupt, an unsupported format, or
     /// over the decode limits ([`MAX_DECODE_EDGE`]/[`MAX_DECODE_ALLOC`]).
@@ -314,13 +349,20 @@ impl ThumbnailFiller {
     /// makes them again: the marks that stand of a thumbnail written
     /// (`ItemReader::list_thumbnail_marks`), `limit` at a time, each looked up in the cache
     /// ([`find_cached_sizes`], [`decide_cached_thumbnail`]), and those `Missing` forgotten
-    /// in one store write per batch (`ItemStore::forget_thumbnail_marks`). A cache that
-    /// cannot be looked into tells nothing: the look ends there. Three `stat`s per mark.
+    /// in one store write per batch (`ItemStore::forget_thumbnail_marks`). A missing or
+    /// stale name is first repaired from its current counterpart at the same size, keeping
+    /// the mark without a Graph request. A cache that cannot be read or written ends the
+    /// scan; cancellation is checked between marks as well as between bounded batches.
     async fn forget_marks_of_missing_thumbnails(&self, cancel: &CancellationToken, limit: usize) {
         let mut forgotten = 0;
         let mut after = None;
         while !cancel.is_cancelled() {
-            let marks = match self.store.read_items(move |reader| reader.list_thumbnail_marks(after, limit)).await {
+            let marks = match self.store.read_items(move |reader| {
+                reader.list_thumbnail_marks(after, limit)?.into_iter().map(|mark| {
+                    let content = reader.find_item(mark.item)?.and_then(|item| item.onedrive).and_then(|version| version.content);
+                    Ok((mark, content))
+                }).collect::<Result<Vec<_>, konedrive_tree::TreeError>>()
+            }).await {
                 Ok(marks) => marks,
                 Err(e) => {
                     tracing::warn!("cannot list the thumbnails made, to look for them in the cache: {e}");
@@ -328,12 +370,17 @@ impl ThumbnailFiller {
                 }
             };
             // A full batch may have more after it; a short one was the last.
-            let next = marks.last().map(|last| last.item).filter(|_| limit > 0 && marks.len() >= limit);
+            let next = marks.last().map(|(last, _)| last.item).filter(|_| limit > 0 && marks.len() >= limit);
             let (cache, folder) = (self.cache.clone(), self.root.path.clone());
+            let stop = cancel.clone();
             let looked = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<LocalItemId>> {
                 let mut missing = Vec::new();
-                for mark in marks {
-                    if decide_cached_thumbnail(&find_cached_sizes(&cache, &folder.join(&mark.path))?) == CachedThumbnail::Missing {
+                for (mark, content) in marks {
+                    if stop.is_cancelled() {
+                        break;
+                    }
+                    let Some(content) = content else { continue };
+                    if decide_cached_thumbnail(&find_cached_sizes(&cache, &folder.join(&mark.path), content.mtime().0, content.size())?) == CachedThumbnail::Missing {
                         missing.push(mark.item);
                     }
                 }
@@ -424,8 +471,8 @@ impl One {
         // cannot be written are not, and are asked again at the next drain.
         let outcome = match fetched {
             Ok(Thumbnail::Image(bytes)) => {
-                let (cache, file, mtime) = (self.cache.clone(), self.folder.join(rel), content.mtime().0);
-                match tokio::task::spawn_blocking(move || write_thumbnail(&cache, &file, mtime, &bytes)).await {
+                let (cache, file, mtime, source_size) = (self.cache.clone(), self.folder.join(rel), content.mtime().0, content.size());
+                match tokio::task::spawn_blocking(move || write_thumbnail(&cache, &file, mtime, source_size, &bytes)).await {
                     Ok(Ok(())) => CandidateOutcome::Written,
                     Ok(Err(FillError::Undecodable(reason))) => {
                         tracing::warn!("no usable thumbnail for {}: {reason}", rel.display());
@@ -467,7 +514,7 @@ impl One {
 }
 
 /// Whether the cache holds a file's thumbnail whole, given the sizes whose PNG a look
-/// found there (`found`, by the name of their directory). Pure: the `stat`s are
+/// found under every URI spelling (`found`, by directory name). Pure; the lookups are
 /// [`find_cached_sizes`].
 fn decide_cached_thumbnail(found: &[&str]) -> CachedThumbnail {
     if SIZES.iter().all(|(size, _)| found.contains(size)) {
@@ -477,74 +524,160 @@ fn decide_cached_thumbnail(found: &[&str]) -> CachedThumbnail {
     }
 }
 
-/// The sizes of [`SIZES`] whose PNG the cache holds for the file at `file`, under the
-/// name [`write_thumbnail`] gives it: a `stat` of each. An error other than the PNG's
-/// absence is one of a cache that cannot be looked into. Blocking.
-fn find_cached_sizes(cache: &Path, file: &Path) -> std::io::Result<Vec<&'static str>> {
-    let name = thumbnail_name(file);
+/// The sizes held under every spelling, repairing a missing or stale name from the
+/// current PNG under the other name at that size. A current PNG from any writer is left
+/// alone. If both names lack a size, the caller forgets the mark and asks Graph as before.
+/// Blocking; no source file is opened. I/O errors end the cache scan without forgetting.
+fn find_cached_sizes(cache: &Path, file: &Path, mtime: i64, source_size: u64) -> std::io::Result<Vec<&'static str>> {
+    let uris = thumbnail_uris(file);
+    let names: Vec<_> = uris.iter().map(|uri| name_for_uri(uri)).collect();
     let mut found = Vec::new();
-    for (size, _) in SIZES {
-        match std::fs::metadata(cache.join(size).join(&name)) {
-            Ok(metadata) if metadata.is_file() => found.push(*size),
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
+    for (size, edge) in SIZES {
+        let images = uris.iter().zip(&names).map(|(uri, name)| cached_png(&cache.join(size).join(name), uri, mtime, source_size)).collect::<std::io::Result<Vec<_>>>()?;
+        if let Some(png) = images.iter().flatten().next() {
+            if images.iter().any(Option::is_none) {
+                // Decoding is needed only for a repair, under the same limits as Graph.
+                let Ok(image) = decode_thumbnail(&png.bytes) else { continue };
+                for ((uri, name), present) in uris.iter().zip(&names).zip(&images) {
+                    if present.is_none() {
+                        write_size(cache, name, uri, mtime, &image, size, *edge).map_err(std::io::Error::other)?;
+                    }
+                }
+            }
+            found.push(*size);
         }
     }
     Ok(found)
 }
 
-/// The name of the file at `file`'s thumbnail in the directory of each size: the MD5 of
-/// its URI ([`file_uri`]), as KIO names it (`docs/kio-behavior.md` §A).
-fn thumbnail_name(file: &Path) -> String {
-    format!("{:x}.png", md5::Md5::digest(file_uri(file).as_bytes()))
+/// A current cache image and its writer; repairs reuse the bytes, Graph writes preserve
+/// another program's current PNG even when the two URI spellings share one name.
+struct CachedPng {
+    bytes: Vec<u8>,
+    software: Option<String>,
 }
 
-/// Decodes `jpeg` (any format `image` recognises, under the decode limits),
-/// scales it to each of `SIZES` and writes it into the freedesktop cache
-/// atomically (a temp file, then a rename) — all synchronous, so callers run
-/// it with `spawn_blocking` rather than on the async task.
-fn write_thumbnail(cache: &Path, file: &Path, mtime: i64, jpeg: &[u8]) -> Result<(), FillError> {
-    let uri = file_uri(file);
-    let name = thumbnail_name(file);
+/// Reads only a bounded cache PNG, never the original image. The tags are checked even
+/// for another program's PNG, including its optional size (Gwenview's acceptance rule).
+/// Missing, corrupt, oversized or stale PNGs are absent; other I/O errors stop the scan.
+fn cached_png(path: &Path, uri: &str, mtime: i64, source_size: u64) -> std::io::Result<Option<CachedPng>> {
+    use std::io::Read;
+    const MAX_CACHE_BYTES: u64 = 8 * 1024 * 1024;
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    if !metadata.is_file() || metadata.len() > MAX_CACHE_BYTES {
+        return Ok(None);
+    }
+    let mut bytes = Vec::new();
+    match std::fs::File::open(path) {
+        Ok(file) => { file.take(MAX_CACHE_BYTES + 1).read_to_end(&mut bytes)?; }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    }
+    if bytes.len() as u64 > MAX_CACHE_BYTES {
+        return Ok(None);
+    }
+    let decoder = png::Decoder::new_with_limits(std::io::Cursor::new(&bytes), png::Limits { bytes: MAX_DECODE_ALLOC as usize });
+    let Ok(mut reader) = decoder.read_info() else { return Ok(None) };
+    if reader.info().width > MAX_DECODE_EDGE || reader.info().height > MAX_DECODE_EDGE || reader.finish().is_err() {
+        return Ok(None);
+    }
+    let info = reader.info();
+    // A compressed tag inflates to at most this; a longer one is no tag of ours.
+    const MAX_TEXT_BYTES: usize = 64 * 1024;
+    let text = |key: &str| {
+        info.uncompressed_latin1_text.iter().find(|t| t.keyword == key).map(|t| t.text.clone())
+            .or_else(|| info.compressed_latin1_text.iter().find(|t| t.keyword == key).and_then(|t| {
+                let mut t = t.clone();
+                t.decompress_text_with_limit(MAX_TEXT_BYTES).ok()?;
+                t.get_text().ok()
+            }))
+            .or_else(|| info.utf8_text.iter().find(|t| t.keyword == key).and_then(|t| {
+                let mut t = t.clone();
+                t.decompress_text_with_limit(MAX_TEXT_BYTES).ok()?;
+                t.get_text().ok()
+            }))
+    };
+    let size = text("Thumb::Size").and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+    let current = text("Thumb::URI").as_deref() == Some(uri)
+        && text("Thumb::MTime").and_then(|s| s.parse::<i64>().ok()) == Some(mtime)
+        && (size == 0 || size == source_size);
+    let software = text("Software");
+    drop(reader);
+    Ok(current.then_some(CachedPng { bytes, software }))
+}
 
+/// The MD5 of a viewer's URI spelling, encoded as UTF-8 (QFile::encodeName on Unix).
+fn name_for_uri(uri: &str) -> String {
+    format!("{:x}.png", md5::Md5::digest(uri.as_bytes()))
+}
+
+/// The KIO name, also used by tests of the cache shared with Dolphin.
+#[cfg(test)]
+fn thumbnail_name(file: &Path) -> String {
+    name_for_uri(&file_uri(file))
+}
+
+/// Decodes Graph's image once and writes all sizes under both names atomically.
+/// A current PNG from another writer is left alone. The daemon's own entries are
+/// refreshed even when a new content version has the same mtime and source size.
+fn write_thumbnail(cache: &Path, file: &Path, mtime: i64, source_size: u64, jpeg: &[u8]) -> Result<(), FillError> {
+    let image = decode_thumbnail(jpeg)?;
+    for uri in &thumbnail_uris(file) {
+        let name = name_for_uri(uri);
+        for (dir, edge) in SIZES {
+            let current = cached_png(&cache.join(dir).join(&name), uri, mtime, source_size).map_err(|e| FillError::Io(e.to_string()))?;
+            if current.as_ref().is_some_and(|png| png.software.as_deref() != Some("konedrive")) {
+                continue;
+            }
+            write_size(cache, &name, uri, mtime, &image, dir, *edge).map_err(|e| FillError::Io(e.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
+/// The same decode limits for Graph images and PNGs used to repair another cache name.
+fn decode_thumbnail(bytes: &[u8]) -> Result<image::DynamicImage, FillError> {
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(MAX_DECODE_EDGE);
     limits.max_image_height = Some(MAX_DECODE_EDGE);
     limits.max_alloc = Some(MAX_DECODE_ALLOC);
-    let mut reader = image::ImageReader::new(std::io::Cursor::new(jpeg))
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| FillError::Undecodable(e.to_string()))?;
     reader.limits(limits);
-    let image = reader.decode().map_err(|e| FillError::Undecodable(e.to_string()))?;
-
-    write_sizes(cache, &name, &uri, mtime, &image).map_err(|e| FillError::Io(e.to_string()))
+    reader.decode().map_err(|e| FillError::Undecodable(e.to_string()))
 }
 
-/// The filesystem half of [`write_thumbnail`]: scale, PNG-encode and cache
-/// `image` at every size in [`SIZES`].
-fn write_sizes(cache: &Path, name: &str, uri: &str, mtime: i64, image: &image::DynamicImage) -> anyhow::Result<()> {
+/// Scale down, tag and atomically replace one cache PNG. Unicode URIs use iTXt,
+/// since PNG's older tEXt chunk can only hold Latin-1.
+fn write_size(cache: &Path, name: &str, uri: &str, mtime: i64, image: &image::DynamicImage, dir: &str, edge: u32) -> anyhow::Result<()> {
     use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-    for (dir, edge) in SIZES {
-        let scaled = if image.width().max(image.height()) > *edge { image.thumbnail(*edge, *edge) } else { image.clone() };
-        let rgba = scaled.to_rgba8();
-        let dir = cache.join(dir);
-        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
-        let tmp = dir.join(format!(".{name}.konedrive"));
-        {
-            let file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
-            let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), rgba.width(), rgba.height());
-            encoder.set_color(png::ColorType::Rgba);
-            encoder.set_depth(png::BitDepth::Eight);
+    let scaled = if image.width().max(image.height()) > edge { image.thumbnail(edge, edge) } else { image.clone() };
+    let rgba = scaled.to_rgba8();
+    let dir = cache.join(dir);
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
+    let tmp = dir.join(format!(".{name}.konedrive"));
+    {
+        let file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
+        let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), rgba.width(), rgba.height());
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        if uri.is_ascii() {
             encoder.add_text_chunk("Thumb::URI".into(), uri.to_owned())?;
-            encoder.add_text_chunk("Thumb::MTime".into(), mtime.to_string())?;
-            encoder.add_text_chunk("Software".into(), "konedrive".into())?;
-            let mut writer = encoder.write_header()?;
-            writer.write_image_data(rgba.as_raw())?;
-            writer.finish()?;
+        } else {
+            encoder.add_itxt_chunk("Thumb::URI".into(), uri.to_owned())?;
         }
-        std::fs::rename(&tmp, dir.join(name))?;
+        encoder.add_text_chunk("Thumb::MTime".into(), mtime.to_string())?;
+        encoder.add_text_chunk("Software".into(), "konedrive".into())?;
+        let mut writer = encoder.write_header()?;
+        writer.write_image_data(rgba.as_raw())?;
+        writer.finish()?;
     }
+    std::fs::rename(&tmp, dir.join(name))?;
     Ok(())
 }
 

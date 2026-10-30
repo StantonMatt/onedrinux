@@ -38,7 +38,9 @@ async fn world(files: &[(&str, &str)]) -> World {
 }
 
 fn thumb_path(name: &str, size: &str) -> String {
-    format!("/me/drive/items/{}/thumbnails/0/{size}/content", onedrive_id_of(name))
+    let mut url = Url::parse("http://fake/").unwrap();
+    url.path_segments_mut().unwrap().extend(["me", "drive", "items", &onedrive_id_of(name), "thumbnails", "0", size, "content"]);
+    url.path().to_owned()
 }
 
 impl World {
@@ -70,6 +72,267 @@ fn a_file_uri_escapes_what_a_path_segment_cannot_hold() {
     assert_eq!(file_uri(std::path::Path::new("/h/фото.jpg")), "file:///h/%D1%84%D0%BE%D1%82%D0%BE.jpg");
     assert_eq!(file_uri(std::path::Path::new("/h/sym (1)+&,;=@:!$'*.jpg")), "file:///h/sym%20(1)+&,;=@:!$'*.jpg");
     assert_eq!(file_uri(std::path::Path::new("/h/100%.jpg")), "file:///h/100%25.jpg");
+}
+
+/// Expected spellings captured by the standalone Qt 6.10.2 probe of Gwenview 25.12's
+/// exact expression, `url.adjusted(QUrl::RemovePassword).url()` (docs/kio-behavior.md §A).
+#[test]
+fn a_gwenview_uri_matches_qt_pretty_decoded() {
+    let cases = [
+        ("/h/plain.jpg", "file:///h/plain.jpg"),
+        ("/h/with space.jpg", "file:///h/with space.jpg"),
+        ("/h/фото.jpg", "file:///h/фото.jpg"),
+        ("/h/😀.jpg", "file:///h/😀.jpg"),
+        ("/h/100%.jpg", "file:///h/100%25.jpg"),
+        ("/h/#.jpg", "file:///h/%23.jpg"),
+        ("/h/?.jpg", "file:///h/%3F.jpg"),
+        ("/h/[ ].jpg", "file:///h/%5B %5D.jpg"),
+        ("/h/{ }.jpg", "file:///h/%7B %7D.jpg"),
+        ("/h/^.jpg", "file:///h/%5E.jpg"),
+        ("/h/`.jpg", "file:///h/%60.jpg"),
+        ("/h/|.jpg", "file:///h/%7C.jpg"),
+        ("/h/\".jpg", "file:///h/%22.jpg"),
+        ("/h/<>.jpg", "file:///h/%3C%3E.jpg"),
+        ("/h/\\.jpg", "file:///h/%5C.jpg"),
+        ("/h/+&,;=@:!$'*().jpg", "file:///h/+&,;=@:!$'*().jpg"),
+        ("/h/tab\t.jpg", "file:///h/tab%09.jpg"),
+    ];
+    for (path, expected) in cases {
+        assert_eq!(gwenview_uri(Path::new(path)).as_deref(), Some(expected), "{path:?}");
+    }
+    // Qt emits file:///h/bad�.jpg for these bytes, losing their identity. We skip it.
+    let invalid = Path::new(std::ffi::OsStr::from_bytes(b"/h/bad\xff.jpg"));
+    assert_eq!(gwenview_uri(invalid), None);
+    assert_eq!(thumbnail_uris(invalid), ["file:///h/bad%FF.jpg"]);
+}
+
+#[test]
+fn spaces_and_unicode_get_both_cache_names_and_plain_names_get_one() {
+    let cache = tempfile::tempdir().unwrap();
+    for file in ["/folder/with space.jpg", "/folder/фото😀.jpg", "/folder/plain.jpg"] {
+        let file = Path::new(file);
+        write_thumbnail(cache.path(), file, 123, 456, &jpeg(600, 400)).unwrap();
+        let uris = thumbnail_uris(file);
+        assert_eq!(uris.len(), if file.ends_with("plain.jpg") { 1 } else { 2 });
+        for uri in uris {
+            for (dir, edge) in SIZES {
+                let path = cache.path().join(dir).join(name_for_uri(&uri));
+                assert!(cached_png(&path, &uri, 123, 456).unwrap().is_some(), "own URI and mtime: {uri}");
+                assert!(cached_png(&path, &uri, 124, 456).unwrap().is_none());
+                let image = image::open(path).unwrap();
+                assert!(image.width().max(image.height()) <= *edge);
+            }
+        }
+    }
+    for (dir, _) in SIZES {
+        assert_eq!(std::fs::read_dir(cache.path().join(dir)).unwrap().count(), 5, "two names + two names + one; no temporary files");
+    }
+    // A new cloud version can retain mtime and size: refresh both of our names anyway.
+    let file = Path::new("/folder/with space.jpg");
+    write_thumbnail(cache.path(), file, 123, 456, &jpeg(32, 32)).unwrap();
+    for uri in thumbnail_uris(file) {
+        for (dir, _) in SIZES {
+            assert_eq!(image::open(cache.path().join(dir).join(name_for_uri(&uri))).unwrap().width(), 32);
+        }
+    }
+}
+
+/// Seed the old cache and store without ever asking the fake Graph for an image.
+fn seed_thumbnail(w: &World, name: &str) {
+    let row = w.fixture.find_item_at(name).unwrap();
+    let content = row.onedrive.unwrap().content.unwrap();
+    write_thumbnail(w.cache.path(), &w.root().join(name), content.mtime().0, content.size(), &jpeg(64, 64)).unwrap();
+    let path = PathBuf::from(name);
+    w.fixture.write_rows(move |store| store.item_store().set_thumbnail_made(row.local_item_id, &content, &path, true));
+}
+
+#[tokio::test]
+async fn the_first_drain_upgrades_old_names_in_batches_without_graph_or_forgetting_marks() {
+    let names = ["a space.jpg", "b space.jpg", "фото😀.jpg"];
+    let w = world(&names.map(|name| (name, "image/jpeg"))).await;
+    for name in names {
+        seed_thumbnail(&w, name);
+        let uri = gwenview_uri(&w.root().join(name)).unwrap();
+        for (dir, _) in SIZES {
+            std::fs::remove_file(w.cache.path().join(dir).join(name_for_uri(&uri))).unwrap();
+        }
+    }
+    let stop = CancellationToken::new();
+    // The first wake is a nudge; spawn must still select SyncStarted and upgrade.
+    let kick = Arc::new(Notify::new());
+    let task = w.filler().spawn(kick.clone(), stop.clone());
+    kick.notify_one();
+    let last = name_for_uri(&gwenview_uri(&w.root().join(names[2])).unwrap());
+    let upgraded = tokio::time::timeout(Duration::from_secs(10), async {
+        while !w.cache.path().join("x-large").join(last.clone()).is_file() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }).await;
+    stop.cancel();
+    task.await.unwrap();
+    upgraded.expect("first drain repairs all aliases");
+    // Repeat with batches of one, to cover pagination independently of spawn's 200.
+    for name in names {
+        let uri = gwenview_uri(&w.root().join(name)).unwrap();
+        std::fs::remove_file(w.cache.path().join("large").join(name_for_uri(&uri))).unwrap();
+    }
+    assert_eq!(w.filler().drain(&CancellationToken::new(), 1, DrainCause::SyncStarted).await, RunOutcome::default());
+    for name in names {
+        assert_eq!(find_cached_sizes(w.cache.path(), &w.root().join(name), ONEDRIVE_MTIME, name.len() as u64).unwrap().len(), 3);
+    }
+    assert_eq!(w.fixture.read_rows(|reader| reader.list_thumbnail_marks(None, 10)).len(), 3, "all marks kept");
+    assert!(w.server.received_requests().await.unwrap().is_empty(), "no Graph requests, including failed attempts");
+}
+
+#[tokio::test]
+async fn either_names_missing_size_is_repaired_but_a_size_missing_from_both_is_fetched() {
+    let name = "a space.jpg";
+    let w = world(&[(name, "image/jpeg")]).await;
+    seed_thumbnail(&w, name);
+    let uris = thumbnail_uris(&w.root().join(name));
+    for uri in &uris {
+        for (dir, _) in SIZES {
+            let path = w.cache.path().join(dir).join(name_for_uri(uri));
+            std::fs::remove_file(&path).unwrap();
+            assert_eq!(w.filler().drain(&CancellationToken::new(), 1, DrainCause::TimerFired).await, RunOutcome::default());
+            assert!(cached_png(&path, uri, ONEDRIVE_MTIME, name.len() as u64).unwrap().is_some(), "{uri} {dir}");
+        }
+    }
+    assert!(w.server.received_requests().await.unwrap().is_empty());
+    for uri in uris {
+        std::fs::remove_file(w.cache.path().join("large").join(name_for_uri(&uri))).unwrap();
+    }
+    assert_eq!(decide_cached_thumbnail(&find_cached_sizes(w.cache.path(), &w.root().join(name), ONEDRIVE_MTIME, name.len() as u64).unwrap()), CachedThumbnail::Missing);
+    Mock::given(method("GET")).and(path(thumb_path(name, "c512x512")))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(jpeg(64, 64))).expect(1).mount(&w.server).await;
+    assert_eq!(w.filler().drain(&CancellationToken::new(), 1, DrainCause::TimerFired).await.written, 1);
+    assert_eq!(w.server.received_requests().await.unwrap().len(), 1);
+}
+
+fn other_viewers_png(path: &Path, uri: &str, mtime: i64, size: u64) {
+    let mut encoder = png::Encoder::new(std::fs::File::create(path).unwrap(), 1, 1);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    for (key, value) in [("Thumb::URI", uri.to_owned()), ("Thumb::MTime", mtime.to_string()), ("Thumb::Size", size.to_string()), ("Software", "Gwenview".into())] {
+        encoder.add_text_chunk(key.into(), value).unwrap();
+    }
+    let mut writer = encoder.write_header().unwrap();
+    writer.write_image_data(&[0, 255, 0]).unwrap();
+    writer.finish().unwrap();
+}
+
+#[tokio::test]
+async fn current_gwenview_pngs_are_left_alone_and_stale_ones_are_replaced_locally() {
+    let name = "a space.jpg";
+    let w = world(&[(name, "image/jpeg")]).await;
+    seed_thumbnail(&w, name);
+    let uri = gwenview_uri(&w.root().join(name)).unwrap();
+    let path = w.cache.path().join("large").join(name_for_uri(&uri));
+    other_viewers_png(&path, &uri, ONEDRIVE_MTIME, name.len() as u64);
+    let original = std::fs::read(&path).unwrap();
+    assert_eq!(w.filler().drain(&CancellationToken::new(), 1, DrainCause::SyncStarted).await, RunOutcome::default());
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    // A later Graph write must preserve another viewer's current PNG too.
+    write_thumbnail(w.cache.path(), &w.root().join(name), ONEDRIVE_MTIME, name.len() as u64, &jpeg(64, 64)).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    for (tag_uri, mtime, size) in [(uri.as_str(), ONEDRIVE_MTIME - 1, 0), ("wrong-uri", ONEDRIVE_MTIME, 0), (uri.as_str(), ONEDRIVE_MTIME, 999)] {
+        other_viewers_png(&path, tag_uri, mtime, size);
+        assert_eq!(w.filler().drain(&CancellationToken::new(), 1, DrainCause::TimerFired).await, RunOutcome::default());
+        assert_ne!(std::fs::read(&path).unwrap(), original);
+        assert!(cached_png(&path, &uri, ONEDRIVE_MTIME, name.len() as u64).unwrap().is_some());
+    }
+    assert!(w.server.received_requests().await.unwrap().is_empty());
+}
+
+/// Compressed tags are read, but one that inflates past the bound is no tag: the PNG is
+/// not current, and reading it does not inflate it in full.
+#[test]
+fn a_compressed_tag_is_read_only_up_to_a_bound() {
+    let dir = tempfile::tempdir().unwrap();
+    let png_with = |path: &Path, uri: String, compressed_itxt: bool| {
+        let mut encoder = png::Encoder::new(std::fs::File::create(path).unwrap(), 1, 1);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        if !compressed_itxt {
+            encoder.add_ztxt_chunk("Thumb::URI".into(), uri.clone()).unwrap();
+        }
+        encoder.add_text_chunk("Thumb::MTime".into(), "123".into()).unwrap();
+        let mut writer = encoder.write_header().unwrap();
+        if compressed_itxt {
+            let mut chunk = png::text_metadata::ITXtChunk::new("Thumb::URI", uri);
+            chunk.compressed = true;
+            writer.write_text_chunk(&chunk).unwrap();
+        }
+        writer.write_image_data(&[0, 255, 0]).unwrap();
+        writer.finish().unwrap();
+    };
+    for compressed_itxt in [false, true] {
+        let path = dir.path().join("t.png");
+        png_with(&path, "file:///h/a b.jpg".into(), compressed_itxt);
+        assert!(cached_png(&path, "file:///h/a b.jpg", 123, 0).unwrap().is_some(), "itxt {compressed_itxt}");
+        let huge = format!("file:///h/{}", "a".repeat(4 * 1024 * 1024));
+        png_with(&path, huge.clone(), compressed_itxt);
+        assert!(std::fs::metadata(&path).unwrap().len() < 64 * 1024, "the tag compresses well");
+        assert!(cached_png(&path, &huge, 123, 0).unwrap().is_none(), "itxt {compressed_itxt}");
+    }
+}
+
+#[test]
+fn a_current_gwenview_png_is_kept_when_both_viewers_share_the_name() {
+    let cache = tempfile::tempdir().unwrap();
+    let file = Path::new("/folder/plain.jpg");
+    write_thumbnail(cache.path(), file, 123, 456, &jpeg(64, 64)).unwrap();
+    let path = cache.path().join("large").join(thumbnail_name(file));
+    other_viewers_png(&path, &file_uri(file), 123, 456);
+    let original = std::fs::read(&path).unwrap();
+    write_thumbnail(cache.path(), file, 123, 456, &jpeg(64, 64)).unwrap();
+    assert_eq!(std::fs::read(path).unwrap(), original);
+}
+
+#[tokio::test]
+async fn a_failed_or_cancelled_local_repair_keeps_its_mark_without_graph() {
+    let name = "a space.jpg";
+    let w = world(&[(name, "image/jpeg")]).await;
+    seed_thumbnail(&w, name);
+    let uri = gwenview_uri(&w.root().join(name)).unwrap();
+    let path = w.cache.path().join("normal").join(name_for_uri(&uri));
+    std::fs::remove_file(&path).unwrap();
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    assert_eq!(w.filler().drain(&cancelled, 1, DrainCause::SyncStarted).await, RunOutcome::default());
+    assert!(!path.exists(), "cancelled scan writes nothing");
+
+    // A directory at the destination makes the atomic rename fail, even as root.
+    std::fs::create_dir(&path).unwrap();
+    assert_eq!(w.filler().drain(&CancellationToken::new(), 1, DrainCause::SyncStarted).await, RunOutcome::default());
+    assert_eq!(w.fixture.read_rows(|reader| reader.list_thumbnail_marks(None, 10)).len(), 1);
+    assert!(w.server.received_requests().await.unwrap().is_empty());
+    std::fs::remove_dir(&path).unwrap();
+    assert_eq!(w.filler().drain(&CancellationToken::new(), 1, DrainCause::TimerFired).await, RunOutcome::default());
+    assert!(path.is_file(), "next scan retries the local repair");
+    assert!(w.server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn renaming_a_file_writes_both_new_names_and_removal_does_not_fetch_it() {
+    let (old, new) = ("old space.jpg", "new space.jpg");
+    let w = world(&[(old, "image/jpeg")]).await;
+    seed_thumbnail(&w, old);
+    w.fixture.move_here(w.item(old), new);
+    // Its OneDrive binding remains the old id until the move is sent.
+    Mock::given(method("GET")).and(path(thumb_path(old, "c512x512")))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(jpeg(64, 64))).expect(1).mount(&w.server).await;
+    assert_eq!(w.filler().drain(&CancellationToken::new(), 1, DrainCause::TimerFired).await.written, 1);
+    for name in [old, new] {
+        for uri in thumbnail_uris(&w.root().join(name)) {
+            for (dir, _) in SIZES {
+                assert!(w.cache.path().join(dir).join(name_for_uri(&uri)).is_file());
+            }
+        }
+    }
+    w.fixture.remove_here(w.item(new));
+    assert_eq!(w.filler().drain(&CancellationToken::new(), 1, DrainCause::TimerFired).await, RunOutcome::default());
+    assert_eq!(w.server.received_requests().await.unwrap().len(), 1);
 }
 
 /// An image the folder shows gets the thumbnails KIO looks for, named by the path the folder
@@ -426,13 +689,14 @@ fn the_sizes_found_are_those_whose_png_is_in_the_cache() {
     for size in ["normal", "large", "x-large"] {
         std::fs::create_dir_all(cache.path().join(size)).unwrap();
     }
-    std::fs::write(cache.path().join("normal").join(&name), b"png").unwrap();
-    std::fs::write(cache.path().join("x-large").join(&name), b"png").unwrap();
+    for size in ["normal", "x-large"] {
+        other_viewers_png(&cache.path().join(size).join(&name), &file_uri(file), 123, 0);
+    }
     std::fs::create_dir(cache.path().join("large").join(&name)).unwrap();
-    assert_eq!(find_cached_sizes(cache.path(), file).unwrap(), ["normal", "x-large"], "a directory of that name is no thumbnail");
-    assert_eq!(find_cached_sizes(&cache.path().join("none"), file).unwrap(), Vec::<&str>::new(), "no cache at all");
+    assert_eq!(find_cached_sizes(cache.path(), file, 123, 456).unwrap(), ["normal", "x-large"], "a directory of that name is no thumbnail");
+    assert_eq!(find_cached_sizes(&cache.path().join("none"), file, 123, 456).unwrap(), Vec::<&str>::new(), "no cache at all");
 
     let not_a_directory = cache.path().join("a-file");
     std::fs::write(&not_a_directory, b"").unwrap();
-    assert!(find_cached_sizes(&not_a_directory, file).is_err());
+    assert!(find_cached_sizes(&not_a_directory, file, 123, 456).is_err());
 }

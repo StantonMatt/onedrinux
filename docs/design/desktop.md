@@ -545,12 +545,15 @@ download and upload progress" in Settings is on by default.
 
 Dolphin draws a preview by reading the file, and reading a file that is not on disk fetches it:
 scrolling past a folder of photos would download them. konedrive writes OneDrive's own thumbnails
-into the cache KIO reads (`desktop/thumbs.rs`).
+into the cache KIO and Gwenview read (`desktop/thumbs.rs`).
 
 **What KIO does** (`docs/kio-behavior.md`): a thumbnail is found by the MD5 of the file's
 percent-encoded `file://` URI in `~/.cache/thumbnails/{normal,large,x-large,xx-large}` (128, 256,
 512, 1024 px). A cached PNG tagged with `Thumb::URI` and a `Thumb::MTime` equal to the file's time
-is drawn without opening the file.
+is drawn without opening the file. Gwenview 25.12 hashes the `PrettyDecoded` spelling instead:
+spaces and Unicode stay decoded. Its name gets a second PNG with its own `Thumb::URI` whenever
+it differs from KIO's. Equal spellings are written once. Invalid UTF-8 paths keep only KIO's
+name, since Qt replaces the invalid bytes and loses identity. Unicode URI tags use PNG iTXt.
 
 **The filler**, a task of the folder's sync ([sync.md](sync.md) §9):
 
@@ -574,10 +577,16 @@ is drawn without opening the file.
   cannot be written) records nothing and ends the drain: no further request starts in it, what
   was started ends, and the next drain asks again;
 - the cache is looked at in the first drain after the folder's sync starts and in the one the
-  ten-minute timer starts: a thumbnail written of which the cache lacks a size (`normal`, `large`
-  or `x-large`) has its mark forgotten (`ItemReader::list_thumbnail_marks`,
-  `ItemStore::forget_thumbnail_marks`), and the same drain makes it again. Three `stat`s per such
-  thumbnail every ten minutes; not after every cycle, which come often while files change;
+  ten-minute timer starts, in batches of 200 marks (`ItemReader::list_thumbnail_marks`). Each
+  size (`normal`, `large`, `x-large`) is checked under both names, including its URI, mtime and
+  optional size tags. Missing or stale names are repaired locally from the current counterpart
+  at that size, keeping the mark and making no Graph request. Current PNGs are kept regardless
+  of their writer. If neither name holds a size, the mark is forgotten
+  (`ItemStore::forget_thumbnail_marks`) and the same drain fetches it again. Thus existing
+  KIO-only caches gain Gwenview names on the first drain, whatever wakes it. PNG input is capped
+  at 8 MiB per entry, decoding at the same 4096 px/64 MiB limits as Graph; one mark is repaired
+  at a time on a blocking worker, with cancellation between marks and batches. I/O errors stop
+  the scan without forgetting that batch. Frequent cycle nudges still go by marks alone;
 - it runs after every cycle, when thumbnails are turned on again, and every ten minutes by a timer
   that no cycle starts over, draining 200 candidates at a time until each has been looked at once;
 - a thumbnail is a request to the Graph API, not a download, and takes no slot of the transfer pool.
@@ -587,6 +596,10 @@ is drawn without opening the file.
 
 `xx-large` is not filled: it would be a second request per file at about four times the bytes.
 Where Dolphin asks for that size, KIO makes its own thumbnail, which reads the file.
+
+Renames make the new path a candidate and write both new names; removed items stop being
+candidates. Neither operation removes or moves old cache PNGs: they remain for the desktop's
+ordinary cache cleanup, as before.
 
 **The setting.** Thumbnails are fetched per account, on by default (`Folder.Thumbnails`,
 `SetThumbnails`, `sync thumbnails`, "Download thumbnails"). Off, the filler asks for nothing, and
