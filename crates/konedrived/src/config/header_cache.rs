@@ -2,8 +2,8 @@
 //!
 //! SQLite and all file operations run on the worker, never on a FUSE/runtime thread.
 //! Writes are best effort with at most 64 queued records (4 MiB of content); reads wait
-//! only for a lookup. An epoch fences queued work against authentication invalidation.
-//! The source owns the meaning of the opaque version and facts, and checks both on use.
+//! at most 20 ms for a lookup before falling through. An epoch fences queued work against
+//! authentication invalidation. The source owns the meaning of the opaque version and facts, and checks both on use.
 
 // test: header_cache_keeps_ranges_across_restart_and_preserves_facts
 // test: header_cache_bounds_ranges_items_and_evicts_lru_rows
@@ -14,6 +14,8 @@
 // test: header_cache_failed_unlink_is_remembered_without_directory_write_permission
 // test: account_header_cleanup_failures_are_reported_after_sign_out
 // test: header_cache_publication_never_waits_for_a_paused_writer_and_has_a_bounded_queue
+// test: header_cache_lookup_falls_through_while_writes_are_queued
+// test: header_cache_delayed_lookup_maintenance_preserves_newer_keeps_and_forgets
 // test: sign_out_and_account_retirement_delete_headers_without_a_mounted_folder
 
 mod database;
@@ -29,6 +31,7 @@ use super::{AccountId, ConfigStore};
 use database::Database;
 
 pub(crate) const MAX_RANGE: u64 = 64 * 1024;
+const LOOKUP_WAIT: std::time::Duration = std::time::Duration::from_millis(20);
 pub(super) const MAX_ITEM: u64 = 256 * 1024;
 pub(super) const LIFETIME: i64 = 30 * 24 * 60 * 60 * 1000;
 
@@ -38,6 +41,16 @@ pub(crate) struct Record {
     pub(crate) from: u64,
     pub(crate) bytes: Vec<u8>,
     pub(crate) facts: String,
+}
+
+/// Metadata only; at most 64 uses wait for a single maintenance transaction.
+struct LookupUse {
+    epoch: u64,
+    item: String,
+    version: String,
+    from: u64,
+    end: u64,
+    at: i64,
 }
 
 enum Command {
@@ -111,13 +124,23 @@ impl HeaderCache {
                     clear_pending: false,
                 };
                 store.start();
+                let mut used = Vec::new();
                 loop {
-                    let command = match receiver.recv_timeout(std::time::Duration::from_secs(3600))
-                    {
+                    let idle = if used.is_empty() {
+                        std::time::Duration::from_secs(3600)
+                    } else {
+                        std::time::Duration::from_millis(50)
+                    };
+                    let command = match receiver.recv_timeout(idle) {
                         Ok(command) => command,
-                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => {
+                            store.use_lookups(&mut used, current.load(Ordering::SeqCst));
+                            break;
+                        }
                         Err(mpsc::RecvTimeoutError::Timeout) => {
-                            if store.db.is_some() {
+                            if !used.is_empty() {
+                                store.use_lookups(&mut used, current.load(Ordering::SeqCst));
+                            } else if store.db.is_some() {
                                 store.run(|db| db.prune(database::now()).map(Some));
                             }
                             continue;
@@ -132,12 +155,31 @@ impl HeaderCache {
                             end,
                             answer,
                         } => {
+                            if answer.is_closed() {
+                                continue;
+                            }
                             let found = if epoch == current.load(Ordering::SeqCst) {
-                                store.run(|db| db.find(&item, &version, from, end, database::now()))
+                                store.run(|db| {
+                                    db.lookup(&item, &version, from, end, database::now())
+                                })
                             } else {
                                 None
                             };
                             let _ = answer.send(found);
+                            // A run of probes must not queue behind each other's
+                            // LRU journal commits. Batch metadata after a short idle,
+                            // before a write, or when its fixed budget is full.
+                            used.push(LookupUse {
+                                epoch,
+                                item,
+                                version,
+                                from,
+                                end,
+                                at: database::now(),
+                            });
+                            if used.len() == 64 {
+                                store.use_lookups(&mut used, current.load(Ordering::SeqCst));
+                            }
                         }
                         Command::Keep {
                             epoch,
@@ -146,6 +188,7 @@ impl HeaderCache {
                             record,
                             ..
                         } => {
+                            store.use_lookups(&mut used, current.load(Ordering::SeqCst));
                             if epoch == current.load(Ordering::SeqCst) {
                                 store.run(|db| {
                                     db.keep(&item, &version, &record, database::now()).map(Some)
@@ -153,11 +196,13 @@ impl HeaderCache {
                             }
                         }
                         Command::Forget { item } => {
+                            used.clear();
                             if store.db.is_some() {
                                 store.run(|db| db.forget(&item).map(Some));
                             }
                         }
                         Command::Clear { answer } => {
+                            used.clear();
                             let result = store.clear();
                             if let Err(error) = &result {
                                 store.warn(error);
@@ -168,6 +213,7 @@ impl HeaderCache {
                         }
                         #[cfg(test)]
                         Command::Barrier(answer) => {
+                            store.use_lookups(&mut used, current.load(Ordering::SeqCst));
                             let _ = answer.send(());
                         }
                         #[cfg(test)]
@@ -228,7 +274,13 @@ impl HeaderCache {
             end,
             answer,
         });
-        let found = receive.await.ok().flatten();
+        // SQLite shares the writer's queue, including eviction/vacuum and startup.
+        // A busy disk is a miss, never a reason to stall the foreground read.
+        let found = tokio::time::timeout(LOOKUP_WAIT, receive)
+            .await
+            .ok()?
+            .ok()
+            .flatten();
         (epoch == self.epoch()).then_some(found).flatten()
     }
 
@@ -306,6 +358,14 @@ struct Worker {
 }
 
 impl Worker {
+    fn use_lookups(&mut self, used: &mut Vec<LookupUse>, epoch: u64) {
+        used.retain(|usage| usage.epoch == epoch);
+        if !used.is_empty() {
+            self.run(|db| db.use_lookups(used).map(Some));
+        }
+        used.clear();
+    }
+
     fn warn(&mut self, error: &dyn std::fmt::Display) {
         if !self.warned {
             tracing::warn!("header cache unavailable or rebuilt: {error}");

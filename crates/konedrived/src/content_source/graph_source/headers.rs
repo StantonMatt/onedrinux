@@ -5,7 +5,7 @@
 // test: a_disk_header_of_another_content_misses_and_old_rows_are_deleted
 // test: read_ahead_bytes_reach_disk_only_when_a_reader_asks_for_them
 // test: disk_headers_restore_the_binding_before_an_uncached_range
-// test: read_ahead_reuses_persisted_heads_without_speculative_graph_requests
+// test: read_ahead_prefetches_past_persisted_heads_after_restart
 // test: signed_out_or_revoked_accounts_never_serve_disk_headers
 // test: a_rename_drops_a_stale_disk_binding_before_uncached_ranges_are_read
 // test: disk_headers_compare_metadata_etags_separately_from_endpoint_bindings
@@ -202,7 +202,20 @@ impl GraphSource {
             bound.metadata_etag = facts.bound.metadata_etag;
         }
         drop(ranges);
-        self.read_blocks.keep(item, opened, &piece);
+        // Read-ahead may have published a larger block while SQLite was looking up
+        // this head. Keeping the head at the same offset would replace that block.
+        if self
+            .read_blocks
+            .find_piece(
+                item,
+                opened,
+                piece.from,
+                piece.from + piece.bytes.len() as u64,
+            )
+            .is_none()
+        {
+            self.read_blocks.keep(item, opened, &piece);
+        }
         tracing::debug!("header cache hit for {item} at {from}");
         Some(piece.range(from, end))
     }

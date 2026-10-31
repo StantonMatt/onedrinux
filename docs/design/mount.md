@@ -467,10 +467,11 @@ of the transfer pool as a file being opened does, until two seconds after its la
 **Persistent header ranges.** After the memory store misses, foreground reads look in a
 per-account SQLite cache (`config/header_cache/`, `graph_source/headers.rs`) before asking
 OneDrive. It holds only the exact bytes actually answered through the range-read path,
-including memory hits, when the requested interval is at most 64 KiB. Read-ahead checks
-for a persisted 16 KiB MIME head before scheduling a cloud block, so a reopened folder
-scan reuses those bytes too. It never retains unasked read-ahead or block padding, and
-never reads hydrated backing files. Up to 256 KiB of ranges per item and opened `ContentVersion` are kept, first come; overlapping stored
+including memory hits, when the requested interval is at most 64 KiB. Read-ahead still
+fetches the first min(size, 1 MiB) into memory, even when a MIME head persists: a head
+cannot answer later Exiv2 probes beyond it. The disk tier never suppresses that work or
+replaces a full memory block with a late head lookup. It never retains unasked read-ahead
+or block padding, and never reads hydrated backing files. Up to 256 KiB of ranges per item and opened `ContentVersion` are kept, first come; overlapping stored
 ranges conservatively consume that budget too. One row must cover the whole request:
 partial coverage misses, without stitching disk rows or mixing sources.
 
@@ -502,9 +503,14 @@ at startup, lookup and insertion; the worker also prunes hourly while idle.
 Insertions evict least recently used rows in batches; full auto-vacuum bounds the actual
 SQLite file, including indexes and metadata, rather than only the content bytes.
 
-A single account worker runs all SQLite and file I/O. Reads await lookups, while writes
-never wait for that worker or queue space: at most 64 records / 4 MiB of content may be
-queued, and excess writes are skipped. Read/write failures are warned once and ignored;
+A single account worker runs all SQLite and file I/O. A foreground lookup waits at most
+20 ms per attempt before falling through to the existing memory/network path. On a miss,
+the mount can try both `prepared_range` and `read_range`, each with that budget. Queued writes,
+eviction, vacuum or a slow disk cannot extend that FUSE lookup wait. Cancelled queued lookups are
+skipped. The worker answers each lookup before its expiry, version-pruning and LRU
+maintenance. At most 64 lookup uses collect for one transaction after 50 ms idle,
+when that bound fills, or before an insertion; invalidation discards old uses. Writes never wait for that worker or queue
+space: at most 64 records / 4 MiB of content may be queued, and excess writes are skipped. Read/write failures are warned once and ignored;
 awaited deletion failures are returned to the caller. A corrupt or
 unsupported database is deleted and rebuilt once, then disabled on further failure;
 lock contention disables it without deleting another process's database. One startup info

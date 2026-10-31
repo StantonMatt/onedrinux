@@ -32,7 +32,7 @@ impl CachedMount {
             .enumerate()
             .map(|(n, size)| {
                 fixture
-                    .show_onedrive_file(&format!("Shots/{n}.png"), &vec![n as u8; *size])
+                    .show_onedrive_file(&format!("Shots/{n:02}.png"), &vec![n as u8; *size])
                     .local_item_id
             })
             .collect();
@@ -65,6 +65,12 @@ impl CachedMount {
         fixture.runtime().block_on(headers.flush());
         let source = if restart {
             drop(source);
+            drop(headers);
+            let headers = Arc::new(HeaderCache::open(
+                cache_dir.path().join("headers.sqlite"),
+                1024 * 1024,
+            ));
+            fixture.runtime().block_on(headers.flush());
             Arc::new(GraphSource::with_headers(graph.client(), Some(headers)))
         } else {
             Arc::new(source)
@@ -94,11 +100,21 @@ impl CachedMount {
     }
 
     fn read(&self, n: usize, caller: Option<ReadAheadCaller>) -> Result<Vec<u8>, Errno> {
+        self.read_part(n, 0, 16384, caller)
+    }
+
+    fn read_part(
+        &self,
+        n: usize,
+        from: u64,
+        size: u32,
+        caller: Option<ReadAheadCaller>,
+    ) -> Result<Vec<u8>, Errno> {
         let opened = self
             .requests
             .open_to_read(self.files[n], Some(std::process::id()))
             .unwrap();
-        let ReadAnswer::Range(range) = self.requests.decide_read(opened.fh, 0, 16384).unwrap()
+        let ReadAnswer::Range(range) = self.requests.decide_read(opened.fh, from, size).unwrap()
         else {
             panic!("cloud-only range")
         };
@@ -177,7 +193,7 @@ fn header_cache_hits_promote_tiny_files_outside_a_scan_and_charge_the_guard() {
 }
 
 #[test]
-fn header_cache_scan_hits_stay_cloud_only_and_skip_speculative_network_requests() {
+fn header_cache_scan_hits_stay_cloud_only_while_read_ahead_warms_memory() {
     let mut baseline = None;
     for restart in [false, true] {
         let cached = CachedMount::new(&[512, 1024, 4096, 8192], 16, restart);
@@ -191,7 +207,7 @@ fn header_cache_scan_hits_stay_cloud_only_and_skip_speculative_network_requests(
         );
         let row = cached.fixture.find_item(cached.files[3]).unwrap();
         let content = row.local.as_ref().unwrap().content.as_ref().unwrap();
-        cached.wait_for("the scan reuses the fourth file's persisted head", || {
+        cached.wait_for("the scan warms the fourth file in memory", || {
             cached
                 .source
                 .cached_range(
@@ -223,8 +239,8 @@ fn header_cache_scan_hits_stay_cloud_only_and_skip_speculative_network_requests(
         );
         assert_eq!(
             cached.content_requests(),
-            0,
-            "neither real reads nor speculative heads refetch content"
+            if restart { 2 } else { 0 },
+            "real heads hit disk; read-ahead still warms files beyond them"
         );
         for item in &cached.files {
             assert_eq!(
@@ -244,7 +260,7 @@ fn header_cache_scan_hits_stay_cloud_only_and_skip_speculative_network_requests(
         assert_eq!(
         counted,
         [(3, 512 + 1024 + 4096 + 512)],
-        "real hits and the first tiny promotion retain existing charges; speculative disk reuse is uncharged"
+        "real hits and the first tiny promotion retain existing charges; speculative reads are uncharged"
     );
         if let Some(baseline) = &baseline {
             assert_eq!(&counted, baseline);
@@ -252,4 +268,159 @@ fn header_cache_scan_hits_stay_cloud_only_and_skip_speculative_network_requests(
             baseline = Some(counted);
         }
     }
+}
+
+#[test]
+fn header_cache_restarted_desktop_scan_prefetches_exiv2_ranges_concurrently() {
+    // Gate the actor's calls, retaining the real GraphSource underneath. Six calls
+    // must enter before any can finish; no timer decides whether they overlap.
+    struct Gated {
+        source: Arc<GraphSource>,
+        entered: std::sync::mpsc::Sender<String>,
+        finished: std::sync::mpsc::Sender<()>,
+        resume: tokio::sync::Semaphore,
+    }
+    #[async_trait::async_trait]
+    impl ContentSource for Gated {
+        async fn fetch(
+            &self,
+            _: &str,
+            _: u64,
+            _: Option<u64>,
+        ) -> Result<
+            crate::content_source::source::Fetched,
+            crate::content_source::source::SourceError,
+        > {
+            unreachable!("the scan uses only read_ahead")
+        }
+        async fn read_ahead(&self, item: &str, opened: &ContentVersion, listed: &ListedContent) {
+            self.entered.send(item.into()).unwrap();
+            self.resume.acquire().await.unwrap().forget();
+            self.source.read_ahead(item, opened, listed).await;
+            let _ = self.finished.send(());
+        }
+    }
+    let sizes: Vec<_> = (0..24)
+        .map(|n| if n % 2 == 0 { 192 * 1024 } else { 1536 * 1024 })
+        .collect();
+    let mut cached = CachedMount::new(&sizes, 16, true);
+    let (entered, starts) = std::sync::mpsc::channel();
+    let (finished, finishes) = std::sync::mpsc::channel();
+    let gated = Arc::new(Gated {
+        source: cached.source.clone(),
+        entered,
+        finished,
+        resume: tokio::sync::Semaphore::new(0),
+    });
+    cached.requests.read_ahead.as_ref().unwrap().stop();
+    cached.requests.read_ahead = Some(Arc::new(crate::mount::read_ahead::ReadAhead::new(
+        cached.fixture.store.clone(),
+        gated.clone(),
+        cached.requests.download_guard.clone(),
+        16,
+        &cached.fixture.runtime(),
+    )));
+    let is_warm = |n: usize| {
+        let row = cached.fixture.find_item(cached.files[n]).unwrap();
+        let content = row.local.as_ref().unwrap().content.as_ref().unwrap();
+        cached
+            .source
+            .cached_range(
+                row.onedrive_item.as_ref().unwrap().item_id.as_str(),
+                content,
+                0,
+                content.size().min(1024 * 1024),
+            )
+            .is_some()
+    };
+    assert!((0..24).all(|n| !is_warm(n)), "restart has no memory blocks");
+    cached.read(0, Some(CachedMount::caller())).unwrap();
+    cached.read(1, Some(CachedMount::caller())).unwrap();
+    assert_eq!(cached.content_requests(), 0, "initial MIME heads hit disk");
+    let mut launched = Vec::new();
+    for _ in 0..6 {
+        launched.push(starts.recv_timeout(Duration::from_secs(5)).unwrap());
+    }
+    assert_eq!(
+        launched
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        6
+    );
+    assert!(
+        starts.try_recv().is_err(),
+        "no seventh speculative read while six wait"
+    );
+    gated.resume.add_permits(16);
+    for _ in 0..16 {
+        finishes.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+    assert!(
+        (2..18).all(is_warm),
+        "all sixteen files inside the window are prefetched"
+    );
+    assert!(
+        (18..24).all(|n| !is_warm(n)),
+        "nothing beyond the window is fetched"
+    );
+    assert_eq!(cached.content_requests(), 16);
+    gated.resume.add_permits(64);
+    // Replay the viewer's metadata pattern in folder order. The first two files
+    // precede the speculative window; all others must reuse their prefetched block.
+    for (n, size) in sizes.iter().enumerate() {
+        if n >= 2 {
+            cached.wait_for("the next file's Exiv2 range is warm", || is_warm(n));
+        }
+        assert_eq!(
+            cached.read(n, Some(CachedMount::caller())).unwrap(),
+            vec![n as u8; 16384]
+        );
+        for (from, len) in [
+            (0, 4096),
+            (0, 33),
+            (33, 4096),
+            (65536, 4096),
+            (131072, 4096),
+        ] {
+            assert_eq!(
+                cached
+                    .read_part(n, from, len, Some(CachedMount::caller()))
+                    .unwrap(),
+                vec![n as u8; len as usize]
+            );
+        }
+        if *size > 1024 * 1024 {
+            assert_eq!(
+                cached
+                    .read_part(n, 983040, 4096, Some(CachedMount::caller()))
+                    .unwrap(),
+                vec![n as u8; 4096]
+            );
+        }
+    }
+    let requests = cached.graph.with(|cloud| cloud.log.clone());
+    for n in 0..24 {
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|(_, route)| route == &format!("dl/Shots!{n:02}.png"))
+                .count(),
+            1,
+            "file {n}: metadata probes share one whole-small-file/first-block request"
+        );
+        assert_eq!(
+            cached
+                .fixture
+                .find_item(cached.files[n])
+                .unwrap()
+                .content_presence,
+            ContentPresence::NotOnDisk
+        );
+        assert!(!cached
+            .requests
+            .download_states
+            .is_downloading(cached.files[n]));
+    }
+    assert_eq!(cached.content_requests(), 24);
 }

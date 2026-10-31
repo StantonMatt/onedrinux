@@ -43,6 +43,7 @@ async fn a_header_survives_memory_eviction_and_source_restart_without_graph_requ
         assert!(requests_since(&graph).is_empty());
         drop(source); // Close the source and the cache worker: no memory survives.
         let cache = Arc::new(HeaderCache::open(path, BUDGET));
+        cache.flush().await;
         let source = cached_source(&graph, &cache);
         let restarted = source
             .prepared_range("P0", &content, listed_path.then_some(&listed), 33, 4129)
@@ -98,6 +99,7 @@ async fn disk_headers_compare_metadata_etags_separately_from_endpoint_bindings()
             requests_since(&graph);
 
             let cache = Arc::new(HeaderCache::open(path, BUDGET));
+            cache.flush().await;
             let restarted = cached_source(&graph, &cache);
             let hit = restarted
                 .prepared_range("P0", &content, Some(&listed), 0, 4096)
@@ -289,7 +291,7 @@ async fn disk_headers_restore_the_binding_before_an_uncached_range() {
 }
 
 #[tokio::test]
-async fn read_ahead_reuses_persisted_heads_without_speculative_graph_requests() {
+async fn read_ahead_prefetches_past_persisted_heads_after_restart() {
     let (graph, _) = folder_of(3, LARGE).await;
     let dir = tempfile::tempdir().unwrap();
     let cache = Arc::new(HeaderCache::open(dir.path().join("headers.sqlite"), BUDGET));
@@ -314,9 +316,40 @@ async fn read_ahead_reuses_persisted_heads_without_speculative_graph_requests() 
         let (content, listed) = opened_now(&graph, &id);
         restarted.read_ahead(&id, &content, &listed).await;
     }
+    assert_eq!(
+        requests_since(&graph)
+            .iter()
+            .filter(|(kind, _)| *kind == "bytes")
+            .count(),
+        3,
+        "each reopened file still prefetches its full first block"
+    );
+    for n in 0..3 {
+        let id = format!("P{n}");
+        let (content, listed) = opened_now(&graph, &id);
+        // A disk lookup may have begun before the block arrived. Its late result
+        // must not replace that full block with just the persisted 16 KiB head.
+        // Drain prior readers' best-effort writes so this check exercises a hit,
+        // independently of the busy-writer timeout covered by the worker test.
+        cache.flush().await;
+        assert!(restarted
+            .disk_range(&id, &content, Some(&listed), 0, 16384, Some(cache.epoch()))
+            .await
+            .is_some());
+        assert_eq!(
+            read_whole(
+                restarted
+                    .read_range(&id, &content, Some(&listed), 65536, 65536 + 4096)
+                    .await
+                    .unwrap()
+            )
+            .await,
+            bytes_of(n, LARGE)[65536..65536 + 4096]
+        );
+    }
     assert!(
         requests_since(&graph).is_empty(),
-        "a reopened scan never speculates past a persisted MIME head"
+        "late disk hits preserve prefetched bytes"
     );
 }
 

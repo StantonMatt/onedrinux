@@ -474,3 +474,71 @@ async fn header_cache_lock_contention_never_deletes_a_good_database() {
         "contention did not unlink or rebuild the file"
     );
 }
+
+#[tokio::test]
+async fn header_cache_lookup_falls_through_while_writes_are_queued() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = HeaderCache::open(dir.path().join("headers.sqlite"), 8 * 1024 * 1024);
+    cache.keep(0, "head", "v".into(), record(0, 4096));
+    cache.flush().await;
+    let (entered, inside) = mpsc::channel();
+    let (release, wait) = mpsc::channel();
+    cache.send(Command::Pause {
+        entered,
+        release: wait,
+    });
+    inside
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    for n in 0..64 {
+        cache.keep(
+            0,
+            &format!("item-{n}"),
+            "v".into(),
+            record(0, MAX_RANGE as usize),
+        );
+    }
+    assert_eq!(cache.writes.available_permits(), 0);
+    let began = std::time::Instant::now();
+    let found = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        cache.find(0, "head", "v".into(), 0, 4096),
+    )
+    .await;
+    let elapsed = began.elapsed();
+    // Release before asserting, so even a failing test can join the worker.
+    release.send(()).unwrap();
+    cache.flush().await;
+    eprintln!("header lookup behind 64 paused writes: {elapsed:?}");
+    assert!(
+        matches!(found, Ok(None)),
+        "busy disk must become a prompt miss"
+    );
+    let began = std::time::Instant::now();
+    let idle = cache.find(0, "head", "v".into(), 0, 4096).await;
+    eprintln!("header lookup after draining writes: {:?}", began.elapsed());
+    assert!(
+        idle.is_some(),
+        "timing out must not disable or delete the cache"
+    );
+}
+
+#[tokio::test]
+async fn header_cache_delayed_lookup_maintenance_preserves_newer_keeps_and_forgets() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = HeaderCache::open(dir.path().join("headers.sqlite"), 1024 * 1024);
+    cache.keep(0, "item", "old".into(), record(0, 4096));
+    cache.flush().await;
+    assert!(cache.find(0, "item", "old".into(), 0, 4096).await.is_some());
+    // The old lookup's delayed version pruning must precede the new insertion.
+    cache.keep(0, "item", "new".into(), record(0, 4096));
+    cache.flush().await;
+    assert!(cache.find(0, "item", "new".into(), 0, 4096).await.is_some());
+    // A pending LRU touch cannot restore a row after content invalidation.
+    cache.forget("item");
+    cache.flush().await;
+    assert!(cache
+        .find(cache.epoch(), "item", "new".into(), 0, 4096)
+        .await
+        .is_none());
+}

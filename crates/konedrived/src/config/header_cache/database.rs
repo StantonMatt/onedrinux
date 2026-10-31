@@ -18,7 +18,7 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use super::{Record, LIFETIME, MAX_ITEM, MAX_RANGE};
+use super::{LookupUse, Record, LIFETIME, MAX_ITEM, MAX_RANGE};
 
 const SCHEMA: i64 = 1;
 
@@ -243,6 +243,61 @@ impl Database {
         Ok(())
     }
 
+    /// The foreground answer does no writes or journal commits. Expired rows miss
+    /// even when the worker has not pruned them yet.
+    pub(super) fn lookup(
+        &self,
+        item: &str,
+        version: &str,
+        from: u64,
+        end: u64,
+        at: i64,
+    ) -> anyhow::Result<Option<Record>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT offset, bytes, facts FROM headers
+             WHERE item = ?1 AND version = ?2 AND offset <= ?3 AND offset + length(bytes) >= ?4
+             AND last_used > ?5 ORDER BY last_used DESC LIMIT 1",
+                params![
+                    item,
+                    version,
+                    from as i64,
+                    end as i64,
+                    at.saturating_sub(LIFETIME)
+                ],
+                |row| {
+                    Ok(Record {
+                        from: row.get::<_, i64>(0)? as u64,
+                        bytes: row.get(1)?,
+                        facts: row.get(2)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// Batch lookup maintenance after foreground answers. Call before an insertion
+    /// so an earlier version's delayed pruning cannot discard the newly kept row.
+    pub(super) fn use_lookups(&self, used: &[LookupUse]) -> anyhow::Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        for usage in used {
+            self.expire(usage.at)?;
+            self.current(&usage.item, &usage.version)?;
+            if let Some(record) =
+                self.lookup(&usage.item, &usage.version, usage.from, usage.end, usage.at)?
+            {
+                self.conn.execute(
+                    "UPDATE headers SET last_used = ?1 WHERE item = ?2 AND version = ?3 AND offset = ?4",
+                    params![usage.at, usage.item, usage.version, record.from as i64],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    #[cfg(test)]
     pub(super) fn find(
         &mut self,
         item: &str,
@@ -251,35 +306,16 @@ impl Database {
         end: u64,
         at: i64,
     ) -> anyhow::Result<Option<Record>> {
-        self.expire(at)?;
-        self.current(item, version)?;
-        let found = self
-            .conn
-            .query_row(
-                "SELECT rowid, offset, bytes, facts FROM headers
-             WHERE item = ?1 AND version = ?2 AND offset <= ?3 AND offset + length(bytes) >= ?4
-             ORDER BY last_used DESC LIMIT 1",
-                params![item, version, from as i64, end as i64],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        Record {
-                            from: row.get::<_, i64>(1)? as u64,
-                            bytes: row.get(2)?,
-                            facts: row.get(3)?,
-                        },
-                    ))
-                },
-            )
-            .optional()?;
-        if let Some((rowid, record)) = found {
-            self.conn.execute(
-                "UPDATE headers SET last_used = ?1 WHERE rowid = ?2",
-                params![at, rowid],
-            )?;
-            return Ok(Some(record));
-        }
-        Ok(None)
+        let found = self.lookup(item, version, from, end, at)?;
+        self.use_lookups(&[LookupUse {
+            epoch: 0,
+            item: item.into(),
+            version: version.into(),
+            from,
+            end,
+            at,
+        }])?;
+        Ok(found)
     }
 
     pub(super) fn keep(

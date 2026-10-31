@@ -22,6 +22,7 @@
 //! invalidation clears all caches and aborts pending folder listings. Small ranges a
 //! foreground reader actually used also persist in the private per-account header tier,
 //! after a memory miss and before network access (`headers`); speculation never adds rows.
+//! Persisted heads never suppress read-ahead of the rest of a file's first block.
 
 // test: a_hash_is_kept_without_a_ctag_and_hashless_graph_is_still_a_remote_version
 // test: ranges_refuse_a_changed_metadata_version_or_download_etag
@@ -49,7 +50,7 @@
 // test: signing_out_cancels_speculative_bodies
 // test: a_real_read_keeps_its_joined_request_when_speculation_is_cancelled
 // test: a_header_survives_memory_eviction_and_source_restart_without_graph_requests
-// test: read_ahead_reuses_persisted_heads_without_speculative_graph_requests
+// test: read_ahead_prefetches_past_persisted_heads_after_restart
 // test: signed_out_or_revoked_accounts_never_serve_disk_headers
 
 mod links;
@@ -361,10 +362,6 @@ impl ContentSource for GraphSource {
         if !self.drive.cached_content_allowed() || self.drive.pool().throughput().retry_after > 0 { return; }
         let end = opened_as.size().min(read_blocks::BLOCK);
         if end == 0 || self.memory_range(item_id, opened_as, 0, end).is_some() { return; }
-        // A reopening scan must not speculatively refetch blocks whose MIME head
-        // already persists. No new bytes are retained by this disk inspection.
-        let epoch = self.headers.as_ref().map(|headers| headers.epoch());
-        if self.disk_range(item_id, opened_as, Some(listed), 0, end.min(16 * 1024), epoch).await.is_some() { return; }
         let prepared = self.listed_read(item_id, opened_as, listed, 0, end);
         match prepared.read.clone().await {
             Ok(true) => tracing::debug!("read ahead of {item_id}: first {end} bytes retained"),

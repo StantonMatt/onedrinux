@@ -75,6 +75,7 @@ async fn unmounted_accounts_keep_headers_across_restart_but_drop_them_on_authent
     drop(service);
     let restarted = crate::account::testing::single_account(dir.path(), endpoints, Arc::new(MemoryStore::default()), Duration::from_secs(1)).await.unwrap();
     let cache = restarted.config().header_cache(restarted.id()).unwrap();
+    cache.flush().await; // Check persistence after startup, independently of the lookup deadline.
     let found = cache.find(cache.epoch(), "item", "version".into(), 0, 4096).await.unwrap();
     assert_eq!(found.bytes, vec![9; 4096], "construction does not invalidate persistent headers");
     restarted.tokens.invalidate().await;

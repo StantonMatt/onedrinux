@@ -1052,5 +1052,15 @@ legitimately different download ETags do not discard valid headers, while rename
 invalidate old bindings. Free Up Space keeps it: its
 purpose is to make the next cloud-only listing fast. SQLite writes run on a bounded
 best-effort account worker, never blocking the FUSE read on a write. An unavailable cache
-costs a miss; corruption or an unknown schema permits one disposable rebuild. No other
-application or OS configuration is changed. See [mount.md](mount.md) §5.1.1.
+costs a miss; a lookup taking over 20 ms falls through rather than waiting behind writes
+or maintenance. Lookup answers precede their pruning/LRU journal commits; those updates
+are batched after 50 ms idle or 64 uses, and applied before any later insertion so
+old version pruning cannot remove new rows. Corruption or an unknown schema permits one disposable rebuild.
+
+Persisted MIME heads never suppress folder-scan read-ahead. Doing so froze Gwenview on
+reopen: its later Exiv2 probes fell outside the heads and waited for serial cloud reads.
+Read-ahead still warms the first min(size, 1 MiB) of each file in the existing bounded
+window, six at a time, just as before this disk tier. A late disk lookup also preserves
+any full block that arrived meanwhile. Only bytes actually read persist; reopening can
+use the same speculative bandwidth as before, while foreground probes reuse memory.
+No other application or OS configuration is changed. See [mount.md](mount.md) §5.1.1.

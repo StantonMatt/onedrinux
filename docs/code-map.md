@@ -130,12 +130,13 @@ The directories below are in layer order: a directory uses only the directories 
   held accounts.
 - `store.rs` — `ConfigStore`, the one owner of the file.
 - `header_cache.rs` — one per-account worker and bounded best-effort range publication,
-  authentication epochs, lookup barriers and sign-out deletion with failure propagation.
+  authentication epochs, bounded lookup waits and sign-out deletion with failure propagation.
 - `header_cache/database.rs` — private disposable SQLite schema, version pruning, covering
-  lookup, persistent deletion markers, per-range/item limits, 30-day expiry and LRU eviction
-  against actual file size.
+  lookup with batched maintenance, persistent deletion markers, per-range/item limits,
+  30-day expiry and LRU eviction against actual file size.
 - `header_cache/tests.rs` — restart, permissions, bounds, LRU, expiry, rebuild, disable,
-  invalidation, failed deletion/restart and sign-out failure regression tests.
+  invalidation, queued-writer lookup latency, failed deletion/restart and sign-out failure
+  regression tests.
 - `download_guard.rs` — persistent guard rules and thresholds through `ConfigStore`; memory-only session approval.
 - `config_trouble.rs` — `AccountHold`, why an account is held back, and `ConfigTrouble`, what
   `Accounts.LastError` says: cases with their data.
@@ -250,7 +251,7 @@ Where a download gets its bytes from, and the download of a whole file.
   no speculative retention.
 - `graph_source/tests/headers.rs` — memory eviction and source restart without Graph,
   changed-version misses, actual-read budgets, binding retention, differing endpoint ETags,
-  rename and authentication.
+  rename, authentication, read-ahead past persisted heads and late disk-hit block retention.
 - `graph_source/links.rs` — the download URLs of a folder's files from one listing of it,
   kept 40 minutes with a 10,000-entry cap; pages release readers as they arrive, and one
   background listing per folder is cancelled on token invalidation or drop. `[tests]`
@@ -431,7 +432,7 @@ A file that is not on disk:
   readdir snapshots, a bounded speculative window and cancellation; uses the existing
   in-memory range store; scan reads count on their own cloud-only handle.
 - `item_kernel_requests/tests/header_cache.rs` — real disk-hit guard charging, counted
-  tiny-file hydration outside scans and cloud-only scan hits without speculative refetch.
+  tiny-file hydration outside scans, and a 24-file restart/Exiv2 scan with concurrent read-ahead.
 - `item_kernel_requests/tests/read_ahead.rs` — 300 ms/40-file timing and request
   regression, exclusions, guard and idle cancellation, foreground priority, small-file
   scan handle coverage, trace replay, tiny grace periods, argv launches and an unpolled-actor/full-queue regression.
