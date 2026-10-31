@@ -58,3 +58,37 @@ fn host_matching_keeps_launch_prefixes_case_and_jetbrains_rules() {
         assert!(!runs_programs(id, &hosts), "{id}");
     }
 }
+
+#[test]
+fn process_generations_change_on_pid_reuse_exec_scope_role_or_failed_inspection() {
+    struct Fake(Mutex<Option<ProcessInfo>>);
+    impl ProcessReader for Fake {
+        fn read(&self, _: u32) -> Option<ProcessInfo> { self.0.lock().unwrap().clone() }
+    }
+    let fake = Arc::new(Fake(Mutex::new(Some(ProcessInfo {
+        start: 1, executable: "/usr/bin/viewer".into(), cgroup: "0::/app-org.example.viewer-123.scope".into(),
+        cmdline: Arc::new(b"viewer\0/mount/file\0".to_vec()),
+    }))));
+    let callers = Callers::with_reader(fake.clone());
+    let mut last = callers.process(42).unwrap().generation;
+    assert_eq!(callers.process(42).unwrap().generation, last);
+    for change in 0..4 {
+        let mut data = fake.0.lock().unwrap();
+        let p = data.as_mut().unwrap();
+        match change {
+            0 => p.start += 1,
+            1 => p.executable = "/usr/lib/kioworker".into(),
+            2 => p.cgroup = "0::/app-org.example.other-123.scope".into(),
+            3 => p.cmdline = Arc::new(b"kioworker\0thumbnail\0".to_vec()),
+            _ => unreachable!(),
+        }
+        drop(data);
+        let next = callers.process(42).unwrap().generation;
+        assert_ne!(next, last);
+        last = next;
+    }
+    let saved = fake.0.lock().unwrap().take();
+    assert!(callers.process(42).is_none());
+    *fake.0.lock().unwrap() = saved;
+    assert_ne!(callers.process(42).unwrap().generation, last);
+}

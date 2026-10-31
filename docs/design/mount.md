@@ -52,8 +52,9 @@ built and not served; only the VM suite mounts.
 | `AccessModeSwitch` | read-only, read-write, or read-only for good | the folder's start, a change of the access mode, `MountTakeDown` |
 | `WriteOperationThread` | the jobs that wait for its thread | anyone queues; the thread runs them |
 | `ReadConnections` | one read-only connection to the store per thread of the mount | opened at a thread's first question, closed at the stop |
-| `ItemHandles` | what programs hold open, by the kernel's `fh`; which items have a writer | open, create, release, opendir, releasedir |
+| `ItemHandles` | what programs hold open, by the kernel's `fh`; private cloud-reader coverage; which items have a writer | open, create, release, opendir, releasedir |
 | `ItemDownloadStates` | per item and content version: the running download and its waiters, a failed one's unfinished file, the fact that OneDrive stated another content; the bytes read as ranges | the downloader and the reads |
+| `LaunchIntents` | bounded argv intent by process generation, item/content and desktop identity; immediate emblem leases | PID-bearing requests, expiry and mount stop |
 | `RangeReaders` | a slot of the transfer pool per file being read as ranges | the range fetcher |
 | `ItemInotifyBridge` | the queue of announcements and its thread (§9) | the steps, the downloader, the free-up, a pin |
 | `MountTakeDown` | whether a take-down was asked, and its first cause | the write operations, the steps, the landing |
@@ -250,6 +251,11 @@ starting once their transfer-pool slot is held. Waiting for a slot, a disk read,
 immediate answer from the source's memory cache never trigger the mark. The delay is
 per asking: repeated or overlapping reads that each finish within 500 ms do not add
 up, so a viewer's quick reads of many images do not flash their emblems.
+
+A desktop argv launch is the exception to the fetch delay: its cloud-only file shows
+`hydrating` immediately when the first PID-bearing request identifies the launch
+(§5.2), without fetching bytes. Ten seconds without a read clears the emblem. A whole
+download started by that intent inherits the shown state, so it stays continuous.
 
 Once a range fetch is shown, the item stays `hydrating` while any range is in flight
 and for `READ_LINGERS` (two seconds) after its last range ends, or while a whole download
@@ -498,29 +504,36 @@ Speculation touches no disk, download-guard budget, `download_after` coverage, w
 download or hydrating state. Its messages are debug read-ahead messages. Real reads
 still undergo ordinary guard admission and charging, including hits in memory.
 
-Once the second distinct head activates a scan, range reads by that desktop identity
-in that folder skip `download_after` counting only for content without a counting
-record: files whose reading started in the scan. This includes the activating head,
-non-head reads and files with other extensions. A file already decided to count keeps
-counting during the scan, even while its first counted fetch is still in flight.
-Skipped bytes remain in the existing memory store; no whole download is started by
-those skipped reads, even when a tiny file is read in full. Detection
-lives in a mutex-held record updated synchronously before the foreground fetch, using
-folder facts from the row that decided its range origin. The activating read is already
-covered even if the async scheduling task has not run or its queue is full. No lock is
-held across an await. The decision belongs to that admitted read; completing it later
-does not replay its skipped coverage. A debug message announces suppression once per scan.
+Once the second distinct head activates a scan, reads by that identity in that
+folder use coverage private to the open cloud-only handle, for its opened
+`ContentVersion`. They never touch item-level coverage, including the activating
+head and non-head reads. Handle coverage includes successful reads from before
+scan activation. When that handle's own distinct returned ranges reach
+`min(download_after, size)`, and the file is larger than 16 KiB, it starts the usual
+guarded whole download. Separate handles never combine. A 16 KiB MIME peek cannot
+land a larger image; a decoder reading 16 KiB then the remaining 30,258 bytes of a
+46,642-byte image on one handle can. Sparse Exiv2 reads count only their union,
+never the gaps. Files of at most 16 KiB remain in memory during a scan unless they
+have launch intent (§5.2). A neighbour decoded in full by the viewer's preload can
+also qualify; the daemon cannot distinguish that decoder from the viewed file.
 
-The first file was read before the scan existed and can still land normally; a started
-whole download is never cancelled retroactively. If a slow fetch of an opened image
-outlives the old scan, that image keeps counting through a later scan and can land normally.
-A file first read in an active scan is not kept, even after repeated reads; deliberately
-viewing it then may require fetching it again next time. Other identities
-and folders count normally. When a scan expires, is cancelled, loses policy eligibility
-or is replaced, subsequent reads count again; coverage accumulated before the scan stays,
-and skipped coverage is never added later. A guard notification ends the scan only when the
-scanning identity is no longer eligible; the guard also notifies on every refusal of other
-readers, which must not end it.
+Detection lives in a mutex-held record updated synchronously before the foreground
+fetch, using folder facts from the row that decided its origin. It works even when
+the scheduling actor has not run or its queue is full. No lock spans an await.
+Outside a scan, ordinary item-level coverage resumes; scan bytes are never replayed
+into it. Expiry, cancellation, replacement or lost eligibility ends the scan; guard
+notifications about other readers do not. A debug line records handle qualification.
+
+A desktop identity's outside-scan threshold download of a file at most 16 KiB waits
+three seconds. If that identity activates a scan in the same folder during the
+pending read or grace period, the promotion is dropped, even if that scan is later
+replaced. This prevents a stray first tiny file landing before detection. Repeated
+reads share one pending promotion per identity/content; expiry rechecks the row,
+then rechecks current policy, scan cancellation and mount lifetime after the store
+await, immediately before the space check and download start. Charging is bound to
+the reader before waiting, so an
+exited or reused PID cannot lose or inherit the asking. Launched files, larger files and guarded readers do not wait.
+A whole download already started is never cancelled by scan detection.
 
 A failed or cancelled foreground read cancels its scan; the scanning identity losing
 eligibility, three seconds without a head, mount stop and sign-out cancel pending work
@@ -537,32 +550,51 @@ the union of the returned ranges, clipped to the file's size. Repeated or overla
 reads add only their new coverage; bytes fetched ahead into aligned blocks add nothing.
 The download guard continues to admit each program's requested bytes before fetching,
 including repeats and cache hits ([download-guard.md](download-guard.md)).
-Once distinct coverage reaches `min(download_after, file size)` (`[transfers] download_after`
-is 1 MiB by default; 0 downloads at the first read), the file is downloaded whole, with no
-waiter: reads continue as checked ranges until the verified backing file lands. One 16 KiB
-read of a 10 KiB file covers that whole file and therefore starts its whole download,
-except for content first read during an active desktop scan by that identity in that folder
-(§5.1.1). That exception applies even with `download_after = 0`; `read_ahead = 0`
-disables it along with speculation. The whole download still fetches afresh and checks
-quickXorHash; the in-memory range cache is not a verified landing source. Unfinished staging is never a read origin.
+Once distinct coverage reaches `min(download_after, file size)` (`[transfers]
+download_after` is 1 MiB by default; 0 downloads at the first read), the file is
+downloaded whole, with no waiter: reads continue as checked ranges until the verified
+backing file lands. Every cloud-only handle also records its successful coverage
+outside scans; item coverage remains the decision rule there. During a desktop
+scan only that handle's full coverage counts, including bytes returned before
+activation, and
+only files larger than 16 KiB qualify (§5.1.1), even with `download_after = 0`.
+The whole download fetches afresh and checks quickXorHash; cached ranges and unfinished
+staging are never a verified landing source.
 
-A counting record is created synchronously before a non-skipped fetch, even if that
-fetch later fails or is cancelled. No skipped read creates one. Threshold completion
-clears its intervals but retains its counting eligibility. Coverage starts over when
-the threshold answers yes, after a successful whole download, when the item is forgotten, or when a read names another opened `ContentVersion`. Old and
-new handles alternating can therefore undercount, but never combine different contents.
-Coverage lives with the mount, shared by readers of the same item and content. It keeps
-sorted, coalesced intervals, at most 64 per item. Above that cap the closest separated pair
-is reduced to its longer interval (the later on a tie): the shorter is forgotten and the
-gap is never counted. This downward merge can delay a download, never start one early.
-The map targets 4,096 items, evicting arbitrary unpinned entries; this only undercounts.
-An in-flight counted read pins its record. On activation, the synchronous scan state
-also pins the existing records until expiry, cancellation, replacement or stop, so
-eviction cannot lose the opened image's eligibility or head coverage mid-scan. The
-map may temporarily exceed the target by records pinned by the scan and concurrent
-reads; the next insertion or scan activation trims unpinned entries. A changed
-`ContentVersion` replaces the record; a late fetch completes only its original record.
-These limits do not change the guard's accounting.
+Outside scans a record is chosen before fetching, so a late fetch updates only its
+original content's coverage. A changed opened `ContentVersion` replaces that item's
+record; old and new handles can undercount, never combine versions. Coverage clears
+at threshold, successful whole download, or `forget_item`. Both item and handle
+coverage keep sorted, coalesced intervals, at most 64. Above that cap the closest
+separated pair is reduced to its longer interval (the later on a tie); gaps never
+count. The item map holds at most 4,096 records with arbitrary eviction. No scan
+pins it. A handle's record is created at cloud-only open, snapshotted into each
+`RangeToFetch` with `fh`, and removed at release; outstanding reads retain it only
+until they finish. These bounds can delay downloads, never start them early, and do
+not change admission accounting.
+
+**Launch intent.** On the first lookup, attribute/access query, directory request,
+open or inherited-handle read carrying a non-guarded desktop process's PID, its identity-validated `/proc/<pid>/cmdline` snapshot is
+parsed once per remembered process generation. At most 64 arguments, each at most
+4 KiB, are examined. Absolute paths and percent-decoded local `file://` URLs under
+this mount are resolved with the store's path index alone: no path is statted,
+opened or canonicalized. Directories, unknown paths and resident files are ignored.
+Up to 1,024 process generations are remembered per mount; eviction loses intent.
+
+Each cloud file is marked launched for that desktop identity for thirty seconds,
+or until its owning process generation vanishes or loses eligibility (rechecked each second). Its first admitted read starts a whole download immediately,
+regardless of size, threshold or scan, still subject to guard charging and the usual
+space reservation. Other processes with that same identity can consume the intent.
+The range itself is answered normally. The immediate hydrating emblem expires after
+ten seconds without a read; a download started while it is shown inherits that mark
+until completion (§3.5). Mount stop cancels intent timers and pending tiny promotions.
+
+Single-instance activation over D-Bus, Flatpak portal paths and navigation within an
+already-running app supply no new argv intent. They fall back to item/handle coverage;
+small images viewed during a scan can therefore remain cloud-only. Dolphin's open
+alone is not launch evidence: an open also serves browsing and other automatic work.
+`read_ahead = 0` disables scan detection and handle-only counting; tiny desktop files
+still wait three seconds, with no scan cancellation, and launch intent still works.
 
 Measured on build `1983691`, 2026-10-30: Gwenview opened one image in a folder of 653
 cloud-only PNGs and probed each image it passed with `16384@0`, four `4096@0` reads,

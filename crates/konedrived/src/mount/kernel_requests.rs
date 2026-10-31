@@ -333,7 +333,8 @@ impl Filesystem for KernelRequests {
         }
     }
 
-    fn getattr(&self, _req: &Request, ino: INodeNo, fh: Option<FileHandle>, reply: ReplyAttr) {
+    fn getattr(&self, req: &Request, ino: INodeNo, fh: Option<FileHandle>, reply: ReplyAttr) {
+        self.requests.observe_process(req.pid());
         match self.requests.answer_getattr(to_local_item_id(ino), fh.map(to_fh)) {
             Ok(attributes) => reply.attr(&ATTRIBUTE_LIFETIME, &attributes),
             Err(errno) => reply.error(errno),
@@ -345,6 +346,7 @@ impl Filesystem for KernelRequests {
     }
 
     fn open(&self, req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
+        self.requests.observe_process(req.pid());
         let node = to_local_item_id(ino);
         // Opening to write is a change of the folder.
         if flags.0 & libc::O_TRUNC != 0 {
@@ -375,6 +377,8 @@ impl Filesystem for KernelRequests {
     }
 
     fn read(&self, req: &Request, _ino: INodeNo, fh: FileHandle, offset: u64, size: u32, _flags: OpenFlags, _lock_owner: Option<LockOwner>, reply: ReplyData) {
+        // An inherited handle may be this process's first request.
+        self.requests.observe_process(req.pid());
         match self.requests.decide_read(to_fh(fh), offset, size) {
             Ok(ReadAnswer::Bytes(bytes)) => reply.data(&bytes),
             Ok(ReadAnswer::Range(range)) => self.fetch_on_runtime(req, range, RangeFetch::Range, reply),
@@ -438,14 +442,16 @@ impl Filesystem for KernelRequests {
         }));
     }
 
-    fn opendir(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
+    fn opendir(&self, req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
+        self.requests.observe_process(req.pid());
         match self.requests.answer_opendir(to_local_item_id(ino)) {
             Ok(fh) => reply.opened(to_file_handle(fh), FopenFlags::empty()),
             Err(errno) => reply.error(errno),
         }
     }
 
-    fn readdir(&self, _req: &Request, ino: INodeNo, fh: FileHandle, offset: u64, mut reply: ReplyDirectory) {
+    fn readdir(&self, req: &Request, ino: INodeNo, fh: FileHandle, offset: u64, mut reply: ReplyDirectory) {
+        self.requests.observe_process(req.pid());
         let listed = match self.requests.answer_readdir(to_local_item_id(ino), to_fh(fh), offset as usize) {
             Ok(listed) => listed,
             Err(errno) => return reply.error(errno),
@@ -464,7 +470,8 @@ impl Filesystem for KernelRequests {
         reply.ok();
     }
 
-    fn readdirplus(&self, _req: &Request, ino: INodeNo, fh: FileHandle, offset: u64, mut reply: ReplyDirectoryPlus) {
+    fn readdirplus(&self, req: &Request, ino: INodeNo, fh: FileHandle, offset: u64, mut reply: ReplyDirectoryPlus) {
+        self.requests.observe_process(req.pid());
         let listed = match self.requests.answer_readdir(to_local_item_id(ino), to_fh(fh), offset as usize) {
             Ok(listed) => listed,
             Err(errno) => return reply.error(errno),
@@ -484,14 +491,16 @@ impl Filesystem for KernelRequests {
         reply.ok();
     }
 
-    fn statfs(&self, _req: &Request, _ino: INodeNo, reply: ReplyStatfs) {
+    fn statfs(&self, req: &Request, _ino: INodeNo, reply: ReplyStatfs) {
+        self.requests.observe_process(req.pid());
         match self.backing_directory.measure_space() {
             Ok(space) => reply.statfs(space.f_blocks, space.f_bfree, space.f_bavail, space.f_files, space.f_ffree, space.f_bsize as u32, LONGEST_NAME, space.f_frsize as u32),
             Err(error) => reply.error(to_errno(&error)),
         }
     }
 
-    fn access(&self, _req: &Request, _ino: INodeNo, mask: AccessFlags, reply: ReplyEmpty) {
+    fn access(&self, req: &Request, _ino: INodeNo, mask: AccessFlags, reply: ReplyEmpty) {
+        self.requests.observe_process(req.pid());
         let refused = if mask.contains(AccessFlags::W_OK) { self.access_mode_switch.check_read_write() } else { Ok(()) };
         match refused {
             Ok(()) => reply.ok(),
@@ -499,7 +508,8 @@ impl Filesystem for KernelRequests {
         }
     }
 
-    fn getxattr(&self, _req: &Request, ino: INodeNo, name: &OsStr, size: u32, reply: ReplyXattr) {
+    fn getxattr(&self, req: &Request, ino: INodeNo, name: &OsStr, size: u32, reply: ReplyXattr) {
+        self.requests.observe_process(req.pid());
         let value = match self.requests.answer_getxattr(to_local_item_id(ino), name) {
             Ok(value) => value,
             Err(errno) => return reply.error(errno),
@@ -511,7 +521,8 @@ impl Filesystem for KernelRequests {
         }
     }
 
-    fn listxattr(&self, _req: &Request, ino: INodeNo, size: u32, reply: ReplyXattr) {
+    fn listxattr(&self, req: &Request, ino: INodeNo, size: u32, reply: ReplyXattr) {
+        self.requests.observe_process(req.pid());
         let names = match self.requests.answer_listxattr(to_local_item_id(ino)) {
             Ok(names) => names,
             Err(errno) => return reply.error(errno),

@@ -67,6 +67,7 @@ pub(super) struct PartsToStop {
     pub(super) inotify_bridge: Arc<ItemInotifyBridge>,
     pub(super) downloader: Arc<ItemDownloader>,
     pub(super) read_ahead: Arc<super::super::read_ahead::ReadAhead>,
+    pub(super) launch_intents: Arc<super::super::launch_intent::LaunchIntents>,
     /// What a test of the stop looks at: the downloader aborts what it holds.
     #[cfg(test)]
     pub(super) download_states: Arc<ItemDownloadStates>,
@@ -133,7 +134,7 @@ fn build_over(backing_directory: Arc<BackingDirectory>, setup: ItemMountSetup, r
     let range_readers = Arc::new(RangeReaders::new(Arc::clone(&pool), runtime.clone()).with_read_states(Arc::clone(&download_states.range_reads)));
     let range_fetcher = Arc::new(ItemRangeFetcher::new(range_readers, Arc::clone(&source), report.throttle_wait.clone()).with_read_ahead(read_ahead > 0));
     let download_landing = Arc::new(ItemDownloadLanding::new(Arc::clone(&place_changes), store.clone(), Arc::clone(&running_steps), Arc::clone(&mount_take_down), Arc::clone(&item_handles))?);
-    let read_ahead = Arc::new(super::super::read_ahead::ReadAhead::new(store.clone(), Arc::clone(&source), Arc::clone(&download_guard), Arc::clone(&download_states), read_ahead, &runtime));
+    let read_ahead = Arc::new(super::super::read_ahead::ReadAhead::new(store.clone(), Arc::clone(&source), Arc::clone(&download_guard), read_ahead, &runtime));
     let downloader = Arc::new(ItemDownloader::new(
         Arc::clone(&backing_directory),
         Arc::clone(&download_states),
@@ -201,6 +202,7 @@ fn build_over(backing_directory: Arc<BackingDirectory>, setup: ItemMountSetup, r
         mount_take_down,
         folder: folder.clone(),
     };
+    let launch_intents = super::super::launch_intent::LaunchIntents::new(folder.clone(), Arc::clone(&read_connections), Arc::clone(&download_guard), Arc::clone(&download_states), runtime.clone());
     let files_interface = Arc::new(ItemFilesInterface::new(
         folder,
         store.clone(),
@@ -229,6 +231,7 @@ fn build_over(backing_directory: Arc<BackingDirectory>, setup: ItemMountSetup, r
         Arc::clone(&access_mode_switch),
         store.clone(),
     );
+    kernel_requests.launch_intents = Some(Arc::clone(&launch_intents));
     kernel_requests.download_guard = download_guard;
     kernel_requests.read_ahead = Some(Arc::clone(&read_ahead));
     let mount = ItemMount {
@@ -245,6 +248,7 @@ fn build_over(backing_directory: Arc<BackingDirectory>, setup: ItemMountSetup, r
             inotify_bridge,
             downloader,
             read_ahead,
+            launch_intents,
             #[cfg(test)]
             download_states,
             read_connections,

@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Caller {
@@ -85,48 +85,98 @@ pub(super) fn runs_programs(identity: &str, hosts: &[String]) -> bool {
     })
 }
 
-#[derive(Default)]
-pub(crate) struct Callers(Mutex<HashMap<u32, Cached>>);
-
-struct Cached {
-    start: u64,
-    executable: String,
-    cgroup: String,
-    reader: String,
-    caller: Caller,
+/// The procfs seam also lets launch-intent tests supply argv without inspecting a
+/// real process. The production reader checks the start tick around its snapshot.
+pub(crate) trait ProcessReader: Send + Sync {
+    fn read(&self, pid: u32) -> Option<ProcessInfo>;
 }
 
-impl Callers {
-    /// Revalidate the start tick, exe, unit and KIO role on EVERY request: an exec or a
-    /// move into another scope may keep the same PID. A bounded cache saves normalization,
-    /// not procfs reads. A process that vanished or cannot be inspected fails closed.
-    pub fn identify(&self, pid: u32) -> Option<Caller> {
+#[derive(Clone)]
+pub(crate) struct ProcessInfo {
+    pub(crate) start: u64,
+    pub(crate) executable: String,
+    pub(crate) cgroup: String,
+    pub(crate) cmdline: Arc<Vec<u8>>,
+}
+
+struct ProcReader;
+impl ProcessReader for ProcReader {
+    fn read(&self, pid: u32) -> Option<ProcessInfo> {
         let root = format!("/proc/{pid}");
-        let stat = std::fs::read_to_string(format!("{root}/stat")).ok()?;
-        let start = start_time(&stat)?;
+        let start = start_time(&std::fs::read_to_string(format!("{root}/stat")).ok()?)?;
         let executable = std::fs::read_link(format!("{root}/exe")).ok()?.to_str()?.to_owned();
         let cgroup = std::fs::read_to_string(format!("{root}/cgroup")).ok()?;
         let mut cmdline = Vec::new();
         File::open(format!("{root}/cmdline")).ok()?.take(65537).read_to_end(&mut cmdline).ok()?;
-        if cmdline.len() > 65536 {
+        if cmdline.len() > 65536 || start_time(&std::fs::read_to_string(format!("{root}/stat")).ok()?)? != start {
             return None;
         }
-        let reader = reader_role(&executable, &cmdline);
-        if start_time(&std::fs::read_to_string(format!("{root}/stat")).ok()?)? != start {
+        Some(ProcessInfo { start, executable, cgroup, cmdline: Arc::new(cmdline) })
+    }
+}
+
+pub(crate) struct Callers {
+    cache: Mutex<CallerCache>,
+    reader: Arc<dyn ProcessReader>,
+}
+
+#[derive(Default)]
+struct CallerCache {
+    by_pid: HashMap<u32, Cached>,
+    next: u64,
+}
+
+struct Cached {
+    process: ProcessInfo,
+    reader: String,
+    caller: Caller,
+    generation: u64,
+}
+
+/// An identity generation, rather than a bare pid, survives neither exec, PID reuse,
+/// a scope/role change nor a failed inspection. Arguments stay private to the daemon.
+pub(crate) struct IdentifiedProcess {
+    pub(crate) caller: Caller,
+    pub(crate) generation: u64,
+    pub(crate) cmdline: Arc<Vec<u8>>,
+}
+
+impl Default for Callers {
+    fn default() -> Self { Self { cache: Mutex::default(), reader: Arc::new(ProcReader) } }
+}
+
+impl Callers {
+    #[cfg(test)]
+    pub(crate) fn with_reader(reader: Arc<dyn ProcessReader>) -> Self {
+        Self { cache: Mutex::default(), reader }
+    }
+
+    /// Revalidate start tick, exe, unit and KIO role on every request. The bounded
+    /// cache saves normalization and launch parsing, never identity validation.
+    pub fn identify(&self, pid: u32) -> Option<Caller> {
+        self.process(pid).map(|process| process.caller)
+    }
+
+    pub(crate) fn process(&self, pid: u32) -> Option<IdentifiedProcess> {
+        let Some(process) = self.reader.read(pid) else {
+            crate::panic::lock(&self.cache).by_pid.remove(&pid);
             return None;
-        }
-        let mut cache = crate::panic::lock(&self.0);
-        if let Some(old) = cache.get(&pid) {
-            if old.start == start && old.executable == executable && old.cgroup == cgroup && old.reader == reader {
-                return Some(old.caller.clone());
+        };
+        let reader = reader_role(&process.executable, &process.cmdline);
+        let mut cache = crate::panic::lock(&self.cache);
+        if let Some(old) = cache.by_pid.get(&pid) {
+            if old.process.start == process.start && old.process.executable == process.executable
+                && old.process.cgroup == process.cgroup && old.reader == reader {
+                return Some(IdentifiedProcess { caller: old.caller.clone(), generation: old.generation, cmdline: Arc::clone(&old.process.cmdline) });
             }
         }
-        let caller = caller(&executable, &cgroup, reader.clone());
-        if cache.len() >= 1024 {
-            cache.clear();
-        }
-        cache.insert(pid, Cached { start, executable, cgroup, reader, caller: caller.clone() });
-        Some(caller)
+        let caller = caller(&process.executable, &process.cgroup, reader.clone());
+        if cache.by_pid.len() >= 1024 { cache.by_pid.clear(); }
+        cache.next += 1;
+        let generation = cache.next;
+        let cmdline = Arc::clone(&process.cmdline);
+        cache.by_pid.insert(pid, Cached { process, reader, caller: caller.clone(), generation });
+        Some(IdentifiedProcess { caller, generation, cmdline })
     }
 }
 

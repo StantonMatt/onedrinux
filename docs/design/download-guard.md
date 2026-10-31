@@ -239,18 +239,26 @@ program hosts, background readers and unidentified callers never trigger it, eve
 allowed. A policy block cancels pending speculation immediately; an always block also
 suppresses speculation when a session allowance still permits explicit reads. Real reads
 of prefetched bytes pass through ordinary admission and accounting, just like other
-memory hits. While the scan is active, reads by that identity in that folder skip
-only the whole-download threshold when that content has no counting record. The
-activating second head and non-head reads follow this rule. Scan-started files stay
-in memory even when read in full; a file whose reading began outside the scan keeps
-counting, even while its first counted fetch is unfinished. Other
-identities and folders count as usual. The first file can land before detection; a
-small file first read during the active scan is not kept either. Counting records
-are created before fetching; failed or cancelled counted reads may leave a record,
-and changed content resets it. In-flight reads and the active scan pin existing
-coverage against eviction (mount.md §5.2). Detection and the
-counting decision happen synchronously before fetching, independently of scheduling.
-Expiry, cancellation, replacement or the scanning identity losing
-eligibility ends suppression (other refusals the guard announces do not); earlier coverage
-stays and skipped coverage is never replayed. A debug message is logged once per scan.
-`[transfers] read_ahead = 0` disables both speculation and scan threshold suppression.
+memory hits. While the scan is active, returned ranges count only on their own
+open cloud-only handle, never the item's shared coverage. One handle reaching
+`min(download_after, size)` qualifies only if the file is larger than 16 KiB;
+separate peeks and sparse probes cannot combine across handles. Outside scans the
+item-level threshold is unchanged. Tiny desktop files wait three seconds before a
+threshold download, and any matching scan activation during the pending read or grace
+period cancels it. Guarded identities still start immediately at threshold.
+
+The same eligibility check admits launch intent. The earliest PID-bearing
+metadata, directory, open or read request parses bounded cached argv once per process generation, resolves
+only absolute mount paths or local `file://` URLs through the store, and shows the
+hydrating emblem immediately. Intent lasts thirty seconds while its owning identity
+remains valid; the emblem clears after ten seconds without a read. The first admitted
+read by that identity requests the whole download, bypassing scan/threshold/size rules,
+but never guard policy, charging or disk reservations. Intent alone downloads nothing,
+creates no seen-app row and reserves no space. A block, process exit or exec/scope
+change invalidates it. Arguments and paths are never logged; debug lines name only
+local item IDs and identity. No mounted path is opened for intent discovery.
+
+`[transfers] read_ahead = 0` disables scan detection and per-handle scan counting.
+The tiny-file grace period remains but cannot be cancelled by a scan; launch intent
+is independent and still works. Single-instance D-Bus activation, portal aliases and
+navigation in an existing app fall back to ordinary coverage ([mount.md](mount.md) §5.2).

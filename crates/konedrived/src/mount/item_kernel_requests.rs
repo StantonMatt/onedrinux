@@ -159,6 +159,8 @@ use super::place_changes::{decide_open_errno, OpenAtRowError, PlaceChanges};
 use super::read_connections::ReadConnections;
 use super::write_operation_thread::WriteOperationThread;
 
+mod read_downloads;
+
 #[cfg(test)]
 mod tests;
 
@@ -239,6 +241,8 @@ pub(super) struct RangeToFetch {
     pub(super) item: LocalItemId,
     pub(super) source: RangeSource,
     pub(super) scan_file: Option<super::read_ahead::ScanFile>,
+    pub(super) fh: Fh,
+    pub(super) handle_count: super::item_download_states::ReadCount,
     pub(super) from: u64,
     pub(super) end: u64,
     /// The whole download of the content the range is of: started when this read reaches
@@ -385,6 +389,7 @@ pub(crate) struct ItemKernelRequests {
     store: Store,
     pub(super) download_guard: Arc<crate::download_guard::DownloadGuard>,
     pub(super) read_ahead: Option<Arc<super::read_ahead::ReadAhead>>,
+    pub(super) launch_intents: Option<Arc<super::launch_intent::LaunchIntents>>,
 }
 
 impl ItemKernelRequests {
@@ -409,7 +414,7 @@ impl ItemKernelRequests {
         store: Store,
     ) -> Self {
         let reply_attributes = Arc::new(WriteReplyAttributes { store: store.clone(), lookup: Arc::clone(&lookup) });
-        Self { read_ahead: None, lookup, read_connections, place_changes, item_handles, write_operations, write_operation_thread, inotify_bridge, downloader, download_states, range_fetcher, free_up, access_mode_switch, reply_attributes, store, download_guard: Arc::new(crate::download_guard::DownloadGuard::default()) }
+        Self { read_ahead: None, launch_intents: None, lookup, read_connections, place_changes, item_handles, write_operations, write_operation_thread, inotify_bridge, downloader, download_states, range_fetcher, free_up, access_mode_switch, reply_attributes, store, download_guard: Arc::new(crate::download_guard::DownloadGuard::default()) }
     }
 
     /// lookup. For the inotify bridge's own thread (`ItemInotifyBridge::is_own_thread` of
@@ -419,6 +424,7 @@ impl ItemKernelRequests {
     /// answered with `ItemLookup::describe_vanishing` (no row shows it there any more) and
     /// no lifetime; one that is appearing, `ENOENT`.
     pub(super) fn answer_lookup(&self, directory: LocalItemId, name: &OsStr, thread_id: u32) -> Result<LookupAnswer, Errno> {
+        self.observe_process(thread_id);
         let in_progress = match self.inotify_bridge.is_own_thread(thread_id) {
             true => self.inotify_bridge.find_in_progress(),
             false => None,
@@ -509,6 +515,7 @@ impl ItemKernelRequests {
     pub(super) fn answer_open_to_read(&self, node: LocalItemId) -> Result<OpenedFile, Errno> { self.open_to_read(node, None) }
 
     pub(super) fn open_to_read(&self, node: LocalItemId, pid: Option<u32>) -> Result<OpenedFile, Errno> {
+        if let Some(pid) = pid { self.observe_process(pid); }
         let mut is_mended = false;
         for _try in 0..ROW_TRIES {
             let readers = crate::panic::lock(&self.item_handles.reader_gate);
@@ -564,10 +571,12 @@ impl ItemKernelRequests {
     /// has no answer) — a range to fetch once the whole download was asked for anew
     /// ([`decide_range_origin`]). `EBADF` for an `fh` that holds no file.
     pub(super) fn decide_read(&self, fh: Fh, offset: u64, size: u32) -> Result<ReadAnswer, Errno> {
-        let (item, content) = match self.item_handles.find_file(fh).ok_or(Errno::EBADF)? {
+        let (file, handle_count) = self.item_handles.find_file_for_read(fh).ok_or(Errno::EBADF)?;
+        let (item, content) = match file {
             OpenItemFile::ReadingBackingFile { backing_file, .. } | OpenItemFile::Writing { backing_file, .. } => return read_file_range(&backing_file, offset, size).map(ReadAnswer::Bytes),
             OpenItemFile::ReadingNotOnDisk { item, content } => (item, content),
         };
+        let handle_count = handle_count.ok_or(Errno::EBADF)?;
         for _try in 0..ROW_TRIES {
             let row = self.lookup.find_node_row(item)?;
             let source = match decide_not_on_disk_read_origin(&row, &content) {
@@ -609,7 +618,7 @@ impl ItemKernelRequests {
                 super::item_lookup::NodeRow::Shown(row) => super::read_ahead::ScanFile::of(row),
                 _ => None,
             };
-            let to_fetch = |from, end| RangeToFetch { item, from, end, scan_file: scan_file.clone(), download_at_threshold: ItemToDownload { item, onedrive_item: source.onedrive_item.clone(), content: content.clone() }, source: source.clone() };
+            let to_fetch = |from, end| RangeToFetch { item, from, end, fh, handle_count: handle_count.clone(), scan_file: scan_file.clone(), download_at_threshold: ItemToDownload { item, onedrive_item: source.onedrive_item.clone(), content: content.clone() }, source: source.clone() };
             return match decide_range_origin(content.size(), download, offset, size) {
                 RangeOrigin::Nothing => Ok(ReadAnswer::Bytes(Vec::new())),
                 RangeOrigin::OneDrive { from, end } => Ok(ReadAnswer::Range(to_fetch(from, end))),
@@ -621,14 +630,20 @@ impl ItemKernelRequests {
 
     /// The rest of a read as ranges, on the runtime: `ItemRangeFetcher::fetch_range`
     /// (another content than the one opened is `ESTALE`), the distinct returned ranges
-    /// counted towards the whole download except for scan-started content in an active
-    /// desktop folder scan (`begin_read_count` before fetching, `finish_read_count`
-    /// after, then `ItemDownloader::download` as
+    /// counted per item outside a scan, and per handle during one. Launch intent
+    /// starts a download on the first admitted read; otherwise `finish_read_count`
+    /// starts `ItemDownloader::download` as
     /// `DownloadAsker::Read`, with no waiter, at the threshold). No row is read here. The
     /// caller keeps the task's abort handle for the kernel's interrupt
     /// (`interruptible_reads`).
     #[cfg(test)]
     pub(super) async fn fetch_read_range(&self, range: RangeToFetch) -> Result<Vec<u8>, Errno> { self.read_range(range, None).await }
+
+    pub(super) fn observe_process(&self, pid: u32) {
+        if !self.inotify_bridge.is_own_thread(pid) {
+            if let Some(intents) = &self.launch_intents { intents.observe(pid); }
+        }
+    }
 
     pub(super) fn check_cloud_open(&self, pid: u32) -> Result<(), Errno> {
         if self.inotify_bridge.is_own_thread(pid) { return Ok(()); }
@@ -665,26 +680,6 @@ impl ItemKernelRequests {
         let caller = pid.filter(|pid| !self.inotify_bridge.is_own_thread(*pid))
             .and_then(|pid| self.download_guard.read_ahead_caller(pid));
         self.read_range_as(range, pid, caller).await
-    }
-
-    async fn read_range_as(&self, range: RangeToFetch, pid: Option<u32>, caller: Option<crate::download_guard::ReadAheadCaller>) -> Result<Vec<u8>, Errno> {
-        self.admit_remote(pid, &range, range.end.saturating_sub(range.from))?;
-        let mut head = caller.and_then(|caller| self.read_ahead.as_ref()?.head(
-            caller, range.item, &range.source.content, range.scan_file.as_ref()?, range.from));
-        let counting = match &head {
-            Some(head) => head.counting.clone(),
-            None => self.download_states.begin_read_count(range.item, &range.source.content, false),
-        };
-        let bytes = self.fetch_range(&range).await?;
-        if let Some(head) = &mut head { head.completed = true; }
-        if counting.as_ref().is_some_and(|record| self.download_states.finish_read_count(record, range.from, bytes.len() as u64)) {
-            if !self.download_states.is_downloading(range.item) && self.downloader.read_fits(range.source.content.size()) {
-                if let Ok(charge) = self.charge_download(pid, &range) {
-                    self.downloader.download_charged(range.download_at_threshold, None, charge);
-                }
-            }
-        }
-        Ok(bytes)
     }
 
     /// The rest of a read of a content OneDrive stated another one for

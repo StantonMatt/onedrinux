@@ -254,6 +254,7 @@ impl ItemMount {
         let parts = &self.parts_to_stop;
         // No write operation, landing or step towards the folder runs from here on.
         parts.read_ahead.stop();
+        parts.launch_intents.stop();
         parts.write_operation_thread.stop();
         parts.inotify_bridge.stop();
         parts.downloader.stop();

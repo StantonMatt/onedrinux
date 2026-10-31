@@ -64,9 +64,9 @@
 // test: the_interval_cap_reduces_the_closest_pair_to_its_longer_interval
 // test: the_number_of_items_with_range_coverage_is_bounded_and_eviction_never_adds_bytes
 // test: item_download_states_register_counting_before_fetch_and_reset_it_for_another_content
-// test: item_download_states_preserve_in_flight_and_scan_coverage_at_the_item_limit
+// test: item_download_states_bound_records_without_pinning_scan_coverage
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -92,17 +92,27 @@ pub(super) const ANOTHER_CONTENTS_REMEMBERED: usize = 256;
 /// whole download; a gap must never be counted as if the program had read it.
 const READ_INTERVALS_KEPT: usize = 64;
 
-/// The target number of items with range coverage. In-flight reads and a scan
-/// protect their records from eviction; a successful download or `forget_item`
-/// removes the entry. See `trim_read_counts` for the temporary excess.
+/// The maximum number of items with range coverage. Eviction forgets bytes only.
 const READ_ITEMS_KEPT: usize = 4096;
 
-/// Pins coverage while its fetch or the scan that followed it is in progress.
-#[derive(Clone)]
+/// Coverage chosen before a fetch; outstanding reads retain it after handle release.
+#[derive(Debug, Clone)]
 pub(super) struct ReadCount(Arc<std::sync::Mutex<ReadCoverage>>);
+
+impl PartialEq for ReadCount {
+    fn eq(&self, other: &Self) -> bool { Arc::ptr_eq(&self.0, &other.0) }
+}
+impl Eq for ReadCount {}
+
+impl ReadCount {
+    pub(super) fn new(content: &ContentVersion) -> Self {
+        Self(Arc::new(std::sync::Mutex::new(ReadCoverage::new(content))))
+    }
+}
 
 /// A conservative union of returned ranges of one opened content. Sorted, disjoint
 /// and non-adjacent; every byte kept here was returned to a program.
+#[derive(Debug)]
 struct ReadCoverage {
     content: ContentVersion,
     intervals: Vec<Range<u64>>,
@@ -351,6 +361,8 @@ fn list_another_content_numbers(states: &HashMap<DownloadKey, State>) -> impl It
 pub(crate) struct ItemDownloadStates {
     states: std::sync::Mutex<States>,
     pub(crate) changes: Arc<crate::sync_parts::state_changes::StateChanges>,
+    delayed_reads: std::sync::Mutex<HashSet<(DownloadKey, String)>>,
+    stopped: tokio::sync::watch::Sender<bool>,
     pub(super) range_reads: Arc<super::range_read_states::RangeReadStates>,
     bytes_read_as_ranges: std::sync::Mutex<HashMap<LocalItemId, ReadCount>>,
     /// `[transfers] download_after`.
@@ -364,7 +376,7 @@ impl ItemDownloadStates {
     pub(super) fn new(download_after: u64) -> Self {
         let changes = Arc::default();
         let range_reads = Arc::new(super::range_read_states::RangeReadStates::new(Arc::clone(&changes)));
-        ItemDownloadStates { changes, range_reads, states: std::sync::Mutex::default(), bytes_read_as_ranges: std::sync::Mutex::default(), download_after, last_run_number: AtomicU64::new(0) }
+        ItemDownloadStates { changes, range_reads, delayed_reads: std::sync::Mutex::default(), stopped: tokio::sync::watch::channel(false).0, states: std::sync::Mutex::default(), bytes_read_as_ranges: std::sync::Mutex::default(), download_after, last_run_number: AtomicU64::new(0) }
     }
 
     /// A download of `key` is asked for by `asker`: joined when one runs, started
@@ -518,6 +530,7 @@ impl ItemDownloadStates {
     /// that no asking comes between the two. Nothing of the aborted ones is kept; what
     /// the failed ones left stays until the states go.
     pub(super) fn stop(&self) {
+        self.stopped.send_replace(true);
         let taken: Vec<TakenDownload> = {
             let mut states = crate::panic::lock(&self.states);
             states.is_stopped = true;
@@ -761,35 +774,45 @@ impl ItemDownloadStates {
             || self.range_reads.is_hydrating(item)
     }
 
-    /// Existing counted contents stay eligible throughout a scan, even at the item
-    /// cap. Its synchronous state holds these pins, never its scheduling events.
-    pub(super) fn keep_counted_reads(&self) -> Vec<ReadCount> {
-        let mut records = crate::panic::lock(&self.bytes_read_as_ranges);
-        trim_read_counts(&mut records, READ_ITEMS_KEPT);
-        records.values().cloned().collect()
+    /// Deduplicate tiny-file grace periods for the same identity and content.
+    pub(super) fn delay_read(self: &Arc<Self>, key: DownloadKey, identity: &str) -> Option<DelayedRead> {
+        let key = (key, identity.to_owned());
+        let mut delayed = crate::panic::lock(&self.delayed_reads);
+        if *self.stopped.borrow() || delayed.len() >= READ_ITEMS_KEPT || !delayed.insert(key.clone()) { return None; }
+        Some(DelayedRead { states: Arc::clone(self), key })
     }
 
-    /// Decide before fetching. A scan-started content gets no record; a content
-    /// already decided to count keeps counting, including while its first fetch waits.
-    /// Failed or cancelled counted reads can leave an empty record. Another content
-    /// replaces it, without letting a late completion overwrite the new coverage.
-    pub(super) fn begin_read_count(&self, item: LocalItemId, content: &ContentVersion, in_scan: bool) -> Option<ReadCount> {
+    pub(super) fn stopped(&self) -> tokio::sync::watch::Receiver<bool> { self.stopped.subscribe() }
+
+    /// Launch feedback stays continuous even when the first read joins a download
+    /// already started by another reader or the plan, before its normal show delay.
+    pub(super) fn show_launched_download(&self, key: &DownloadKey) {
+        let mut states = crate::panic::lock(&self.states);
+        if let Some(State::Running { is_shown, .. }) = states.by_key.get_mut(key) {
+            *is_shown = true;
+            drop(states);
+            self.changes.changed(vec![key.item]);
+        }
+    }
+
+    /// Item-level coverage outside a scan. A content change replaces the record;
+    /// a late completion can update only the record it chose before fetching.
+    pub(super) fn begin_read_count(&self, item: LocalItemId, content: &ContentVersion) -> ReadCount {
         let mut records = crate::panic::lock(&self.bytes_read_as_ranges);
         if records.get(&item).is_some_and(|record| crate::panic::lock(&record.0).content != *content) {
             records.remove(&item);
         }
-        if let Some(record) = records.get(&item) {
-            return Some(record.clone());
+        if let Some(record) = records.get(&item) { return record.clone(); }
+        if records.len() >= READ_ITEMS_KEPT {
+            if let Some(old) = records.keys().next().copied() { records.remove(&old); }
         }
-        if in_scan { return None; }
-        trim_read_counts(&mut records, READ_ITEMS_KEPT - 1);
-        let record = ReadCount(Arc::new(std::sync::Mutex::new(ReadCoverage::new(content))));
+        let record = ReadCount::new(content);
         records.insert(item, record.clone());
-        Some(record)
+        record
     }
 
     /// Count only returned bytes of the record chosen before fetching. At threshold,
-    /// coverage starts over but its eligibility remains until eviction or forgetting.
+    /// coverage starts over; late completions update only their original record.
     pub(super) fn finish_read_count(&self, record: &ReadCount, from: u64, bytes: u64) -> bool {
         let mut coverage = crate::panic::lock(&record.0);
         let size = coverage.content.size();
@@ -800,7 +823,7 @@ impl ItemDownloadStates {
 
     #[cfg(test)]
     pub(super) fn count_bytes_read(&self, item: LocalItemId, content: &ContentVersion, from: u64, bytes: u64) -> bool {
-        let record = self.begin_read_count(item, content, false).unwrap();
+        let record = self.begin_read_count(item, content);
         self.finish_read_count(&record, from, bytes)
     }
 
@@ -837,18 +860,13 @@ impl ItemDownloadStates {
     }
 }
 
-/// Unpinned records alone are evicted. The 4,096-item target can temporarily be
-/// exceeded by a scan's snapshot and concurrent reads; their release permits trimming
-/// at the next insertion or scan. Eviction never loses an in-flight read's coverage.
-fn trim_read_counts(records: &mut HashMap<LocalItemId, ReadCount>, limit: usize) {
-    if records.len() <= limit { return; }
-    let mut left = records.len() - limit;
-    records.retain(|_, record| {
-        if left > 0 && Arc::strong_count(&record.0) == 1 {
-            left -= 1;
-            false
-        } else { true }
-    });
+/// A timer owns one pending promotion and releases it on expiry, cancellation or stop.
+pub(super) struct DelayedRead {
+    states: Arc<ItemDownloadStates>,
+    key: (DownloadKey, String),
+}
+impl Drop for DelayedRead {
+    fn drop(&mut self) { crate::panic::lock(&self.states.delayed_reads).remove(&self.key); }
 }
 
 /// A caller in the daemon that waits for a download to end: told that it ended well, or the

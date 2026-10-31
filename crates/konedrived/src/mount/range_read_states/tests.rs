@@ -152,3 +152,17 @@ async fn waiting_for_a_pool_slot_and_an_early_refusal_never_show_hydrating() {
     pass(READ_LINGERS).await;
     assert!(!states.is_hydrating(item));
 }
+
+#[test]
+fn launch_emblems_are_immediate_reference_counted_and_announce_their_end() {
+    let (states, announced) = states();
+    let item = LocalItemId::new(5);
+    let first = states.show_launch(item);
+    let second = states.show_launch(item);
+    assert!(states.is_hydrating(item));
+    drop(first);
+    assert!(states.is_hydrating(item), "another process's launch keeps feedback");
+    drop(second);
+    assert!(!states.is_hydrating(item));
+    assert_eq!(*announced.lock().unwrap(), [item, item, item, item]);
+}

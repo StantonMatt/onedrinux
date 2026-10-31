@@ -2,8 +2,8 @@
 //!
 //! One scan per mount bounds speculation across programs and folders. Its 16-file
 //! window holds at most 16 MiB, with six requests in flight, independently of the
-//! foreground transfer pool. Only scan-started contents skip the whole-download
-//! threshold; contents already being read keep counting. Speculation touches no disk.
+//! foreground transfer pool. Scan reads use per-handle coverage; the first tiny peek
+//! gets a grace period to see scan activation. Speculation touches no disk.
 
 // test: a_desktop_scan_reads_forty_heads_at_least_four_times_faster_with_one_request_each
 // test: a_scan_only_fetches_matching_cloud_files_within_its_window
@@ -12,12 +12,13 @@
 // test: read_ahead_activating_tiny_read_skips_counting_without_polling_the_actor
 // test: read_ahead_scan_reads_small_files_in_full_without_keeping_them
 // test: read_ahead_lifecycle_changes_end_synchronous_suppression
-// test: read_ahead_skips_non_head_ranges_and_preserves_pre_scan_coverage
-// test: read_ahead_keeps_the_opened_image_after_a_cold_fetch_outlives_the_scan
-// test: read_ahead_keeps_the_opened_image_while_its_first_counted_fetch_is_in_flight
+// test: read_ahead_non_head_ranges_use_handle_coverage_even_for_a_pre_scan_item
+// test: read_ahead_trace_decode_lands_only_the_handle_that_reads_the_image_through
+// test: read_ahead_does_not_combine_handles_or_exiv2_probes
 
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use futures_util::{future::BoxFuture, stream::FuturesUnordered, StreamExt};
@@ -25,11 +26,14 @@ use konedrive_tree::{ContentPresence, ContentVersion, Item, ItemKind, LocalItemI
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 
-use super::item_download_states::{ItemDownloadStates, ReadCount};
 use super::item_read_origin::{decide_listed_content, RangeSource};
 use crate::content_source::source::ContentSource;
 use crate::download_guard::{DownloadGuard, ReadAheadCaller};
 use crate::folder::disk::is_hidden_name;
+
+/// A lone MIME peek of a tiny file must not beat scan detection.
+pub(super) const TINY_DOWNLOAD_DELAY: Duration = Duration::from_secs(3);
+pub(super) const PEEK_BYTES: u64 = 16 * 1024;
 
 const IDLE: Duration = Duration::from_secs(3);
 const LIFETIME: Duration = Duration::from_secs(5 * 60);
@@ -82,7 +86,13 @@ struct ScanState {
     scan: Option<ScanRecord>,
     next: u64,
     stopped: bool,
-    counted: Vec<ReadCount>,
+    tiny: Vec<TinyRead>,
+}
+
+struct TinyRead {
+    identity: String,
+    folder: LocalItemId,
+    cancelled: Weak<AtomicBool>,
 }
 
 impl ScanState {
@@ -93,7 +103,6 @@ impl ScanState {
                 || !guard.permits_read_ahead(&s.caller)
         }) {
             self.scan = None;
-            self.counted.clear();
         }
     }
 }
@@ -103,7 +112,7 @@ pub(super) struct HeadRead {
     state: Arc<Mutex<ScanState>>,
     cancel: watch::Sender<u64>,
     scan: u64,
-    pub(super) counting: Option<ReadCount>,
+    pub(super) in_scan: bool,
     pub(super) completed: bool,
 }
 
@@ -113,7 +122,6 @@ impl Drop for HeadRead {
             let mut state = crate::panic::lock(&self.state);
             if state.scan.as_ref().is_some_and(|s| s.id == self.scan) {
                 state.scan = None;
-                state.counted.clear();
             }
             self.cancel.send_replace(self.scan);
         }
@@ -125,7 +133,6 @@ pub(super) struct ReadAhead {
     cancel: watch::Sender<u64>,
     state: Arc<Mutex<ScanState>>,
     guard: Arc<DownloadGuard>,
-    downloads: Arc<ItemDownloadStates>,
     task: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -134,7 +141,6 @@ impl ReadAhead {
         store: Store,
         source: Arc<dyn ContentSource>,
         guard: Arc<DownloadGuard>,
-        downloads: Arc<ItemDownloadStates>,
         window: usize,
         runtime: &tokio::runtime::Handle,
     ) -> Self {
@@ -144,7 +150,7 @@ impl ReadAhead {
             scan: None,
             next: 0,
             stopped: window == 0,
-            counted: Vec::new(),
+            tiny: Vec::new(),
         }));
         let task = (window > 0).then(|| {
             runtime.spawn(run(
@@ -162,7 +168,6 @@ impl ReadAhead {
             cancel,
             state,
             guard,
-            downloads,
             task,
         }
     }
@@ -172,8 +177,8 @@ impl ReadAhead {
     }
 
     /// Observe every admitted desktop range before fetching it. The activating head
-    /// already skips counting for new content even if the scheduling task has never
-    /// been polled. Counting registration and scan activation share this lock.
+    /// already uses handle coverage even if the scheduling task has never been
+    /// polled. Scan activation and tiny-read cancellation share this lock.
     pub(super) fn head(
         &self,
         caller: ReadAheadCaller,
@@ -195,7 +200,6 @@ impl ReadAhead {
         if from < HEAD_END && content.size() > 0 {
             if let Some(ext) = &file.extension {
                 if !same {
-                    state.counted.clear();
                     state.next += 1;
                     state.scan = Some(ScanRecord {
                         id: state.next,
@@ -207,19 +211,24 @@ impl ReadAhead {
                         last: at,
                     });
                 }
-                let activating = state
-                    .scan
-                    .as_ref()
-                    .is_some_and(|s| !s.active && item != s.first);
-                if activating {
-                    state.counted = self.downloads.keep_counted_reads();
-                }
                 let s = state.scan.as_mut()?;
                 if !s.active && item != s.first {
                     s.active = true;
+                    let (identity, folder) = (s.caller.identity().to_owned(), s.folder);
+                    state.tiny.retain(|pending| {
+                        let Some(cancelled) = pending.cancelled.upgrade() else {
+                            return false;
+                        };
+                        if pending.identity == identity && pending.folder == folder {
+                            cancelled.store(true, Ordering::Relaxed);
+                        }
+                        true
+                    });
+                    let s = state.scan.as_mut()?;
                     tracing::debug!(folder = %s.folder, identity = s.caller.identity(),
-                        "scan-started file reads are served in memory and are not kept on disk");
+                        "folder scan reads use per-handle download coverage");
                 }
+                let s = state.scan.as_mut()?;
                 s.last = at;
                 // A full scheduling queue may drop speculation, never scan detection.
                 let _ = self.events.try_send(Event::Head {
@@ -240,16 +249,41 @@ impl ReadAhead {
             state: Arc::clone(&self.state),
             cancel: self.cancel.clone(),
             scan: s.id,
-            counting: self.downloads.begin_read_count(item, content, s.active),
+            in_scan: s.active,
             completed: false,
         })
+    }
+
+    /// Capture before fetching: even a scan replaced or expired during a slow fetch
+    /// must cancel this tiny-file promotion. Weak entries cannot retain reads.
+    pub(super) fn tiny_read(&self, caller: &ReadAheadCaller, file: &ScanFile) -> Arc<AtomicBool> {
+        let mut state = crate::panic::lock(&self.state);
+        state.refresh(&self.guard);
+        let cancelled = Arc::new(AtomicBool::new(state.scan.as_ref().is_some_and(|s| {
+            s.active && s.folder == file.folder && s.caller.identity() == caller.identity()
+        })));
+        state
+            .tiny
+            .retain(|pending| pending.cancelled.strong_count() > 0);
+        if !state.stopped {
+            state.tiny.push(TinyRead {
+                identity: caller.identity().to_owned(),
+                folder: file.folder,
+                cancelled: Arc::downgrade(&cancelled),
+            });
+        }
+        cancelled
     }
 
     pub(super) fn stop(&self) {
         let mut state = crate::panic::lock(&self.state);
         state.stopped = true;
         state.scan = None;
-        state.counted.clear();
+        for pending in state.tiny.drain(..) {
+            if let Some(cancelled) = pending.cancelled.upgrade() {
+                cancelled.store(true, Ordering::Relaxed);
+            }
+        }
         if let Some(task) = &self.task {
             task.abort();
         }

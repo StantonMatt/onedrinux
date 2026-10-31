@@ -18,6 +18,9 @@ use std::time::{Duration, Instant};
 
 use identity::{Caller, BACKGROUND_READERS, PROGRAM_HOSTS, runs_programs};
 pub(crate) use identity::Callers;
+pub(crate) use identity::IdentifiedProcess;
+#[cfg(test)]
+pub(crate) use identity::{ProcessInfo, ProcessReader};
 use konedrive_dbus::rows::GuardApp;
 use serde::{Deserialize, Serialize};
 pub(crate) use downloads::{AccountDownloads, AppDownloads, DownloadTicket};
@@ -180,6 +183,11 @@ impl DownloadGuard {
             downloads: Default::default(),
         }
     }
+    #[cfg(test)]
+    pub(crate) fn set_process_reader(&mut self, reader: Arc<dyn identity::ProcessReader>) {
+        self.callers = Callers::with_reader(reader);
+    }
+
     pub(crate) fn configure(&self, enabled: bool, limits: GuardConfig) {
         let mut inner = crate::panic::lock(&self.inner);
         inner.enabled = enabled;

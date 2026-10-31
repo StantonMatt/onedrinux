@@ -30,6 +30,11 @@ impl DownloadGuard {
         self.permits_read_ahead(&caller).then_some(caller)
     }
 
+    pub(crate) fn launch_process(&self, pid: u32) -> Option<super::IdentifiedProcess> {
+        let process = self.callers.process(pid)?;
+        self.permits_read_ahead(&ReadAheadCaller(process.caller.clone())).then_some(process)
+    }
+
     pub(crate) fn permits_read_ahead(&self, caller: &ReadAheadCaller) -> bool {
         let inner = crate::panic::lock(&self.inner);
         let who = &caller.0;

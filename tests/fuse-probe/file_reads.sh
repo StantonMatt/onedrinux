@@ -371,61 +371,96 @@ PYCODE
     check "no whole download is staged" "$(daemon staged)" '[]'
 }
 
-# Tiny MIME/metadata reads may cover a whole file. Only the first file, read
-# before a scan exists, may land along with the image opened before that scan.
-# Files first read in the active scan remain in the range store.
-a_desktop_scan_of_tiny_files_keeps_the_first_and_the_opened_image() {
+# The trace's first tiny peek waits for detection. Only the opened image's decoder
+# reads its full content on one handle; separate MIME and sparse Exiv2 handles do not.
+a_desktop_scan_of_tiny_files_keeps_only_the_decoded_image() {
     begin_folder
     for n in $(seq -w 00 09); do
         seed_random T$n R "$n.png" "$((512 + 10#$n * 3072))"
     done
-    seed_random O R opened.png 23493
+    seed_random O R opened.png 46642
     register_folder read-only
     tiny_names_are_shown() { [ "$(user 'ls | wc -l')" -eq 11 ]; }
     check_within 20 "all tiny scan names are shown" tiny_names_are_shown
-    onedrive delay GET dl/O 3800 1 > /dev/null
     mkdir -p /mnt/tiny-scan-cgroups
     mount -t cgroup2 none /mnt/tiny-scan-cgroups
-    local app_group=/mnt/tiny-scan-cgroups/app-org.kde.gwenview-123.scope result
+    local app_group=/mnt/tiny-scan-cgroups/app-org.kde.gwenview-123.scope
     mkdir "$app_group"
-    result=$(bash -c 'echo $$ > "$1/cgroup.procs"; shift; exec "$@"' bash "$app_group" $U python3 - "$F" "$SRC" <<'PYCODE'
-import os, pathlib, sys
+    bash -c 'echo $$ > "$1/cgroup.procs"; shift; exec "$@"' bash "$app_group" $U python3 - "$F" "$SRC" <<'PYCODE'
+import os, pathlib, sys, time
 folder, seeds = map(pathlib.Path, sys.argv[1:])
-opened = os.open(folder / 'opened.png', os.O_RDONLY)
-expected_opened = (seeds / 'seed-O').read_bytes()
-# The cold head takes longer than the scan's 3-second idle expiry.
-assert os.pread(opened, 16384, 0) == expected_opened[:16384]
-entries = [entry for entry in os.scandir(folder) if entry.name.endswith('.png') and entry.name != 'opened.png']
+entries = sorted((entry for entry in os.scandir(folder) if entry.name.endswith('.png') and entry.name != 'opened.png'), key=lambda entry: entry.name)
 assert len(entries) == 10
 for entry in entries:
     expected = (seeds / ('seed-T' + entry.name[:2])).read_bytes()
     fd = os.open(entry.path, os.O_RDONLY)
-    try:
-        assert os.pread(fd, 16384, 0) == expected[:16384], entry.name
-        for at in range(0, len(expected), 4096):
-            assert os.pread(fd, 4096, at) == expected[at:at + 4096], entry.name
-    finally:
+    assert os.pread(fd, 16384, 0) == expected[:16384], entry.name
+    os.close(fd)
+    for at in range(0, len(expected), 4096):
+        fd = os.open(entry.path, os.O_RDONLY)
+        assert os.pread(fd, 4096, at) == expected[at:at + 4096], entry.name
         os.close(fd)
-assert all(entry.stat().st_blocks == 0 for entry in entries[1:])
-# Decode the image opened before the new scan: its counted head must survive.
-assert os.pread(opened, 16384, 16384) == expected_opened[16384:]
+expected = (seeds / 'seed-O').read_bytes()
+peek = os.open(folder / 'opened.png', os.O_RDONLY)
+assert os.pread(peek, 16384, 0) == expected[:16384]
+os.close(peek)
+opened = os.open(folder / 'opened.png', os.O_RDONLY)
+assert os.pread(opened, 16384, 0) == expected[:16384]
+assert os.pread(opened, 30258, 16384) == expected[16384:]
 os.close(opened)
-print(entries[0].name)
+time.sleep(3.2)
+assert all(entry.stat().st_blocks == 0 for entry in entries)
 PYCODE
-)
     rmdir "$app_group"
     umount /mnt/tiny-scan-cgroups
-    first_tiny_is_local() { [ "$(state_of "$result")" = hydrated ]; }
-    check_within 20 "the first file may land before detection" first_tiny_is_local
     check_state opened.png hydrated
-    check "the opened image has one range and one whole download" "$(onedrive count GET dl/O)" 2
-    check "eleven range reads and only two whole downloads" "$(onedrive count GET dl/)" 13
+    check "the decoded image has one range and one whole download" "$(onedrive count GET dl/O)" 2
+    check "eleven range fetches and only one whole download" "$(onedrive count GET dl/)" 12
     for n in $(seq -w 00 09); do
-        if [ "$n.png" != "$result" ]; then
-            check "tiny file $n has no whole download" "$(onedrive count GET dl/T$n)" 1
-            check "tiny file $n stays cloud-only" "$(state_of "$n.png")" online-only
-        fi
+        check "peeked file $n has no whole download" "$(onedrive count GET dl/T$n)" 1
+        check "peeked file $n stays cloud-only" "$(state_of "$n.png")" online-only
     done
+}
+
+# argv identifies the tiny launch before any bytes are read, without using a desktop
+# program, the host's session bus, or a real account. One byte must suffice to keep it.
+a_desktop_launch_argument_shows_hydrating_and_keeps_a_tiny_file() {
+    begin_folder
+    # The fake server command protocol tokenizes names; URL spaces are tested in Rust.
+    seed_random O R opened.png 130
+    seed_random A R a.png 32768
+    seed_random B R b.png 32768
+    register_folder read-only
+    launch_names_are_shown() { [ "$(user 'ls | wc -l')" -eq 3 ]; }
+    check_within 20 "launch files are shown" launch_names_are_shown
+    mkdir -p /mnt/launch-cgroups
+    mount -t cgroup2 none /mnt/launch-cgroups
+    local app_group=/mnt/launch-cgroups/app-org.kde.gwenview-123.scope
+    mkdir "$app_group"
+    bash -c 'echo $$ > "$1/cgroup.procs"; shift; exec "$@"' bash "$app_group" $U python3 - "$F/opened.png" "$SRC/seed-O" <<'PYCODE'
+import os, pathlib, sys, time
+opened = pathlib.Path(sys.argv[1])
+expected = pathlib.Path(sys.argv[2]).read_bytes()
+os.stat(opened)  # earliest PID-bearing request sees argv
+assert os.getxattr(opened, 'user.konedrive.state') == b'hydrating'
+for name in ['a.png', 'b.png']:
+    fd = os.open(opened.parent / name, os.O_RDONLY)
+    os.pread(fd, 16384, 0)
+    os.close(fd)
+fd = os.open(opened, os.O_RDONLY)
+assert os.pread(fd, 1, 0) == expected[:1]
+os.close(fd)
+deadline = time.monotonic() + 10
+while os.getxattr(opened, 'user.konedrive.state') != b'hydrated':
+    assert time.monotonic() < deadline
+    time.sleep(.02)
+PYCODE
+    rmdir "$app_group"
+    umount /mnt/launch-cgroups
+    check_state "opened.png" hydrated
+    check "a launch read starts one whole download" "$(onedrive count GET dl/O)" 2
+    check_state a.png online-only
+    check_state b.png online-only
 }
 
 # The group: every scenario of reading beside a fault.
@@ -434,7 +469,8 @@ file_reads() {
     ip link set lo up
     for name in \
         a_desktop_folder_scan_reads_ahead_without_landing_files \
-        a_desktop_scan_of_tiny_files_keeps_the_first_and_the_opened_image \
+        a_desktop_scan_of_tiny_files_keeps_only_the_decoded_image \
+        a_desktop_launch_argument_shows_hydrating_and_keeps_a_tiny_file \
         an_interrupted_range_read_answers_eintr_without_dropping_its_reply \
         download_cut_off_gives_no_wrong_bytes \
         download_cut_off_keeps_what_it_has_and_goes_on_from_there \

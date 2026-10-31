@@ -91,6 +91,23 @@ from the current PNG under the other name at the same size without contacting Gr
 PNG written by Gwenview is kept; a stale one is atomically replaced from its current counterpart,
 or refreshed through Graph if neither name has that size. The mark stays during a local repair.
 
+## Supplied Gwenview open/read trace (2026-10-31)
+
+The supplied kernel trace of Gwenview 25.12 after `56c297c` records Dolphin opening
+the selected PNG without reading it, followed about 0.29 seconds later by Gwenview
+peeking at roughly ten remembered files. Only then does Gwenview open the selected
+46,642-byte image: one handle reads 16 KiB and closes; a fresh handle reads 16,384
+bytes followed by the remaining 30,258 bytes and closes. Further peeks follow.
+Exiv2 reads about 4,129 contiguous bytes at the head and sparse 4 KiB ranges at
+64 KiB strides. This is supplied incident evidence, not a new run against a live mount.
+
+This sequence activates the folder scan before the selected image is read. Its decode
+handle supplies useful per-handle evidence; a 16 KiB peek of a smaller file does not.
+Dolphin's open alone is not treated as launch intent. The daemon uses bounded argv
+paths from a newly seen ordinary desktop process, with coverage as the fallback
+([design/mount.md](design/mount.md) §5.1.1–5.2). It sees the process's first FUSE request,
+not the physical double-click or single-instance D-Bus activation.
+
 ## B. Does a cached thumbnail keep the file closed?
 
 ```

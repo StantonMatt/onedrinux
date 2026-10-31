@@ -2,6 +2,7 @@
 //! flight for 500 ms shows hydrating. Once shown, it stays through the range reader's
 //! linger. Quick reads never accumulate towards the delay, even on the same item.
 //!
+//! Argv launch intent can also hold an immediate emblem, independently of fetches.
 //! These are presentation states alone. `range_readers` owns the pool slots and
 //! `item_download_states` owns whole downloads. A guard surrounds only a source asking
 //! identified in `item_kernel_requests` and begun by `range_readers` once its pool slot
@@ -40,6 +41,7 @@ struct Reader {
 
 pub(super) struct RangeReadStates {
     readers: Mutex<HashMap<LocalItemId, Reader>>,
+    launches: Mutex<HashMap<LocalItemId, usize>>,
     /// The local items of askings that have reached the range fetcher. Kept only for
     /// those futures' lifetime, so no binding lookup or unbounded id cache is needed.
     pending: Mutex<HashMap<String, HashMap<LocalItemId, usize>>>,
@@ -73,6 +75,25 @@ impl Drop for PendingRead {
     }
 }
 
+/// An argv launch shows immediately; its owner drops this at the no-read timeout,
+/// process exit, intent expiry, mount stop, or after handing over to a whole download.
+pub(super) struct LaunchEmblem {
+    states: Arc<RangeReadStates>,
+    item: LocalItemId,
+}
+
+impl Drop for LaunchEmblem {
+    fn drop(&mut self) {
+        let mut launches = crate::panic::lock(&self.states.launches);
+        if let Some(count) = launches.get_mut(&self.item) {
+            *count -= 1;
+            if *count == 0 { launches.remove(&self.item); }
+        }
+        drop(launches);
+        self.states.changes.changed(vec![self.item]);
+    }
+}
+
 pub(super) struct ActiveRead {
     states: Arc<RangeReadStates>,
     item: LocalItemId,
@@ -94,6 +115,7 @@ impl RangeReadStates {
     pub(super) fn new(changes: Arc<StateChanges>) -> Self {
         Self {
             readers: Mutex::default(),
+            launches: Mutex::default(),
             pending: Mutex::default(),
             next_read: AtomicU64::new(0),
             changes,
@@ -112,9 +134,14 @@ impl RangeReadStates {
     }
 
     pub(super) fn is_hydrating(&self, item: LocalItemId) -> bool {
-        crate::panic::lock(&self.readers)
-            .get(&item)
-            .is_some_and(|reader| reader.shown)
+        crate::panic::lock(&self.launches).contains_key(&item)
+            || crate::panic::lock(&self.readers).get(&item).is_some_and(|reader| reader.shown)
+    }
+
+    pub(super) fn show_launch(self: &Arc<Self>, item: LocalItemId) -> LaunchEmblem {
+        *crate::panic::lock(&self.launches).entry(item).or_default() += 1;
+        self.changes.changed(vec![item]);
+        LaunchEmblem { states: Arc::clone(self), item }
     }
 
     pub(super) fn prepare(self: &Arc<Self>, onedrive_id: &str, item: LocalItemId) -> PendingRead {

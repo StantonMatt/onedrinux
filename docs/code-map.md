@@ -145,7 +145,8 @@ The machine-wide [download guard](design/download-guard.md), shared by every mou
 - `downloads.rs` — bounded session attribution of whole read downloads, landing tickets and explicit-keep invalidation. `[tests]`
 - `identity/tests.rs` — caller identity, agent slices, terminal/Flatpak scopes, host matching and KIO reader-role tests.
 - `space/tests.rs` — shared disk-reservation and concurrent allocation tests.
-- `identity.rs` — procfs caller facts, systemd app identities, KIO roles and the configurable reader/host lists. `[tests]`
+- `identity.rs` — revalidated procfs snapshots and process generations, injectable process
+  reader, systemd app identities, KIO roles and configurable reader/host lists. `[tests]`
 - `space.rs` — allocations shared by reads, pins and explicit hydrate on the same filesystem. `[tests]`
 
 - `read_ahead.rs` — uncharged desktop scan eligibility and live policy notifications.
@@ -375,7 +376,7 @@ What the kernel asks:
 - `item_attributes.rs` — the attributes the kernel is given for an item: a function of its row,
   the access mode and, where it may speak, the backing file. `[tests]`
 - `item_handles.rs` — `ItemHandles`: what programs hold open, by the kernel's `fh`, each file by
-  its item. `[tests]`
+  its item, with private coverage for each cloud-only reader handle. `[tests]`
 
 A change a program makes:
 
@@ -401,17 +402,22 @@ A file that is not on disk:
   OneDrive. `[tests]`
 - `item_range_fetcher.rs` — `ItemRangeFetcher`: a range asked of OneDrive, of the content the
   reader opened; a range answered short fails the read. `[tests]`
+- `launch_intent.rs` — bounded argv paths resolved through the store, process-generation
+  expiry and immediate launch emblems. `launch_intent/tests.rs` checks confinement,
+  bounds and timed/process expiry; kernel request tests exercise first-read landing.
+- `item_kernel_requests/read_downloads.rs` — scan handle coverage, launch admission and
+  cancellable, deduplicated tiny-file promotion timers.
 - `range_read_states.rs` — the delayed hydrating mark for program range fetches, per
   asking rather than cumulative: no mark before 500 ms, then through the read linger;
   pool admission and early refusals do not count. Tests in `range_read_states/tests.rs`
   and `item_kernel_requests/tests/fetch_states.rs` cover quick, overlapping and slow
   fetches, disk/memory answers, errors, stale content, interrupts and throttle waits.
-- `read_ahead.rs` — synchronous desktop scan detection and threshold suppression,
+- `read_ahead.rs` — synchronous desktop scan detection and tiny-promotion cancellation,
   readdir snapshots, a bounded speculative window and cancellation; uses the existing
-  in-memory range store and pins existing counting records during a scan.
+  in-memory range store; scan reads count on their own cloud-only handle.
 - `item_kernel_requests/tests/read_ahead.rs` — 300 ms/40-file timing and request
   regression, exclusions, guard and idle cancellation, foreground priority, small-file
-  scan suppression, delayed/in-flight opened-image retention and an unpolled-actor/full-queue regression.
+  scan handle coverage, trace replay, tiny grace periods, argv launches and an unpolled-actor/full-queue regression.
 - `range_readers.rs` — the files being read as ranges, which go before the background
   downloads. `[tests]`
 - `item_downloader.rs` — `ItemDownloader`: a file downloaded whole into the backing directory,
@@ -422,7 +428,7 @@ A file that is not on disk:
   are counted against the app's admission budget.
 - `item_download_states.rs` — `ItemDownloadStates`: the state of each file's download, by the
   item and the content; bounded, coalesced coverage of distinct range bytes for the whole-download
-  threshold, pre-fetch counting records and pins against eviction, reset on opened-content
+  threshold, bounded item and handle coverage, tiny promotion deduplication, reset on opened-content
   changes. `[tests]`
 - `item_download_landing.rs` — conditional landings and atomic resident replacements on one existing place-change record; the landing: the last step of every download, the file given
   its name and then the row saying on disk. `[tests]`

@@ -766,46 +766,32 @@ fn the_number_of_items_with_range_coverage_is_bounded_and_eviction_never_adds_by
 
 #[test]
 fn item_download_states_register_counting_before_fetch_and_reset_it_for_another_content() {
-    let states = download_states();
-    let item = LocalItemId::new(5);
-    let content = read_content(1000, "c1");
-    let first = states.begin_read_count(item, &content, false).unwrap();
-    let concurrent = states.begin_read_count(item, &content, true).expect("first fetch need not have completed");
-    assert!(!states.finish_read_count(&concurrent, 60, 40));
-    assert!(states.finish_read_count(&first, 0, 60));
-    assert!(states.begin_read_count(item, &content, true).is_some(), "threshold clears bytes, not eligibility");
-    let other = read_content(1000, "c2");
-    assert!(states.begin_read_count(item, &other, true).is_none(), "another content resets eligibility");
-    assert!(states.begin_read_count(item, &content, true).is_none());
-    // A failure/cancellation may leave the empty record created before its fetch.
-    drop(states.begin_read_count(item, &other, false));
-    assert!(states.begin_read_count(item, &other, true).is_some());
+    let states = ItemDownloadStates::new(100);
+    let item = LocalItemId::new(42);
+    let content = read_content(100, "first");
+    let first = states.begin_read_count(item, &content);
+    let concurrent = states.begin_read_count(item, &content);
+    assert!(!states.finish_read_count(&first, 0, 50));
+    assert!(states.finish_read_count(&concurrent, 50, 50));
+    let other = read_content(101, "other");
+    let next = states.begin_read_count(item, &other);
+    assert_ne!(first, next);
+    assert!(!states.finish_read_count(&first, 0, 50));
+    assert!(!states.finish_read_count(&next, 50, 50));
     states.forget_item(item);
-    assert!(states.begin_read_count(item, &other, true).is_none());
+    assert_ne!(next, states.begin_read_count(item, &other));
 }
 
 #[test]
-fn item_download_states_preserve_in_flight_and_scan_coverage_at_the_item_limit() {
-    let states = download_states();
-    let content = read_content(1000, "c1");
-    let item = LocalItemId::new(0);
-    let first = states.begin_read_count(item, &content, false).unwrap();
-    for n in 1..READ_ITEMS_KEPT + 20 {
-        assert!(!states.count_bytes_read(LocalItemId::new(n as i64), &content, 0, 60));
+fn item_download_states_bound_records_without_pinning_scan_coverage() {
+    let states = ItemDownloadStates::new(100);
+    let content = read_content(100, "first");
+    let first = states.begin_read_count(LocalItemId::new(42), &content);
+    for id in 0..(READ_ITEMS_KEPT as i64 + 200) {
+        states.begin_read_count(LocalItemId::new(id), &content);
     }
-    assert!(states.begin_read_count(item, &content, true).is_some(), "in-flight record survives eviction pressure");
-    let scan = states.keep_counted_reads();
-    assert_eq!(scan.len(), READ_ITEMS_KEPT);
-    for n in READ_ITEMS_KEPT + 20..READ_ITEMS_KEPT + 40 {
-        assert!(!states.count_bytes_read(LocalItemId::new(n as i64), &content, 0, 60));
-    }
-    assert_eq!(crate::panic::lock(&states.bytes_read_as_ranges).len(), READ_ITEMS_KEPT + 1, "snapshot plus one unpinned entry");
-    assert!(!states.finish_read_count(&first, 0, 60));
-    drop(first);
-    let next = states.begin_read_count(item, &content, true).expect("scan protects eligibility after the head finishes");
-    assert!(states.finish_read_count(&next, 60, 40), "scan also protects the head's actual coverage");
-    drop(next);
-    drop(scan);
-    states.count_bytes_read(LocalItemId::new(99999), &content, 0, 60);
     assert_eq!(crate::panic::lock(&states.bytes_read_as_ranges).len(), READ_ITEMS_KEPT);
+    // An outstanding read can finish its own conservative record after eviction.
+    assert!(!states.finish_read_count(&first, 0, 50));
+    assert!(states.finish_read_count(&first, 50, 50));
 }

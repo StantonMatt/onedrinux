@@ -1,7 +1,9 @@
 //! What programs hold open, by the kernel's `fh`, each file by the item it is.
 //!
 //! **State owned:** the open files and directories by `fh`; which items are open for
-//! writing and whether anything was written through a handle. Changed by the kernel's
+//! writing and whether anything was written through a handle; conservative coverage
+//! private to every cloud-only reader, retained by outstanding ranges after release.
+//! Handles are changed by the kernel's
 //! open, create, release, opendir and releasedir alone, through the functions here.
 //!
 //! **Answers for:** what is open for writing: the backing file of an item's writer, for
@@ -71,6 +73,7 @@ enum OpenItemHandle {
 struct Handles {
     by_fh: HashMap<Fh, OpenItemHandle>,
     written_items: HashSet<LocalItemId>,
+    range_counts: HashMap<Fh, super::item_download_states::ReadCount>,
     last_fh: u64,
 }
 
@@ -113,7 +116,14 @@ impl ItemHandles {
 
     /// A file opened to be read. Called by the open request's read branch.
     pub(super) fn add_file(&self, file: OpenItemFile) -> Fh {
-        crate::panic::lock(&self.handles).add(OpenItemHandle::File(file))
+        let count = match &file {
+            OpenItemFile::ReadingNotOnDisk { content, .. } => Some(super::item_download_states::ReadCount::new(content)),
+            _ => None,
+        };
+        let mut handles = crate::panic::lock(&self.handles);
+        let fh = handles.add(OpenItemHandle::File(file));
+        if let Some(count) = count { handles.range_counts.insert(fh, count); }
+        fh
     }
 
     /// A writer of `item` over `backing_file`, and whether it is the first: the first
@@ -135,6 +145,22 @@ impl ItemHandles {
             Some(OpenItemHandle::File(file)) => Some(file.clone()),
             Some(OpenItemHandle::Directory(_)) | None => None,
         }
+    }
+
+    /// File and coverage are snapshotted under one lock: release may race the row
+    /// lookup that follows, but cannot detach coverage from an outstanding read.
+    pub(super) fn find_file_for_read(&self, fh: Fh) -> Option<(OpenItemFile, Option<super::item_download_states::ReadCount>)> {
+        let handles = crate::panic::lock(&self.handles);
+        match handles.by_fh.get(&fh) {
+            Some(OpenItemHandle::File(file)) => Some((file.clone(), handles.range_counts.get(&fh).cloned())),
+            _ => None,
+        }
+    }
+
+    /// Snapshot with the range decision, before release can remove the handle.
+    #[cfg(test)]
+    pub(super) fn range_count(&self, fh: Fh) -> Option<super::item_download_states::ReadCount> {
+        crate::panic::lock(&self.handles).range_counts.get(&fh).cloned()
     }
 
     /// The item and the backing file a writer's `fh` writes. Called by write and fsync, on
@@ -226,6 +252,7 @@ impl ItemHandles {
         let mut handles = crate::panic::lock(&self.handles);
         if matches!(handles.by_fh.get(&fh), Some(OpenItemHandle::File(OpenItemFile::ReadingNotOnDisk { .. } | OpenItemFile::ReadingBackingFile { .. }))) {
             handles.by_fh.remove(&fh);
+            handles.range_counts.remove(&fh);
         }
         drop(handles);
         self.readers_changed.notify_waiters();

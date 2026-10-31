@@ -223,7 +223,10 @@ fn a_desktop_scan_reads_forty_heads_at_least_four_times_faster_with_one_request_
     };
     let (off, off_requests) = run(0);
     let (on, on_requests) = run(16);
-    eprintln!("read-ahead benchmark: off {off:?} / {off_requests} requests; on {on:?} / {on_requests} requests; speedup {:.2}x", off.as_secs_f64() / on.as_secs_f64());
+    eprintln!(
+        "read-ahead benchmark: off {off:?} / {off_requests} requests; on {on:?} / {on_requests} requests; speedup {:.2}x",
+        off.as_secs_f64() / on.as_secs_f64()
+    );
     assert!(on * 4 < off, "off {off:?}, on {on:?}");
 }
 
@@ -303,10 +306,11 @@ fn a_scan_only_fetches_matching_cloud_files_within_its_window() {
         jpg.onedrive_item.unwrap().item_id.as_str().to_owned(),
         resident.onedrive_item.unwrap().item_id.as_str().to_owned(),
     ];
-    assert!(scan
-        .content_requests()
-        .iter()
-        .all(|route| excluded.iter().all(|id| !route.ends_with(id))));
+    assert!(
+        scan.content_requests()
+            .iter()
+            .all(|route| excluded.iter().all(|id| !route.ends_with(id)))
+    );
     let counted = scan.requests.download_guard.apps();
     assert_eq!(
         counted.iter().map(|app| app.bytes).sum::<u64>(),
@@ -475,14 +479,9 @@ fn read_ahead_scan_reads_small_files_in_full_without_keeping_them() {
             assert_eq!(answer, scan.bytes[n][from..(from + 4096).min(size)]);
         }
     }
-    scan.wait_until("the first file lands", || {
-        scan.fixture
-            .find_item(scan.files[0])
-            .unwrap()
-            .content_presence
-            == ContentPresence::OnDisk
-    });
-    for n in 1..sizes.len() {
+    // The first tiny file's grace period sees scan activation too.
+    std::thread::sleep(crate::mount::read_ahead::TINY_DOWNLOAD_DELAY + Duration::from_millis(100));
+    for n in 0..sizes.len() {
         assert_eq!(
             scan.fixture
                 .find_item(scan.files[n])
@@ -491,10 +490,11 @@ fn read_ahead_scan_reads_small_files_in_full_without_keeping_them() {
             ContentPresence::NotOnDisk
         );
         assert!(!scan.requests.download_states.is_downloading(scan.files[n]));
-        assert!(scan
-            .fixture
-            .read_disk_file(&format!("Shots/{n:02}.png"))
-            .is_none());
+        assert!(
+            scan.fixture
+                .read_disk_file(&format!("Shots/{n:02}.png"))
+                .is_none()
+        );
         assert_eq!(
             scan.content_requests()
                 .iter()
@@ -520,7 +520,6 @@ fn read_ahead_activating_tiny_read_skips_counting_without_polling_the_actor() {
         scan.fixture.store.clone(),
         Arc::clone(&scan.source) as Arc<dyn ContentSource>,
         Arc::clone(&scan.requests.download_guard),
-        Arc::clone(&scan.requests.download_states),
         16,
         scheduler.handle(),
     )));
@@ -537,17 +536,15 @@ fn read_ahead_activating_tiny_read_skips_counting_without_polling_the_actor() {
             );
         }
     }
-    scan.wait_until("the first tiny file lands", || {
-        scan.fixture
-            .find_item(scan.files[0])
-            .unwrap()
-            .content_presence
-            == ContentPresence::OnDisk
-    });
+    std::thread::sleep(crate::mount::read_ahead::TINY_DOWNLOAD_DELAY + Duration::from_millis(100));
+    assert!(scan.files.iter().all(
+        |item| scan.fixture.find_item(*item).unwrap().content_presence
+            == ContentPresence::NotOnDisk
+    ));
     assert_eq!(
         scan.content_requests().len(),
-        81,
-        "80 range requests and only the first whole download"
+        80,
+        "80 ranges; the first tiny promotion is cancelled too"
     );
 }
 
@@ -682,7 +679,7 @@ fn read_ahead_zero_keeps_tiny_reads_as_before() {
 }
 
 #[test]
-fn read_ahead_skips_non_head_ranges_and_preserves_pre_scan_coverage() {
+fn read_ahead_non_head_ranges_use_handle_coverage_even_for_a_pre_scan_item() {
     let scan = ScanFixture::with_sizes(&[2 * 1024 * 1024, 512], 16, Duration::ZERO);
     scan.read(0); // Ordinary coverage before activation.
     scan.read(1); // Activates the scan.
@@ -731,9 +728,6 @@ fn read_ahead_lifecycle_changes_end_synchronous_suppression() {
             fixture.store.clone(),
             fixture.content_source(),
             Arc::clone(&guard),
-            Arc::new(crate::mount::item_download_states::ItemDownloadStates::new(
-                1024 * 1024,
-            )),
             16,
             scheduler.handle(),
         );
@@ -748,7 +742,7 @@ fn read_ahead_lifecycle_changes_end_synchronous_suppression() {
         };
         let completed = |row: &Item| {
             let mut read = observe(row).unwrap();
-            let skipped = read.counting.is_none();
+            let skipped = read.in_scan;
             read.completed = true;
             skipped
         };
@@ -803,86 +797,56 @@ fn read_ahead_lifecycle_changes_end_synchronous_suppression() {
     });
 }
 
-/// A is opened, then a cold fetch outlives the old candidate scan. B and C start
-/// another scan before the decoder's remaining reads of A. Only A and B may land.
-fn opened_read_across_scan(in_flight: bool) {
-    let scan = ScanFixture::with_sizes(&[23493, 130, 20 * 1024, 512], 16, Duration::ZERO);
-    scan.graph
-        .with(|cloud| cloud.delay("GET", "dl/Shots!00.png", Duration::from_millis(6500), 1));
-    std::thread::scope(|scope| {
-        let first = scope.spawn(|| scan.read(0));
-        scan.wait_until("opened image's cold fetch started", || {
-            scan.content_requests()
-                .iter()
-                .any(|route| route.ends_with("!00.png"))
-        });
-        // The idle timer starts at the head decision, before the fake Graph delay.
-        std::thread::sleep(Duration::from_millis(3100));
-        let first = if in_flight {
-            assert!(!first.is_finished(), "the counted head is still fetching");
-            Some(first)
-        } else {
-            first.join().unwrap();
-            None
-        };
-        scan.read(1); // Tiny first file of the new scan may land.
-        scan.read(2); // Activates the scan and must stay cloud-only.
-        if let Some(first) = &first {
-            assert!(
-                !first.is_finished(),
-                "the decoder starts before the counted head completes"
-            );
-        }
-        let decode = || {
-            scan.read_part(
-                scan.files[0],
-                HEAD as u64,
-                HEAD,
+/// Read several ranges on one real handle, as a decoder does.
+fn read_on_handle(scan: &ScanFixture, fh: Fh, from: u64, size: u32) -> Vec<u8> {
+    match scan.requests.decide_read(fh, from, size).unwrap() {
+        ReadAnswer::Range(range) => scan
+            .fixture
+            .runtime()
+            .block_on(scan.requests.read_range_as(
+                range,
+                Some(std::process::id()),
                 Some(ScanFixture::caller()),
-            )
-        };
-        let rest = if in_flight {
-            let decoding = scope.spawn(decode);
-            let deadline = Instant::now() + Duration::from_secs(10);
-            // The shared cold fetch can outlast another idle window. Keep the actual
-            // scan running while the already-decided decoder read waits for it.
-            while !decoding.is_finished() {
-                assert!(Instant::now() < deadline, "decoder fetch timed out");
-                scan.read(2);
-                std::thread::sleep(Duration::from_millis(25));
-            }
-            decoding.join().unwrap()
-        } else {
-            decode()
-        };
-        assert_eq!(rest, scan.bytes[0][HEAD as usize..]);
-        if let Some(first) = first {
-            first.join().unwrap();
-        }
-    });
-    for _ in 0..50 {
-        scan.read(2);
-        assert_eq!(
-            scan.read_part(
-                scan.files[2],
-                HEAD as u64,
-                HEAD,
-                Some(ScanFixture::caller())
-            ),
-            scan.bytes[2][HEAD as usize..]
-        );
+            ))
+            .unwrap(),
+        ReadAnswer::Bytes(bytes) => bytes,
+        _ => panic!("range or resident bytes"),
+    }
+}
+
+#[test]
+fn read_ahead_trace_decode_lands_only_the_handle_that_reads_the_image_through() {
+    let sizes = [130, 9712, 32 * 1024, 46642, 9588, 80 * 1024];
+    let scan = ScanFixture::with_sizes(&sizes, 16, Duration::ZERO);
+    for n in 0..3 {
+        scan.read(n);
+    }
+    scan.read(3); // h1 is a peek, released before h2 is opened.
+    let h2 = scan.requests.answer_open_to_read(scan.files[3]).unwrap().fh;
+    assert_eq!(
+        read_on_handle(&scan, h2, 0, HEAD),
+        scan.bytes[3][..HEAD as usize]
+    );
+    assert_eq!(
+        read_on_handle(&scan, h2, HEAD as u64, 30258),
+        scan.bytes[3][HEAD as usize..]
+    );
+    scan.requests.answer_release(h2);
+    for _ in 0..8 {
         scan.read(3);
     }
-    scan.wait_until("opened image and first scan file land", || {
-        [0, 1].into_iter().all(|n| {
-            scan.fixture
-                .find_item(scan.files[n])
-                .unwrap()
-                .content_presence
-                == ContentPresence::OnDisk
-        })
+    for n in [0, 1, 2, 4, 5] {
+        scan.read(n);
+    }
+    scan.wait_until("the opened image lands", || {
+        scan.fixture
+            .find_item(scan.files[3])
+            .unwrap()
+            .content_presence
+            == ContentPresence::OnDisk
     });
-    for n in [2, 3] {
+    std::thread::sleep(crate::mount::read_ahead::TINY_DOWNLOAD_DELAY + Duration::from_millis(100));
+    for n in [0, 1, 2, 4, 5] {
         assert_eq!(
             scan.fixture
                 .find_item(scan.files[n])
@@ -890,24 +854,413 @@ fn opened_read_across_scan(in_flight: bool) {
                 .content_presence,
             ContentPresence::NotOnDisk
         );
-        assert!(!scan.requests.download_states.is_downloading(scan.files[n]));
         assert_eq!(
             scan.content_requests()
                 .iter()
                 .filter(|route| route.ends_with(&format!("!{n:02}.png")))
                 .count(),
             1,
-            "no whole download for a scan-started file"
+            "peek has no whole-download request"
+        );
+    }
+    assert_eq!(
+        scan.content_requests()
+            .iter()
+            .filter(|route| route.ends_with("!03.png"))
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn read_ahead_does_not_combine_handles_or_exiv2_probes() {
+    let scan = ScanFixture::with_sizes(&[32768, 32768, 46642, 2 * 1024 * 1024], 16, Duration::ZERO);
+    scan.read(0);
+    scan.read(1);
+    let first = scan.requests.answer_open_to_read(scan.files[2]).unwrap().fh;
+    let second = scan.requests.answer_open_to_read(scan.files[2]).unwrap().fh;
+    read_on_handle(&scan, first, 0, 23321);
+    read_on_handle(&scan, second, 23321, 23321);
+    scan.requests.answer_release(first);
+    scan.requests.answer_release(second);
+    for same_handle in [false, true] {
+        let fh = scan.requests.answer_open_to_read(scan.files[3]).unwrap().fh;
+        let ranges = [(0, 4096), (0, 33), (33, 4096)].into_iter().chain(
+            (65536..2 * 1024 * 1024)
+                .step_by(65536)
+                .map(|from| (from, 4096)),
+        );
+        for (from, size) in ranges {
+            if same_handle {
+                read_on_handle(&scan, fh, from, size);
+            } else {
+                scan.read_part(scan.files[3], from, size, Some(ScanFixture::caller()));
+            }
+        }
+        scan.requests.answer_release(fh);
+    }
+    for n in [2, 3] {
+        assert!(!scan.requests.download_states.is_downloading(scan.files[n]));
+        assert_eq!(
+            scan.fixture
+                .find_item(scan.files[n])
+                .unwrap()
+                .content_presence,
+            ContentPresence::NotOnDisk
         );
     }
 }
 
 #[test]
-fn read_ahead_keeps_the_opened_image_after_a_cold_fetch_outlives_the_scan() {
-    opened_read_across_scan(false);
+fn read_ahead_tiny_desktop_download_waits_but_guarded_reads_start_immediately() {
+    for caller in [Some(ScanFixture::caller()), None] {
+        let scan = ScanFixture::with_sizes(&[130], 16, Duration::ZERO);
+        scan.read_part(scan.files[0], 0, HEAD, caller.clone());
+        if caller.is_some() {
+            assert_eq!(
+                scan.content_requests().len(),
+                1,
+                "desktop promotion waits for scan detection"
+            );
+            assert!(!scan.requests.download_states.is_downloading(scan.files[0]));
+        } else {
+            assert!(
+                scan.requests.download_states.is_downloading(scan.files[0])
+                    || scan
+                        .fixture
+                        .find_item(scan.files[0])
+                        .unwrap()
+                        .content_presence
+                        == ContentPresence::OnDisk,
+                "guarded reads have no grace period"
+            );
+        }
+        scan.wait_until("a complete tiny read lands", || {
+            scan.fixture
+                .find_item(scan.files[0])
+                .unwrap()
+                .content_presence
+                == ContentPresence::OnDisk
+        });
+        assert_eq!(scan.content_requests().len(), 2);
+    }
 }
 
 #[test]
-fn read_ahead_keeps_the_opened_image_while_its_first_counted_fetch_is_in_flight() {
-    opened_read_across_scan(true);
+fn read_ahead_release_retains_only_the_outstanding_ranges_handle_coverage() {
+    let scan = ScanFixture::with_sizes(&[32768; 3], 16, Duration::ZERO);
+    scan.read(0);
+    scan.read(1);
+    let fh = scan.requests.answer_open_to_read(scan.files[2]).unwrap().fh;
+    read_on_handle(&scan, fh, 0, HEAD);
+    let ReadAnswer::Range(range) = scan.requests.decide_read(fh, HEAD as u64, HEAD).unwrap() else {
+        panic!("range");
+    };
+    scan.requests.answer_release(fh);
+    assert!(scan.requests.item_handles.range_count(fh).is_none());
+    scan.fixture
+        .runtime()
+        .block_on(scan.requests.read_range_as(
+            range,
+            Some(std::process::id()),
+            Some(ScanFixture::caller()),
+        ))
+        .unwrap();
+    scan.wait_until("released handle's pending read completes coverage", || {
+        scan.fixture
+            .find_item(scan.files[2])
+            .unwrap()
+            .content_presence
+            == ContentPresence::OnDisk
+    });
+}
+
+#[test]
+fn launch_intent_absolute_paths_and_file_urls_show_immediately_and_land_during_scans() {
+    use crate::download_guard::{ProcessInfo, ProcessReader};
+    struct FakeProcess(ProcessInfo);
+    impl ProcessReader for FakeProcess {
+        fn read(&self, _: u32) -> Option<ProcessInfo> {
+            Some(self.0.clone())
+        }
+    }
+    for window in [0, 16] {
+        for url in [false, true] {
+            let mut scan = ScanFixture::with_sizes(&[32768, 32768, 130], window, Duration::ZERO);
+            let root = scan.fixture.folder();
+            scan.fixture
+                .move_here(scan.files[2], "Shots/with space.png");
+            let argv = if url {
+                format!("file://{}/Shots/with%20space.png", root.display())
+            } else {
+                root.join("Shots/with space.png").display().to_string()
+            };
+            let mut guard = DownloadGuard::default();
+            guard.set_process_reader(Arc::new(FakeProcess(ProcessInfo {
+                start: 42,
+                executable: "/usr/bin/gwenview".into(),
+                cgroup: "0::/app-org.kde.gwenview-123.scope".into(),
+                cmdline: Arc::new(format!("gwenview\0{argv}\0").into_bytes()),
+            })));
+            scan.requests.download_guard = Arc::new(guard);
+            scan.requests.launch_intents = Some(crate::mount::launch_intent::LaunchIntents::new(
+                root,
+                Arc::clone(&scan.requests.read_connections),
+                Arc::clone(&scan.requests.download_guard),
+                Arc::clone(&scan.requests.download_states),
+                scan.fixture.runtime(),
+            ));
+            scan.requests.observe_process(42);
+            assert!(
+                scan.requests.download_states.is_hydrating(scan.files[2]),
+                "emblem before any read; url={url}"
+            );
+            assert!(!scan.requests.download_states.is_downloading(scan.files[2]));
+            scan.read(0);
+            scan.read(1);
+            let fh = scan
+                .requests
+                .open_to_read(scan.files[2], Some(42))
+                .unwrap()
+                .fh;
+            let ReadAnswer::Range(range) = scan.requests.decide_read(fh, 0, 1).unwrap() else {
+                panic!("range");
+            };
+            let began = Instant::now();
+            assert_eq!(
+                scan.fixture
+                    .runtime()
+                    .block_on(scan.requests.read_range(range, Some(42)))
+                    .unwrap(),
+                scan.bytes[2][..1]
+            );
+            scan.requests.answer_release(fh);
+            scan.wait_until(
+                "launch intent keeps a tiny file after only one byte",
+                || {
+                    scan.fixture
+                        .find_item(scan.files[2])
+                        .unwrap()
+                        .content_presence
+                        == ContentPresence::OnDisk
+                },
+            );
+            assert!(
+                began.elapsed() < crate::mount::read_ahead::TINY_DOWNLOAD_DELAY,
+                "launch bypasses tiny grace period"
+            );
+            scan.requests.launch_intents.as_ref().unwrap().stop();
+        }
+    }
+}
+
+#[test]
+fn read_ahead_outside_a_scan_still_combines_distinct_handles() {
+    let scan = ScanFixture::with_sizes(&[46642], 16, Duration::ZERO);
+    scan.read_part(scan.files[0], 0, 23321, Some(ScanFixture::caller()));
+    assert!(!scan.requests.download_states.is_downloading(scan.files[0]));
+    scan.read_part(scan.files[0], 23321, 23321, Some(ScanFixture::caller()));
+    scan.wait_until("outside-scan item coverage combines two handles", || {
+        scan.fixture
+            .find_item(scan.files[0])
+            .unwrap()
+            .content_presence
+            == ContentPresence::OnDisk
+    });
+}
+
+#[test]
+fn read_ahead_handle_keeps_successful_coverage_across_scan_activation() {
+    // No argv intent: both handles begin with a MIME peek before detection.
+    // Only the decoder that reads the remaining bytes on its own handle lands.
+    for decode in [false, true] {
+        let scan = ScanFixture::with_sizes(&[46642, 32768], 16, Duration::ZERO);
+        let fh = scan.requests.answer_open_to_read(scan.files[0]).unwrap().fh;
+        assert_eq!(
+            read_on_handle(&scan, fh, 0, HEAD),
+            scan.bytes[0][..HEAD as usize]
+        );
+        scan.read(1); // Second distinct head activates the folder scan.
+        let mut activated = scan.begin_head(0).unwrap();
+        assert!(activated.in_scan);
+        activated.completed = true;
+        drop(activated);
+        if decode {
+            assert_eq!(
+                read_on_handle(&scan, fh, HEAD as u64, 30258),
+                scan.bytes[0][HEAD as usize..]
+            );
+            scan.wait_until("one handle's pre-scan peek and scan decode land", || {
+                scan.fixture
+                    .find_item(scan.files[0])
+                    .unwrap()
+                    .content_presence
+                    == ContentPresence::OnDisk
+            });
+        } else {
+            for _ in 0..4 {
+                read_on_handle(&scan, fh, 0, HEAD);
+            }
+            assert!(!scan.requests.download_states.is_downloading(scan.files[0]));
+            assert_eq!(
+                scan.fixture
+                    .find_item(scan.files[0])
+                    .unwrap()
+                    .content_presence,
+                ContentPresence::NotOnDisk
+            );
+            assert_eq!(
+                scan.content_requests()
+                    .iter()
+                    .filter(|route| route.ends_with("!00.png"))
+                    .count(),
+                1
+            );
+        }
+        scan.requests.answer_release(fh);
+    }
+}
+
+#[test]
+fn read_ahead_tiny_promotion_rechecks_policy_after_awaiting_the_store() {
+    use crate::download_guard::{ProcessInfo, ProcessReader};
+    struct Fake;
+    impl ProcessReader for Fake {
+        fn read(&self, _: u32) -> Option<ProcessInfo> {
+            Some(ProcessInfo {
+                start: 1,
+                executable: "/usr/bin/gwenview".into(),
+                cgroup: "0::/app-org.kde.gwenview-123.scope".into(),
+                cmdline: Arc::new(b"gwenview\0".to_vec()),
+            })
+        }
+    }
+    let mut scan = ScanFixture::with_sizes(&[130], 0, Duration::ZERO);
+    let mut guard = DownloadGuard::default();
+    guard.set_process_reader(Arc::new(Fake));
+    scan.requests.download_guard = Arc::new(guard);
+    let scheduler = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let fh = scan.requests.answer_open_to_read(scan.files[0]).unwrap().fh;
+    let ReadAnswer::Range(range) = scan.requests.decide_read(fh, 0, HEAD).unwrap() else {
+        panic!("range");
+    };
+    let key = DownloadKey {
+        item: range.item,
+        content: range.source.content.clone(),
+    };
+    scheduler.block_on(async {
+        assert_eq!(
+            scan.requests
+                .read_range_as(range, Some(42), Some(ScanFixture::caller()))
+                .await
+                .unwrap(),
+            scan.bytes[0]
+        );
+        tokio::time::pause();
+        tokio::task::yield_now().await; // Arm the promotion's grace timer.
+    });
+    // Hold the read-only queue so the promotion must suspend at its row lookup.
+    let (entered, waiting) = std::sync::mpsc::channel();
+    let (release, resume) = std::sync::mpsc::channel();
+    let store = scan.fixture.store.clone();
+    let blocker = std::thread::spawn(move || {
+        store
+            .read_items_blocking(move |_| {
+                entered.send(()).unwrap();
+                resume.recv_timeout(Duration::from_secs(10)).unwrap();
+                Ok(())
+            })
+            .unwrap()
+    });
+    waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+    scheduler.block_on(async {
+        tokio::time::advance(
+            crate::mount::read_ahead::TINY_DOWNLOAD_DELAY + Duration::from_millis(1),
+        )
+        .await;
+        tokio::task::yield_now().await; // Run the promotion up to the blocked store await.
+        let mut limits = scan.requests.download_guard.limits();
+        limits
+            .blocked_apps
+            .push(ScanFixture::caller().identity().into());
+        scan.requests.download_guard.configure(true, limits);
+        release.send(()).unwrap();
+        tokio::time::resume();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if scan
+                    .requests
+                    .download_states
+                    .delay_read(key.clone(), ScanFixture::caller().identity())
+                    .is_some()
+                {
+                    break; // Its pending lease is dropped only after the task finishes.
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    });
+    blocker.join().unwrap();
+    assert!(
+        !scan.requests.download_states.is_downloading(scan.files[0]),
+        "a block during the store await must prevent promotion"
+    );
+    assert_eq!(
+        scan.fixture
+            .find_item(scan.files[0])
+            .unwrap()
+            .content_presence,
+        ContentPresence::NotOnDisk
+    );
+    assert_eq!(
+        scan.content_requests().len(),
+        1,
+        "only the admitted range, no whole download"
+    );
+    assert!(
+        scan.requests
+            .download_guard
+            .apps()
+            .iter()
+            .all(|app| app.files == 0 && app.bytes == 0),
+        "a cancelled promotion charges nothing"
+    );
+    scan.requests.answer_release(fh);
+}
+
+#[test]
+fn read_ahead_tiny_promotion_survives_reader_exit_without_charging_a_new_pid() {
+    use crate::download_guard::{ProcessInfo, ProcessReader};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct Fake(AtomicBool);
+    impl ProcessReader for Fake {
+        fn read(&self, _: u32) -> Option<ProcessInfo> {
+            self.0.load(Ordering::Relaxed).then(|| ProcessInfo {
+                start: 1,
+                executable: "/usr/bin/gwenview".into(),
+                cgroup: "0::/app-org.kde.gwenview-123.scope".into(),
+                cmdline: Arc::new(b"gwenview\0".to_vec()),
+            })
+        }
+    }
+    let mut scan = ScanFixture::with_sizes(&[130], 16, Duration::ZERO);
+    let fake = Arc::new(Fake(AtomicBool::new(true)));
+    let mut guard = DownloadGuard::default();
+    guard.set_process_reader(fake.clone());
+    scan.requests.download_guard = Arc::new(guard);
+    scan.read(0);
+    fake.0.store(false, Ordering::Relaxed);
+    scan.wait_until("an already charged promotion outlives the reader", || {
+        scan.fixture
+            .find_item(scan.files[0])
+            .unwrap()
+            .content_presence
+            == ContentPresence::OnDisk
+    });
+    assert_eq!(scan.content_requests().len(), 2);
 }

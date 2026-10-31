@@ -958,6 +958,9 @@ other serial header scans. A persistent header cache would add disk state, versi
 invalidation and privacy/lifetime rules; it remains a possible later step. This change
 uses the proven listed-range path and the current bounded five-minute memory cache.
 
+The following scan-suppression and record-existence rules (`9b6de66` / `56c297c`)
+are superseded by the 2026-10-31 decision below.
+
 After freeing the same folder on build `412dea0`, opening one image made 167 tiny
 files land within about 12 seconds (1.5 MiB), while all 486 files of at least 24 KB
 stayed cloud-only. A 16 KiB MIME sniff covers a tiny file in full, and additional
@@ -982,3 +985,43 @@ active scan is not kept, so it may be fetched again next time. This is the trade
 folder probes in memory without changing another program or the OS. Expiry, cancellation,
 the scanning identity losing eligibility and replacing the scan restore ordinary counting; skipped bytes are never
 counted later. `[transfers] read_ahead = 0` disables both behaviours.
+
+
+## Keep the decoded handle and recognise argv launch intent (2026-10-31)
+
+The kernel trace after `56c297c` shows Gwenview peeking at about ten remembered files
+before touching the selected 46,642-byte PNG. The scan was active before that image
+had any item-level record. It then opened the image for a 16 KiB peek, closed it,
+and decoded 16,384 + 30,258 bytes on a fresh handle. Across roughly 2,900 handles,
+only that decoder and a neighbouring preload reached the threshold alone. Exiv2's
+head reads cover about 4,129 contiguous bytes, followed by sparse 4 KiB strides.
+
+Two independent advisors agreed on per-handle evidence during a scan and bounded
+launch intent. Scan reads now count distinct successful ranges on their own handle,
+with a larger-than-16-KiB gate; outside scans item-level coverage remains the
+decision rule while handles also retain successful coverage. A decoder spanning
+scan activation therefore counts its pre-scan peek together with its later decode;
+repeated peeks still add no coverage. This
+removes `9b6de66`'s no-record path and `56c297c`'s record-existence exception, scan
+snapshots and coverage pinning. Tiny outside-scan desktop reads get a three-second
+grace period so scan activation can drop the stray first file's download.
+Pending promotions recheck the retained caller's policy after awaiting the store,
+immediately before starting; a block applied during that lookup prevents the download
+and adds no charge. Threshold starts after range fetches and launch-intent starts
+also recheck retained caller eligibility before charging.
+
+A desktop process's argv is explicit launch evidence available without changing any
+app or OS configuration. Absolute mount paths and decoded local file URLs are looked
+up only in the store. The immediate emblem gives startup feedback, and the first
+admitted read requests the whole file even during a scan or below 16 KiB. Dolphin's
+open alone is not sufficient: file managers also open files for automatic work, and
+other managers need not reproduce Dolphin's sequence. The daemon does not observe
+the physical double-click; its earliest signal is a request from the launched process.
+
+Intent lasts thirty seconds while the launching process identity remains valid;
+without a read its emblem lasts ten seconds. Parsing, process memory and timers are
+bounded, and guard admission and space checks still own every download. Single-instance
+D-Bus activation, Flatpak portal paths and in-app navigation fall back to coverage.
+A tiny decode during a scan without argv intent remains cloud-only. A large neighbour
+preloaded in full on one handle can land too. These are accepted limits of inferring
+use from reads; neither MIME overrides nor file-manager-specific hooks are introduced.
