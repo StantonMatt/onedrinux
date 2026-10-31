@@ -32,6 +32,11 @@
 // an entry names is watched too, so a root that loses its mark, moves or is
 // deleted takes every answer that named it with it. At most `directoryLimit`
 // directories are kept, least recently asked about evicted first.
+//
+// A single timer rotates the syncing emblem on at most 32 known paths. It
+// reads no file state: changes and eviction update its set, and an empty
+// set stops it. Other syncing paths keep the static emblem until a slot
+// frees. KDE's animation setting is read at each timer start.
 
 #pragma once
 
@@ -39,6 +44,8 @@
 
 #include <QHash>
 #include <QObject>
+#include <QSet>
+#include <QTimer>
 #include <QUrl>
 
 #include <map>
@@ -55,7 +62,7 @@ class OverlayEngine : public QObject
 public:
     static constexpr int DefaultDirectoryLimit = 256;
 
-    explicit OverlayEngine(QObject *parent = nullptr, int directoryLimit = DefaultDirectoryLimit, RootMarkReader hasMark = hasRootMark, PinMarkReader hasPin = hasPinMark);
+    explicit OverlayEngine(QObject *parent = nullptr, int directoryLimit = DefaultDirectoryLimit, RootMarkReader hasMark = hasRootMark, PinMarkReader hasPin = hasPinMark, int animationInterval = 125);
     ~OverlayEngine() override;
 
     /// The overlay icon names for `url`. Called on Dolphin's UI thread for
@@ -103,6 +110,16 @@ private:
     void recheckSelf(const QString &dir, Changes &changes);
     void recheck(const QString &dir, const QString &name, Changes &changes);
     void readEvents();
+    void trackSyncing(const QString &path, Emblem before, Emblem now);
+    void refreshAnimation();
+    void advanceAnimation();
+    QStringList namesFor(const QString &path, Emblem emblem) const;
+
+    // A path can be known both as a child and as a watched root itself.
+    QHash<QString, int> m_syncing;
+    QSet<QString> m_animated;
+    QTimer m_animationTimer;
+    int m_frame = 0;
 
     const int m_directoryLimit;
     const RootMarkReader m_hasMark;

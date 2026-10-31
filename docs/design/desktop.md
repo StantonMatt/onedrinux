@@ -665,7 +665,7 @@ error sign is square, so it is not told from the green discs by colour alone:
 | Emblem | Looks like |
 |---|---|
 | `konedrive-online-only` | a blue outline cloud |
-| `konedrive-syncing` | a solid blue disc, white circular arrows |
+| `konedrive-syncing`, `konedrive-syncing-1` … `-7` | a solid blue disc, rotating white circular arrows |
 | `konedrive-downloaded` | a green ring and check |
 | `konedrive-always-keep` | a solid green disc, white check |
 | `konedrive-error` | a red rounded square, white X |
@@ -675,6 +675,15 @@ up to 48, at 22 px up to 96 and at 32 px above, times the screen's scale. The 8 
 the pixel grid; `hicolor` has no 8×8 directory, so it is installed as the scalable one, which at
 scale 1 only 8 px reaches, every other size having a directory of its own (16, 22 and 32 px, the
 same at `@2`, and 48, 64 and 96 px for scale 3).
+
+The overlay engine animates only syncing paths Dolphin has asked about whose directories it
+still watches. One 125 ms timer advances a shared frame through eight icon names; it re-emits
+known states without reading files or calling the daemon. At most 32 paths animate at once;
+others keep the static `konedrive-syncing` emblem until a slot frees. A state change, deletion
+or watch eviction drops the path, and the timer stops when none remain. At each timer start,
+`kdeglobals` `[KDE] AnimationDurationFactor=0` disables animation until another start checks it
+again. The disc and halo stay fixed: only the arrows rotate, 22.5° per frame (a half-turn loop).
+At 8 px the arrows are two short arcs without heads, which would blur at that size.
 
 An error comes first, then a change on its way:
 

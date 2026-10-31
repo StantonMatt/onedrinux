@@ -1201,14 +1201,14 @@ Each has its file in `crates/konedrived/src/dbus/`.
 
 ### `dolphin/emblems/`
 
-- `generate.py` — generates the hicolor state emblems.
-- `8/`, `16/`, `22/`, `32/` — SVG emblems for online-only, downloaded, pinned, syncing and failed states.
+- `generate.py` — generates the hicolor state emblems and eight syncing frames.
+- `8/`, `16/`, `22/`, `32/` — SVG emblems for online-only, downloaded, pinned, syncing (including seven rotated frames) and failed states.
 
 ### `dolphin/src/`
 
 - `overlayplugin.cpp` — the overlay plugin: emblems on files.
 - `konedriveoverlay.json` — its description.
-- `overlayengine.h`, `overlayengine.cpp` — its logic: which emblem, and the cache of roots.
+- `overlayengine.h`, `overlayengine.cpp` — its logic: which emblem, the cache of roots, and bounded syncing animation.
 - `actionplugin.cpp` — the context menu plugin: the OneDrive section, handed over waiting and
   set from the daemon's answer (`Files.Menu`) when it comes.
 - `konedriveactions.json` — its description.
@@ -1229,7 +1229,9 @@ Each has its file in `crates/konedrived/src/dbus/`.
 - `session-bus.conf.in`, `activating-bus.conf.in`, `failing-daemon.service.in` — the tests'
   buses, and a daemon that fails to start.
 - `overlayenginetest.cpp` — the overlay logic on its own, including live file transitions
-  from cloud to syncing and back after a partial fetch, or to downloaded after a landing.
+  from cloud to syncing and back after a partial fetch, or to downloaded after a landing;
+  frame order, animation settings, the 32-path cap and removal on completion or eviction.
+- `emblemframestest.py` — checks regenerated SVGs, frame rotations and unchanged plates and glyphs.
 - `overlayplugintest.cpp` — the overlay plugin as Dolphin loads it.
 - `actionplugintest.cpp` — the context menu plugin as `KFileItemActions` loads it.
 - `noopentest.cpp` — the plugins never open a file inside the folder.

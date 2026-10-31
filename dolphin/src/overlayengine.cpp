@@ -3,6 +3,8 @@
 #include <QFile>
 #include <QLoggingCategory>
 #include <QSet>
+#include <QSettings>
+#include <QStandardPaths>
 #include <QSocketNotifier>
 
 #include <algorithm>
@@ -31,12 +33,15 @@ bool isInside(const QString &path, const QString &dir)
 }
 } // namespace
 
-OverlayEngine::OverlayEngine(QObject *parent, int directoryLimit, RootMarkReader hasMark, PinMarkReader hasPin)
+OverlayEngine::OverlayEngine(QObject *parent, int directoryLimit, RootMarkReader hasMark, PinMarkReader hasPin, int animationInterval)
     : QObject(parent)
+    , m_animationTimer(this)
     , m_directoryLimit(std::max(directoryLimit, 2))
     , m_hasMark(std::move(hasMark))
     , m_hasPin(std::move(hasPin))
 {
+    m_animationTimer.setInterval(std::max(1, animationInterval));
+    connect(&m_animationTimer, &QTimer::timeout, this, &OverlayEngine::advanceAnimation);
 }
 
 OverlayEngine::~OverlayEngine()
@@ -58,9 +63,11 @@ QStringList OverlayEngine::overlays(const QUrl &url)
         Directory *directory = directoryFor(path);
         const Emblem emblem = itemEmblem(path, m_hasPin);
         if (directory) {
+            trackSyncing(path, directory->ownEmblem.value_or(Emblem::None), emblem);
             directory->ownEmblem = emblem;
         }
-        return overlayNames(emblem);
+        refreshAnimation();
+        return namesFor(path, emblem);
     }
     const QString dir = parentDirectory(path);
     const QString name = fileName(path);
@@ -78,9 +85,66 @@ QStringList OverlayEngine::overlays(const QUrl &url)
 
     const Emblem emblem = itemEmblem(path, m_hasPin);
     if (directory) {
+        trackSyncing(path, directory->files.value(name, Emblem::None), emblem);
         directory->files.insert(name, emblem);
     }
+    refreshAnimation();
+    return namesFor(path, emblem);
+}
+
+void OverlayEngine::trackSyncing(const QString &path, Emblem before, Emblem now)
+{
+    if ((before == Emblem::Syncing) == (now == Emblem::Syncing)) {
+        return;
+    }
+    if (now == Emblem::Syncing) {
+        ++m_syncing[path];
+    } else if (auto it = m_syncing.find(path); it != m_syncing.end() && --it.value() == 0) {
+        m_syncing.erase(it);
+        m_animated.remove(path);
+    }
+}
+
+void OverlayEngine::refreshAnimation()
+{
+    if (m_syncing.isEmpty()) {
+        m_animationTimer.stop();
+        m_frame = 0;
+        return;
+    }
+    for (auto it = m_syncing.cbegin(); it != m_syncing.cend() && m_animated.size() < 32; ++it) {
+        m_animated.insert(it.key());
+    }
+    if (!m_animationTimer.isActive()) {
+        // Read only when starting, never on a frame tick. QSettings needs no
+        // additional KDE dependency; XDG_CONFIG_HOME is also honoured in tests.
+        const QString config = qEnvironmentVariable("XDG_CONFIG_HOME", QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation));
+        QSettings settings(config + QStringLiteral("/kdeglobals"), QSettings::IniFormat);
+        if (settings.value(QStringLiteral("KDE/AnimationDurationFactor"), 1.0).toDouble() != 0.0) {
+            m_animationTimer.start();
+        }
+    }
+}
+
+QStringList OverlayEngine::namesFor(const QString &path, Emblem emblem) const
+{
+    if (emblem == Emblem::Syncing && m_animationTimer.isActive() && m_animated.contains(path) && m_frame != 0) {
+        return {QStringLiteral("konedrive-syncing-%1").arg(m_frame)};
+    }
     return overlayNames(emblem);
+}
+
+void OverlayEngine::advanceAnimation()
+{
+    m_frame = (m_frame + 1) % 8;
+    // Copy the bounded set: a receiver may ask for overlays and evict a
+    // directory immediately. Recheck membership before every emission.
+    const QSet<QString> animated = m_animated;
+    for (const QString &path : animated) {
+        if (m_animated.contains(path)) {
+            Q_EMIT overlaysChanged(QUrl::fromLocalFile(path), namesFor(path, Emblem::Syncing));
+        }
+    }
 }
 
 int OverlayEngine::directoryCount() const
@@ -190,6 +254,10 @@ void OverlayEngine::forget(QString dir)
     }
     const int watch = it->second.watch;
     const bool isRoot = it->second.root == dir;
+    trackSyncing(dir, it->second.ownEmblem.value_or(Emblem::None), Emblem::None);
+    for (auto file = it->second.files.cbegin(); file != it->second.files.cend(); ++file) {
+        trackSyncing(joinPath(dir, file.key()), file.value(), Emblem::None);
+    }
     m_directories.erase(it);
 
     if (auto paths = m_pathsByWatch.find(watch); paths != m_pathsByWatch.end()) {
@@ -212,6 +280,7 @@ void OverlayEngine::forget(QString dir)
             forget(path);
         }
     }
+    refreshAnimation();
 }
 
 void OverlayEngine::forgetTree(QString dir)
@@ -265,6 +334,7 @@ void OverlayEngine::resolveAgain(const QStringList &dirs, Changes &changes)
         recheckSelf(path, changes);
         if (!directory.root) {
             for (auto file = directory.files.cbegin(); file != directory.files.cend(); ++file) {
+                trackSyncing(joinPath(path, file.key()), file.value(), Emblem::None);
                 if (file.value() != Emblem::None) {
                     changes.append({QUrl::fromLocalFile(joinPath(path, file.key())), QStringList()});
                 }
@@ -298,6 +368,7 @@ void OverlayEngine::recheckSelf(const QString &dir, Changes &changes)
     }
     const Emblem now = it->second.root ? itemEmblem(dir, m_hasPin) : Emblem::None;
     if (now != *it->second.ownEmblem) {
+        trackSyncing(dir, *it->second.ownEmblem, now);
         it->second.ownEmblem = now;
         changes.append({QUrl::fromLocalFile(dir), overlayNames(now)});
     }
@@ -318,6 +389,7 @@ void OverlayEngine::recheck(const QString &dir, const QString &name, Changes &ch
     if (now == file.value()) {
         return;
     }
+    trackSyncing(path, file.value(), now);
     file.value() = now;
     changes.append({QUrl::fromLocalFile(path), overlayNames(now)});
 }
@@ -371,6 +443,7 @@ void OverlayEngine::readEvents()
                     continue;
                 }
                 if (event->mask & (IN_DELETE | IN_MOVED_FROM)) {
+                    trackSyncing(joinPath(dir, name), it->second.files.value(name, Emblem::None), Emblem::None);
                     it->second.files.remove(name);
                 } else if (it->second.files.contains(name)) {
                     touched.append({dir, name});
@@ -422,10 +495,13 @@ void OverlayEngine::readEvents()
         recheck(dir, name, changes);
     }
 
+    refreshAnimation();
+
     // Emitted last: a receiver asks for overlays again at once, and that may
     // change the cache this function was walking.
     for (const auto &[url, overlays] : std::as_const(changes)) {
-        Q_EMIT overlaysChanged(url, overlays);
+        const QString path = url.toLocalFile();
+        Q_EMIT overlaysChanged(url, m_syncing.contains(path) ? namesFor(path, Emblem::Syncing) : overlays);
     }
 }
 

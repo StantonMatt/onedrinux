@@ -61,7 +61,7 @@ def always_keep(s):
     body += check(pts, WHITE, p["glyph"])
     return body
 
-def syncing(s):
+def syncing(s, frame=0):
     p = SPEC[s]; c = s / 2
     r = c - p["halo"]
     body = plate_circle(s)
@@ -71,7 +71,10 @@ def syncing(s):
     def pt(deg, rad=ra):
         t = math.radians(deg)
         return (c + rad * math.cos(t), c + rad * math.sin(t))
-    for start, end in ((180, 315), (0, 135)):
+    if frame:
+        body += f'  <g transform="rotate({f(frame * 22.5)} {f(c)} {f(c)})">\n'
+    # 120 degree arcs, so a clear gap parts each arrowhead from the next arc's tail.
+    for start, end in ((195, 315), (15, 135)):
         x0, y0 = pt(start); x1, y1 = pt(end)
         body += f'  <path d="M{f(x0)} {f(y0)} A{f(ra)} {f(ra)} 0 0 1 {f(x1)} {f(y1)}" fill="none" stroke="{WHITE}" stroke-width="{f(w)}" stroke-linecap="butt"/>\n'
         # Arrowhead at the end of the arc, pointing on clockwise.
@@ -83,6 +86,8 @@ def syncing(s):
         a = (x1 + nx * half, y1 + ny * half)
         b = (x1 - nx * half, y1 - ny * half)
         body += f'  <path d="M{f(a[0])} {f(a[1])} L{f(tip[0])} {f(tip[1])} L{f(b[0])} {f(b[1])} Z" fill="{WHITE}"/>\n'
+    if frame:
+        body += '  </g>\n'
     return body
 
 def error(s):
@@ -186,11 +191,21 @@ def always_keep_8():
     body += check([(2.3, 4.0), (3.5, 5.2), (5.7, 2.9)], WHITE, 1.05)
     return body
 
-def syncing_8():
+def syncing_8(frame=0):
     body = f'  <circle cx="4" cy="4" r="4" fill="{WHITE}"/>\n'
     body += f'  <circle cx="4" cy="4" r="3.5" fill="{BLUE}"/>\n'
-    body += f'  <path d="M5.6 3.0 A1.75 1.75 0 1 0 5.75 4.6" fill="none" stroke="{WHITE}" stroke-width="1"/>\n'
-    body += f'  <path d="M4.9 1.9 L6.3 2.2 L5.9 3.6 Z" fill="{WHITE}"/>\n'
+    # Two short round-capped arcs on the ring of pixels around the centre, without the
+    # arrowheads, which blur at this size; like the larger glyph, they repeat every half-turn.
+    # The stroke is over 1 px: Qt rasterises thinner strokes unevenly once rotated, so the
+    # frames would pulse.
+    if frame:
+        body += f'  <g transform="rotate({f(frame * 22.5)} 4 4)">\n'
+    r = 1.75
+    for start in (202.5, 22.5):
+        (x0, y0), (x1, y1) = ((4 + r * math.cos(math.radians(a)), 4 + r * math.sin(math.radians(a))) for a in (start, start + 70))
+        body += f'  <path d="M{f(x0)} {f(y0)} A{f(r)} {f(r)} 0 0 1 {f(x1)} {f(y1)}" fill="none" stroke="{WHITE}" stroke-width="1.3" stroke-linecap="round"/>\n'
+    if frame:
+        body += '  </g>\n'
     return body
 
 EIGHT = {
@@ -215,4 +230,8 @@ for s in SPEC:
     for name, fn in EMBLEMS.items():
         with open(os.path.join(d, name + ".svg"), "w") as fh:
             body = EIGHT[name]() if s == 8 else fn(s)
+            fh.write(HEAD.format(s=s) + body + "</svg>\n")
+    for frame in range(1, 8):
+        with open(os.path.join(d, f"konedrive-syncing-{frame}.svg"), "w") as fh:
+            body = syncing_8(frame) if s == 8 else syncing(s, frame)
             fh.write(HEAD.format(s=s) + body + "</svg>\n")

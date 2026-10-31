@@ -211,7 +211,8 @@ QStringList overlayNames(Emblem emblem)
     // vanished on white pages in Breeze Dark, and its syncing and error
     // states were the online-only cloud again.
     //   - konedrive-online-only: a blue outline cloud;
-    //   - konedrive-syncing: a solid blue disc with circular arrows
+    //   - konedrive-syncing: a solid blue disc with circular arrows; the
+    //     overlay engine selects its rotated frames while it is syncing
     //     (downloading, pinned and still online-only -- the sweep is filling
     //     it -- or waiting to be uploaded);
     //   - konedrive-downloaded: a green ring and check, for a hydrated file

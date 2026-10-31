@@ -1,4 +1,6 @@
 find_package(Qt6 ${QT_MIN_VERSION} REQUIRED COMPONENTS Test)
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_test(NAME emblemframestest COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/emblemframestest.py ${CMAKE_CURRENT_SOURCE_DIR}/../emblems)
 
 # A private session bus on which nothing can be started on demand: the tests
 # never reach the user's own bus, or a daemon installed there.

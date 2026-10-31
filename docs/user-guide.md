@@ -128,6 +128,9 @@ In the OneDrive folder every file and folder has an emblem:
 - a red square with an X — something needs attention: a change that can't be uploaded (Issues
   says why), or a file that couldn't be downloaded for now.
 
+The arrows rotate while work is pending, unless desktop animations are turned off. Up to 32
+items animate at once; the rest show still arrows.
+
 A folder's emblem sums up what is inside it: the red square if anything in it needs attention,
 the arrows if anything in it is moving, the solid check if it is always kept, the cloud if any
 file in it is only in OneDrive, and the check in a ring once everything in it is downloaded.

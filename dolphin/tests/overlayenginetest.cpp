@@ -7,6 +7,7 @@
 #include <QDir>
 #include <QIcon>
 #include <QSignalSpy>
+#include <QSettings>
 #include <QStandardPaths>
 #include <QTest>
 
@@ -80,6 +81,135 @@ private Q_SLOTS:
     void initTestCase()
     {
         QStandardPaths::setTestModeEnabled(true);
+    }
+
+    void init()
+    {
+        animationSetting(1.0);
+    }
+
+    void cleanup()
+    {
+        QSettings settings(qEnvironmentVariable("XDG_CONFIG_HOME") + QStringLiteral("/kdeglobals"), QSettings::IniFormat);
+        settings.remove(QStringLiteral("KDE/AnimationDurationFactor"));
+        settings.sync();
+    }
+
+    static void animationSetting(double factor)
+    {
+        QSettings settings(qEnvironmentVariable("XDG_CONFIG_HOME") + QStringLiteral("/kdeglobals"), QSettings::IniFormat);
+        settings.setValue(QStringLiteral("KDE/AnimationDurationFactor"), factor);
+        settings.sync();
+    }
+
+    void syncingFramesAdvanceAndStopAfterCompletion()
+    {
+        Tree tree;
+        QVERIFY(tree.root(QStringLiteral("drive")));
+        QVERIFY(tree.file(QStringLiteral("drive/doc"), "hydrating"));
+        const QUrl doc = url(tree.path(QStringLiteral("drive/doc")));
+        OverlayEngine engine(nullptr, OverlayEngine::DefaultDirectoryLimit, hasRootMark, hasPinMark, 20);
+        QTimer *timer = engine.findChild<QTimer *>();
+        QVERIFY(timer);
+        QVERIFY(!timer->isActive());
+        QCOMPARE(engine.overlays(doc), Syncing);
+        QVERIFY(timer->isActive());
+        QCOMPARE(timer->interval(), 20);
+        QSignalSpy changed(&engine, &OverlayEngine::overlaysChanged);
+        OpenWatch opened({tree.path(QStringLiteral("drive"))});
+        QVERIFY(opened.isValid());
+        for (int frame = 1; frame <= 8; ++frame) {
+            QVERIFY(changed.wait(1000));
+            QCOMPARE(changed.count(), frame);
+            const QStringList expected = frame == 8 ? Syncing : QStringList{QStringLiteral("konedrive-syncing-%1").arg(frame)};
+            QCOMPARE(changed.last().at(0).toUrl(), doc);
+            QCOMPARE(changed.last().at(1).toStringList(), expected);
+            QCOMPARE(engine.overlays(doc), expected);
+        }
+        QVERIFY(opened.take().isEmpty());
+        QVERIFY(setState(doc.toLocalFile(), "hydrated"));
+        QTRY_VERIFY(!timer->isActive());
+        QCOMPARE(changed.last().at(1).toStringList(), CheckOutline);
+        const int count = changed.count();
+        QTest::qWait(60);
+        QCOMPARE(changed.count(), count);
+        QCOMPARE(engine.overlays(doc), CheckOutline);
+    }
+
+    void animationIsBoundedAndAWaitingFileTakesAFreedSlot()
+    {
+        Tree tree;
+        QVERIFY(tree.root(QStringLiteral("drive")));
+        OverlayEngine engine(nullptr, OverlayEngine::DefaultDirectoryLimit, hasRootMark, hasPinMark, 10000);
+        QList<QUrl> files;
+        for (int i = 0; i < 33; ++i) {
+            const QString name = QStringLiteral("drive/file%1").arg(i);
+            QVERIFY(tree.file(name, "hydrating"));
+            files.append(url(tree.path(name)));
+            QCOMPARE(engine.overlays(files.last()), Syncing);
+        }
+        QTimer *timer = engine.findChild<QTimer *>();
+        QSignalSpy changed(&engine, &OverlayEngine::overlaysChanged);
+        QVERIFY(QMetaObject::invokeMethod(timer, "timeout"));
+        QCOMPARE(changed.count(), 32);
+        for (int i = 0; i < 32; ++i) {
+            QCOMPARE(engine.overlays(files[i]), QStringList{QStringLiteral("konedrive-syncing-1")});
+        }
+        QCOMPARE(engine.overlays(files.last()), Syncing);
+        QVERIFY(setState(files.first().toLocalFile(), "failed"));
+        // Process the attribute event, rather than relying on overlays() to
+        // notice it: it must announce the replacement emblem itself.
+        QTRY_COMPARE(changed.last().at(1).toStringList(), Error);
+        changed.clear();
+        QVERIFY(QMetaObject::invokeMethod(timer, "timeout"));
+        QCOMPARE(changed.count(), 32);
+        QCOMPARE(changedOverlaysFor(changed, files.last()), QStringList{QStringLiteral("konedrive-syncing-2")});
+        for (const auto &change : changed) {
+            QVERIFY(change.at(0).toUrl() != files.first());
+        }
+    }
+
+    void evictedAndDeletedFilesStopAnimating()
+    {
+        Tree tree;
+        QVERIFY(tree.root(QStringLiteral("drive")));
+        QVERIFY(tree.file(QStringLiteral("drive/sub/doc"), "hydrating"));
+        QVERIFY(tree.file(QStringLiteral("drive/other/doc"), "online-only"));
+        OverlayEngine engine(nullptr, 2, hasRootMark, hasPinMark, 10000);
+        const QUrl doc = url(tree.path(QStringLiteral("drive/sub/doc")));
+        QCOMPARE(engine.overlays(doc), Syncing);
+        QTimer *timer = engine.findChild<QTimer *>();
+        QVERIFY(timer->isActive());
+        QCOMPARE(engine.overlays(url(tree.path(QStringLiteral("drive/other/doc")))), Cloud);
+        QVERIFY(!timer->isActive());
+        QCOMPARE(engine.overlays(doc), Syncing);
+        QVERIFY(QFile::remove(doc.toLocalFile()));
+        QTRY_VERIFY(!timer->isActive());
+    }
+
+    void animationsOffStayStaticAndSettingIsReadOnRestart()
+    {
+        Tree tree;
+        QVERIFY(tree.root(QStringLiteral("drive")));
+        QVERIFY(tree.file(QStringLiteral("drive/doc"), "hydrating"));
+        const QUrl doc = url(tree.path(QStringLiteral("drive/doc")));
+        animationSetting(0.0);
+        OverlayEngine engine(nullptr, OverlayEngine::DefaultDirectoryLimit, hasRootMark, hasPinMark, 10);
+        QCOMPARE(engine.overlays(doc), Syncing);
+        QTimer *timer = engine.findChild<QTimer *>();
+        QVERIFY(!timer->isActive());
+        QSignalSpy changed(&engine, &OverlayEngine::overlaysChanged);
+        QTest::qWait(40);
+        QVERIFY(changed.isEmpty());
+        QVERIFY(setState(doc.toLocalFile(), "hydrated"));
+        QTRY_COMPARE(changed.count(), 1);
+        QCOMPARE(changed.last().at(1).toStringList(), CheckOutline);
+        animationSetting(1.0);
+        changed.clear();
+        QVERIFY(setState(doc.toLocalFile(), "hydrating"));
+        QTRY_VERIFY(timer->isActive());
+        QVERIFY(changed.wait(1000));
+        QVERIFY(changed.last().at(1).toStringList() != Syncing);
     }
 
     void rootAnswerIsCachedPerDirectory_data()
@@ -343,7 +473,21 @@ private Q_SLOTS:
         QStringList names = overlayNames(Emblem::Cloud) + overlayNames(Emblem::Syncing) + overlayNames(Emblem::CheckOutline) + overlayNames(Emblem::CheckFilled)
             + overlayNames(Emblem::Error);
         names << QString::fromLatin1(FreeUpSpaceIcon) << QString::fromLatin1(OpenOnlineIcon);
-        QCOMPARE(names.size(), 7);
+        for (int frame = 1; frame < 8; ++frame) {
+            names << QStringLiteral("konedrive-syncing-%1").arg(frame);
+        }
+        QCOMPARE(names.size(), 14);
+        const QStringList sizes{QStringLiteral("scalable"), QStringLiteral("16x16"), QStringLiteral("22x22"), QStringLiteral("32x32"),
+                                QStringLiteral("16x16@2"), QStringLiteral("22x22@2"), QStringLiteral("32x32@2"),
+                                QStringLiteral("48x48"), QStringLiteral("64x64"), QStringLiteral("96x96")};
+        for (const QString &size : sizes) {
+            for (int frame = 0; frame < 8; ++frame) {
+                const QString name = frame ? QStringLiteral("konedrive-syncing-%1").arg(frame) : Syncing.first();
+                const QString path = QStringLiteral(KONEDRIVE_INSTALLED_ICONS) + QStringLiteral("/hicolor/") + size
+                    + QStringLiteral("/emblems/") + name + QStringLiteral(".svg");
+                QVERIFY2(QFile::exists(path), qPrintable(path));
+            }
+        }
         // The emblems as installed, then the installed themes
         // (XDG_DATA_DIRS/icons), not the copy of Breeze some KDE libraries
         // compile in under :/icons.
