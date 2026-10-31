@@ -151,7 +151,7 @@ async fn a_real_read_keeps_its_joined_request_when_speculation_is_cancelled() {
     }
     let reading = tokio::spawn({
         let (source, content) = (Arc::clone(&source), content.clone());
-        async move { source.prepared_range("P0", &content, 0, 16384).await }
+        async move { source.prepared_range("P0", &content, None, 0, 16384).await }
     });
     tokio::time::sleep(Duration::from_millis(20)).await;
     prefetch.abort();

@@ -64,6 +64,7 @@ fn each_account_has_its_own_files() {
             dir: "/tmp/x/accounts/3f9a1c0e5b7d".into(),
             account_cache: "/tmp/x/accounts/3f9a1c0e5b7d/account.json".into(),
             tree_db: "/tmp/x/accounts/3f9a1c0e5b7d/fuse.sqlite".into(),
+            headers: "/tmp/x/cache/3f9a1c0e5b7d/headers.sqlite".into(),
         })
     );
     for bad in ["", "..", "../../etc/xx", "3F9A1C0E5B7D", "3f9a1c0e5b7", "my-account"] {
@@ -441,6 +442,17 @@ fn the_read_ahead_window_is_read_clamped_and_round_tripped() {
         let text = format!("config_version = 2\n{}", setting.map(|value| format!("[transfers]\nread_ahead = {value}")).unwrap_or_default());
         let config: Config = toml::from_str(&text).unwrap();
         assert_eq!(config.read_ahead(), expected);
+        let round: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert_eq!(config, round);
+    }
+}
+
+#[test]
+fn the_header_cache_budget_is_read_clamped_and_round_tripped() {
+    for (setting, expected) in [(None, 256), (Some(-1), 0), (Some(0), 0), (Some(6), 6), (Some(9999), 4096)] {
+        let text = format!("config_version = 2\n{}", setting.map(|value| format!("[transfers]\nheader_cache = {value}")).unwrap_or_default());
+        let config: Config = toml::from_str(&text).unwrap();
+        assert_eq!(config.header_cache(), expected * 1024 * 1024);
         let round: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
         assert_eq!(config, round);
     }

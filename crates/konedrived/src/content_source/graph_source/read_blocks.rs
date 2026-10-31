@@ -41,6 +41,12 @@ pub(super) struct Piece {
 }
 
 impl Piece {
+    /// Consume a piece already clipped to exactly the reader's interval.
+    pub(super) fn into_fetched(self) -> Fetched {
+        Fetched { served_from: self.from, size: self.size, mtime: self.mtime, version: self.version,
+            stream: Box::new(std::io::Cursor::new(self.bytes)) }
+    }
+
     /// An answer preserving its version facts, with only the requested bytes.
     pub(super) fn range(&self, from: u64, end: u64) -> Fetched {
         let start = from.saturating_sub(self.from).min(self.bytes.len() as u64) as usize;
@@ -64,7 +70,7 @@ pub(super) struct ReadBlocks {
 
 impl ReadBlocks {
     /// An answer only when every requested byte is held for this opened generation.
-    pub(super) fn find(&self, item_id: &str, opened_as: &ContentVersion, from: u64, end: u64) -> Option<Fetched> {
+    pub(super) fn find_piece(&self, item_id: &str, opened_as: &ContentVersion, from: u64, end: u64) -> Option<Piece> {
         let mut held = crate::panic::lock(&self.held);
         held.retain(|held| held.since.elapsed() < HELD_FOR);
         let mut at = from;
@@ -79,8 +85,12 @@ impl ReadBlocks {
             answer.bytes.extend_from_slice(&piece.bytes[(at - piece.from) as usize..(stop - piece.from) as usize]);
             at = stop;
         }
-        answer.map(|piece| Fetched { served_from: from, size: piece.size, mtime: piece.mtime, version: piece.version,
-            stream: Box::new(std::io::Cursor::new(piece.bytes)) })
+        answer
+    }
+
+    #[cfg(test)]
+    pub(super) fn find(&self, item_id: &str, opened_as: &ContentVersion, from: u64, end: u64) -> Option<Fetched> {
+        self.find_piece(item_id, opened_as, from, end).map(Piece::into_fetched)
     }
 
     /// Split an aligned answer into separate blocks so overlapping fetches share one

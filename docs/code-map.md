@@ -129,6 +129,13 @@ The directories below are in layer order: a directory uses only the directories 
 - `model.rs` — what `config.toml` holds (version 2), and the rules of labels, client ids and
   held accounts.
 - `store.rs` — `ConfigStore`, the one owner of the file.
+- `header_cache.rs` — one per-account worker and bounded best-effort range publication,
+  authentication epochs, lookup barriers and sign-out deletion with failure propagation.
+- `header_cache/database.rs` — private disposable SQLite schema, version pruning, covering
+  lookup, persistent deletion markers, per-range/item limits, 30-day expiry and LRU eviction
+  against actual file size.
+- `header_cache/tests.rs` — restart, permissions, bounds, LRU, expiry, rebuild, disable,
+  invalidation, failed deletion/restart and sign-out failure regression tests.
 - `download_guard.rs` — persistent guard rules and thresholds through `ConfigStore`; memory-only session approval.
 - `config_trouble.rs` — `AccountHold`, why an account is held back, and `ConfigTrouble`, what
   `Accounts.LastError` says: cases with their data.
@@ -170,6 +177,8 @@ One account: its sign-in, mode, state, quota, cached profile, stored secret.
   (`ReadWriteFailure`), and what `LastError` says (`AccountTrouble`).
 - `quota.rs` — the quota of the account's drive, one copy whoever reads it. `[tests]`
 - `cache.rs` — the cached profile and quota (`account.json`), shown offline. `[tests]`
+- `cache/tests.rs` — account-info serialization and unmounted header-cache lifecycle:
+  restart retention, authentication invalidation and missing-wallet startup cleanup.
 - `secret.rs` — the refresh token's storage in the Secret Service, an item per account.
   `[tests]`
 - `testing.rs` — test support, also for `konedrivectl`'s tests and the VM suite: a wallet in
@@ -236,6 +245,12 @@ Where a download gets its bytes from, and the download of a whole file.
 - `graph_source.rs` — a range by the listed eTag and size in one request, else by fresh
   Graph metadata around it; first-range version and endpoint ETag retention; whole-download
   metadata. `[tests]`
+- `graph_source/headers.rs` — foreground-only disk lookup/publication with original
+  fetched facts, separate metadata eTags and compatible restored first-range bindings;
+  no speculative retention.
+- `graph_source/tests/headers.rs` — memory eviction and source restart without Graph,
+  changed-version misses, actual-read budgets, binding retention, differing endpoint ETags,
+  rename and authentication.
 - `graph_source/links.rs` — the download URLs of a folder's files from one listing of it,
   kept 40 minutes with a 10,000-entry cap; pages release readers as they arrive, and one
   background listing per folder is cancelled on token invalidation or drop. `[tests]`
@@ -415,6 +430,8 @@ A file that is not on disk:
 - `read_ahead.rs` — synchronous desktop scan detection and tiny-promotion cancellation,
   readdir snapshots, a bounded speculative window and cancellation; uses the existing
   in-memory range store; scan reads count on their own cloud-only handle.
+- `item_kernel_requests/tests/header_cache.rs` — real disk-hit guard charging, counted
+  tiny-file hydration outside scans and cloud-only scan hits without speculative refetch.
 - `item_kernel_requests/tests/read_ahead.rs` — 300 ms/40-file timing and request
   regression, exclusions, guard and idle cancellation, foreground priority, small-file
   scan handle coverage, trace replay, tiny grace periods, argv launches and an unpolled-actor/full-queue regression.
@@ -1239,7 +1256,8 @@ suite".
   whole download, changes from OneDrive, a directory that cannot be removed, Forget with unsent
   changes.
 - `file_writes.sh` — the group `file_writes`: what a program's changes become in OneDrive.
-- `file_reads.sh` — the group `file_reads`: reads, downloads, free-up, desktop scans
+- `file_reads.sh` — persisted header probes survive a daemon restart without a content
+  request and unasked padding still misses; the group `file_reads`: reads, downloads, free-up, desktop scans
   of tiny files whose full reads stay in memory after activation; an interrupted libc
   pread receives EINTR promptly without an unanswered FUSE reply warning.
 - `download_guard.sh` — the group `download_guard`: app-download reclamation and its keep/open skip rules, bulk and background refusals, an ordinary app scope reading 100 files without counting, explicit actions,

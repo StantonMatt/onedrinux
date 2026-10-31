@@ -19,7 +19,9 @@
 //!
 //! Either way, every range of one opened content must be of the version the first was.
 //! Cached URLs and bytes require a fresh authenticated token, checked in memory; token
-//! invalidation clears both caches and aborts pending folder listings.
+//! invalidation clears all caches and aborts pending folder listings. Small ranges a
+//! foreground reader actually used also persist in the private per-account header tier,
+//! after a memory miss and before network access (`headers`); speculation never adds rows.
 
 // test: a_hash_is_kept_without_a_ctag_and_hashless_graph_is_still_a_remote_version
 // test: ranges_refuse_a_changed_metadata_version_or_download_etag
@@ -46,9 +48,13 @@
 // test: read_ahead_and_a_real_read_share_one_request_and_keep_the_single_version_binding
 // test: signing_out_cancels_speculative_bodies
 // test: a_real_read_keeps_its_joined_request_when_speculation_is_cancelled
+// test: a_header_survives_memory_eviction_and_source_restart_without_graph_requests
+// test: read_ahead_reuses_persisted_heads_without_speculative_graph_requests
+// test: signed_out_or_revoked_accounts_never_serve_disk_headers
 
 mod links;
 mod read_blocks;
+mod headers;
 
 use std::time::{Duration, SystemTime};
 use std::sync::Arc;
@@ -72,12 +78,14 @@ type CheckedIdentity = (Option<Version>, Option<String>, Option<String>);
 
 /// The version every range of one opened content is held to: set by its first range,
 /// by whichever way it was asked.
-#[derive(Default)]
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 struct Bound {
     /// The first range asked by the metadata.
     checked: Option<CheckedIdentity>,
     /// The `ETag` of the first range taken by the listed version.
     listed: Option<String>,
+    /// Metadata eTag for disk-cache freshness, independently of the download endpoint.
+    metadata_etag: Option<String>,
 }
 
 /// Whether a range taken by the listed version may be answered, by what its content is bound to.
@@ -107,12 +115,17 @@ pub(crate) struct GraphSource {
     cache_use: Arc<std::sync::Mutex<()>>,
     links: Arc<DownloadLinks>,
     read_blocks: Arc<ReadBlocks>,
+    headers: Option<Arc<crate::config::header_cache::HeaderCache>>,
     /// Keeps the token source's weak invalidation callback registered until this source drops.
     _on_invalidate: Arc<konedrive_graph::token::InvalidateHook>,
 }
 
 impl GraphSource {
-    pub fn new(drive: DriveClient) -> Self {
+    #[cfg(test)]
+    pub fn new(drive: DriveClient) -> Self { Self::with_headers(drive, None) }
+
+    pub(crate) fn with_headers(drive: DriveClient, headers: Option<Arc<crate::config::header_cache::HeaderCache>>) -> Self {
+        let headers = headers.filter(|cache| cache.enabled());
         let links = Arc::new(DownloadLinks::default());
         let read_blocks = Arc::new(ReadBlocks::default());
         let cache_use = Arc::new(std::sync::Mutex::new(()));
@@ -120,14 +133,16 @@ impl GraphSource {
         let (clear_links, clear_files) = (Arc::clone(&links), Arc::clone(&read_blocks));
         let invalidated = Arc::new(tokio::sync::Notify::new());
         let cancel = Arc::clone(&invalidated);
+        let clear_headers = headers.clone();
         let on_invalidate: Arc<konedrive_graph::token::InvalidateHook> = Arc::new(move || {
             let _cache_use = crate::panic::lock(&clear_use);
             cancel.notify_waiters();
             clear_links.clear();
             clear_files.clear();
+            if let Some(headers) = &clear_headers { headers.invalidate(); }
         });
         drive.on_token_invalidate(&on_invalidate);
-        Self { drive, pending: Default::default(), invalidated, ranges: Default::default(), cache_use, links, read_blocks, _on_invalidate: on_invalidate }
+        Self { drive, pending: Default::default(), invalidated, ranges: Default::default(), cache_use, links, read_blocks, headers, _on_invalidate: on_invalidate }
     }
 
     fn prepared_key(item_id: &str, opened_as: &ContentVersion, from: u64, end: u64) -> PreparedKey {
@@ -140,6 +155,7 @@ impl GraphSource {
         pending.retain(|_, weak| weak.strong_count() > 0);
         let entry = pending.entry(Self::prepared_key(item_id, opened_as, from, end)).or_default();
         if let Some(read) = entry.upgrade() { return read; }
+        let epoch = self.headers.as_ref().map(|headers| headers.epoch());
         let (source, item_id, opened_as, listed) = (self.clone(), item_id.to_owned(), opened_as.clone(), listed.clone());
         // The map owns only a weak reference, and this future owns no Prepared. The
         // last interested reader dropping it cancels the HTTP request without a task.
@@ -148,11 +164,11 @@ impl GraphSource {
             tokio::pin!(cancelled);
             cancelled.as_mut().enable();
             if !source.drive.cached_content_allowed() { return Ok(false); }
-            if source.cached_range(&item_id, &opened_as, from, end).is_some() { return Ok(true); }
+            if source.memory_range(&item_id, &opened_as, from, end).is_some() { return Ok(true); }
             tokio::select! {
                 biased;
                 _ = cancelled => Err(SourceError::SignedOut("the listed read's authentication was invalidated".into())),
-                answer = source.read_listed(&item_id, &opened_as, &listed, from, end) => answer.map(|answer| answer.is_some()),
+                answer = source.read_listed(&item_id, &opened_as, &listed, from, end, epoch) => answer.map(|answer| answer.is_some()),
             }
         }.boxed().shared();
         let prepared = Arc::new(Prepared { read });
@@ -162,7 +178,7 @@ impl GraphSource {
 
     /// A range of `opened_as` by the listed version, in one request: `None` when it cannot
     /// be taken that way, and the metadata is to be asked. See the module's documentation.
-    async fn read_listed(&self, item_id: &str, opened_as: &ContentVersion, listed: &ListedContent, from: u64, end: u64) -> Result<Option<Fetched>, SourceError> {
+    async fn read_listed(&self, item_id: &str, opened_as: &ContentVersion, listed: &ListedContent, from: u64, end: u64, epoch: Option<u64>) -> Result<Option<Fetched>, SourceError> {
         let ContentVersion::Hashed { hash, ctag, .. } = opened_as else { return Ok(None) };
         if listed.etag.is_empty() || listed.size == 0 {
             return Ok(None);
@@ -214,7 +230,7 @@ impl GraphSource {
         // it is that content, its cTag and hash.
         let version = Some(Version { ctag: ctag.clone().unwrap_or_default(), quick_xor: hash.as_deref().and_then(decode_base64) });
         let _cache_use = crate::panic::lock(&self.cache_use);
-        if !self.drive.cached_content_allowed() { return Ok(None); }
+        if !self.drive.cached_content_allowed() || !self.cache_epoch_is(epoch) { return Ok(None); }
         let piece = Piece { from: ask_from, size: Some(listed.size), mtime: SystemTime::UNIX_EPOCH, version, bytes };
         self.read_blocks.keep(item_id, opened_as, &piece);
         Ok(Some(piece.range(from, end)))
@@ -233,13 +249,14 @@ impl GraphSource {
         }
         if bind {
             bound.listed = Some(etag.to_owned());
+            bound.metadata_etag = Some(etag.to_owned());
         }
         ListedBinding::Bound
     }
 
     /// A range of `opened_as` by the metadata: the item's metadata, the range, and the
     /// metadata again. See the module's documentation.
-    async fn read_checked(&self, item_id: &str, opened_as: &ContentVersion, from: u64, end: u64) -> Result<Fetched, SourceError> {
+    async fn read_checked(&self, item_id: &str, opened_as: &ContentVersion, from: u64, end: u64, epoch: Option<u64>) -> Result<Fetched, SourceError> {
         let item = self.drive.item(item_id).await.map_err(source_error)?;
         if item.deleted.is_some() || item.file.is_none() {
             return Err(SourceError::NotFound(format!("{item_id} is not a file in OneDrive any more")));
@@ -274,6 +291,9 @@ impl GraphSource {
                 return Err(SourceError::NotFound("the range's version changed".into()));
             }
             bound.checked.get_or_insert(identity);
+            if bound.metadata_etag.is_none() {
+                bound.metadata_etag = item.e_tag.clone().filter(|tag| !tag.is_empty());
+            }
         }
         // Read the aligned piece, then check metadata again before publication or FUSE.
         let mut bytes = Vec::new();
@@ -299,9 +319,10 @@ impl GraphSource {
         let _cache_use = crate::panic::lock(&self.cache_use);
         // The caller compares these facts with the opened row too. Never remember a
         // changed answer as the old generation before that comparison can reject it.
-        if self.drive.cached_content_allowed() && matches_opened(&piece, opened_as) {
+        if self.drive.cached_content_allowed() && self.cache_epoch_is(epoch) && matches_opened(&piece, opened_as) {
             self.read_blocks.keep(item_id, opened_as, &piece);
         }
+        self.remember_header(item_id, opened_as, &piece, from, end, epoch);
         Ok(piece.range(from, end))
     }
 }
@@ -309,39 +330,41 @@ impl GraphSource {
 #[async_trait]
 impl ContentSource for GraphSource {
     async fn read_range(&self, item_id: &str, opened_as: &ContentVersion, listed: Option<&ListedContent>, from: u64, end: u64) -> Result<Fetched, SourceError> {
-        if let Some(answer) = self.cached_range(item_id, opened_as, from, end) { return Ok(answer); }
-        if !self.drive.cached_content_allowed() { return self.read_checked(item_id, opened_as, from, end).await; }
+        let epoch = self.headers.as_ref().map(|headers| headers.epoch());
+        if let Some(answer) = self.reader_memory(item_id, opened_as, from, end, epoch) { return Ok(answer); }
+        if let Some(answer) = self.disk_range(item_id, opened_as, listed, from, end, epoch).await { return Ok(answer); }
+        if !self.drive.cached_content_allowed() { return self.read_checked(item_id, opened_as, from, end, epoch).await; }
         if let Some(listed) = listed {
             let prepared = self.listed_read(item_id, opened_as, listed, from, end);
             prepared.read.clone().await?;
-            if let Some(answer) = self.cached_range(item_id, opened_as, from, end) { return Ok(answer); }
+            if let Some(answer) = self.reader_memory(item_id, opened_as, from, end, epoch) { return Ok(answer); }
         }
-        self.read_checked(item_id, opened_as, from, end).await
+        self.read_checked(item_id, opened_as, from, end, epoch).await
     }
 
     fn cached_range(&self, item_id: &str, opened_as: &ContentVersion, from: u64, end: u64) -> Option<Fetched> {
-        let _cache_use = crate::panic::lock(&self.cache_use);
-        if !self.drive.cached_content_allowed() {
-            self.links.clear();
-            self.read_blocks.clear();
-            return None;
-        }
-        self.read_blocks.find(item_id, opened_as, from, end)
+        self.reader_memory(item_id, opened_as, from, end, self.headers.as_ref().map(|headers| headers.epoch()))
     }
 
-    async fn prepared_range(&self, item_id: &str, opened_as: &ContentVersion, from: u64, end: u64) -> Option<Fetched> {
-        if let Some(answer) = self.cached_range(item_id, opened_as, from, end) { return Some(answer); }
+    async fn prepared_range(&self, item_id: &str, opened_as: &ContentVersion, listed: Option<&ListedContent>, from: u64, end: u64) -> Option<Fetched> {
+        let epoch = self.headers.as_ref().map(|headers| headers.epoch());
+        if let Some(answer) = self.reader_memory(item_id, opened_as, from, end, epoch) { return Some(answer); }
+        if let Some(answer) = self.disk_range(item_id, opened_as, listed, from, end, epoch).await { return Some(answer); }
         let prepared = crate::panic::lock(&self.pending).get(&Self::prepared_key(item_id, opened_as, from, end)).and_then(std::sync::Weak::upgrade)?;
         // A real read keeps polling the shared request if the scan is cancelled or
         // replaced. Only speculative owners dropping cannot force a foreground retry.
         let _ = prepared.read.clone().await;
-        self.cached_range(item_id, opened_as, from, end)
+        self.reader_memory(item_id, opened_as, from, end, epoch)
     }
 
     async fn read_ahead(&self, item_id: &str, opened_as: &ContentVersion, listed: &ListedContent) {
         if !self.drive.cached_content_allowed() || self.drive.pool().throughput().retry_after > 0 { return; }
         let end = opened_as.size().min(read_blocks::BLOCK);
-        if end == 0 || self.cached_range(item_id, opened_as, 0, end).is_some() { return; }
+        if end == 0 || self.memory_range(item_id, opened_as, 0, end).is_some() { return; }
+        // A reopening scan must not speculatively refetch blocks whose MIME head
+        // already persists. No new bytes are retained by this disk inspection.
+        let epoch = self.headers.as_ref().map(|headers| headers.epoch());
+        if self.disk_range(item_id, opened_as, Some(listed), 0, end.min(16 * 1024), epoch).await.is_some() { return; }
         let prepared = self.listed_read(item_id, opened_as, listed, 0, end);
         match prepared.read.clone().await {
             Ok(true) => tracing::debug!("read ahead of {item_id}: first {end} bytes retained"),
@@ -351,6 +374,8 @@ impl ContentSource for GraphSource {
     }
 
     fn forget(&self, item_id: &str) {
+        let _cache_use = crate::panic::lock(&self.cache_use);
+        if let Some(headers) = &self.headers { headers.forget(item_id); }
         crate::panic::lock(&self.ranges).remove(item_id);
         self.read_blocks.forget(item_id);
         self.links.drop_link(item_id);

@@ -418,7 +418,8 @@ Files of at most 256 KiB retain their whole-file fetch. The same rule applies on
   the same opened content share a 64 MiB memory bound (`graph_source/read_blocks.rs`), oldest
   out first, each kept five minutes from fetching. Adjacent cached blocks can answer a crossing
   range together. Expired URLs and bytes are freed on lookup or insertion; bytes are also
-  dropped when the item is forgotten. These bytes change nothing on disk.
+  dropped when the item is forgotten. The disk tier below keeps only small intervals
+  actually returned to a reader.
 - **By the metadata, in three.** The item's metadata, the range from the address it gives, and
   the metadata again, which must not have changed. Whenever the first way cannot be taken: no
   listed eTag (a listing found another content the step has not taken yet, a content changed
@@ -443,7 +444,7 @@ Eviction or expiry of bytes never resets this version binding. Old cached blocks
 answer the old content, but a later uncached block must prove that same version.
 An answer that starts elsewhere than asked, or ends early, fails the read with `EIO`. A listing
 moves no content; the download guard counts the bytes each read asks, also those served from
-memory, as before.
+memory or the header cache, as before.
 
 Measured on 2026-10-29 from Chile on a personal account (read-only): a metadata request took
 0.7–2.1 s, a 16 KiB range through a download URL about 0.35 s, and a listing of 200 children
@@ -462,6 +463,52 @@ of the transfer pool as a file being opened does, until two seconds after its la
 (`range_readers.rs`): what a program reads goes before the background downloads.
 
 ### 5.1.1 Reading ahead during a desktop folder scan
+
+**Persistent header ranges.** After the memory store misses, foreground reads look in a
+per-account SQLite cache (`config/header_cache/`, `graph_source/headers.rs`) before asking
+OneDrive. It holds only the exact bytes actually answered through the range-read path,
+including memory hits, when the requested interval is at most 64 KiB. Read-ahead checks
+for a persisted 16 KiB MIME head before scheduling a cloud block, so a reopened folder
+scan reuses those bytes too. It never retains unasked read-ahead or block padding, and
+never reads hydrated backing files. Up to 256 KiB of ranges per item and opened `ContentVersion` are kept, first come; overlapping stored
+ranges conservatively consume that budget too. One row must cover the whole request:
+partial coverage misses, without stitching disk rows or mixing sources.
+
+Rows preserve the original size, modification time, cTag/hash and first-range metadata /
+endpoint ETag binding. Lookup uses the same full opened generation as the memory store,
+checks authentication again after the lookup, and restores only compatible bindings.
+The metadata eTag is retained separately: a checked download may legitimately use a
+different endpoint ETag or none. Only metadata eTags are compared for freshness.
+When current listed facts say another metadata eTag (including a rename with unchanged cTag),
+the stale disk binding misses and is deleted before it can prevent later uncached reads. A
+changed generation deletes that item's other versions; content-change/deletion `forget`
+also deletes its rows. The account owner registers token invalidation even with no mounted
+source: it fences queued work immediately and clears the database. A missing stored sign-in
+also clears it at startup. Sign-out waits for its worker to close and delete the file and SQLite sidecars,
+and reports cleanup failure after signing out; account removal signs out too. A failed
+deletion blocks disk lookups and writes until deletion succeeds. A private deletion marker
+retains this obligation across restarts; opening the cache retries deletion first.
+Free Up Space leaves these small ranges available for the
+next listing. They are not a hydrated copy and change no badge, guard, scan, per-handle
+coverage, launch-intent or whole-download decision.
+
+The cache lives at `$XDG_CACHE_HOME/konedrive/<account-id>/headers.sqlite`, in a 0700 account
+directory with a 0600 database. Schema 1 (`PRAGMA user_version`) stores item id, serialized
+content version, offset, bytes, source facts and last-use time; no file paths or download
+URLs. `[transfers] header_cache` sets its per-account disk limit in MiB (default 256,
+clamped to 0–4096 with a warning). Zero disables it and deletes the file at startup; a
+changed setting takes effect at the next daemon start. Rows unused for 30 days expire
+at startup, lookup and insertion; the worker also prunes hourly while idle.
+Insertions evict least recently used rows in batches; full auto-vacuum bounds the actual
+SQLite file, including indexes and metadata, rather than only the content bytes.
+
+A single account worker runs all SQLite and file I/O. Reads await lookups, while writes
+never wait for that worker or queue space: at most 64 records / 4 MiB of content may be
+queued, and excess writes are skipped. Read/write failures are warned once and ignored;
+awaited deletion failures are returned to the caller. A corrupt or
+unsupported database is deleted and rebuilt once, then disabled on further failure;
+lock contention disables it without deleting another process's database. One startup info
+line reports its disk size and row count; hits are debug messages.
 
 On 2026-10-30, opening one image in Gwenview in a folder of 653 cloud-only PNGs
 made Qt/KIO sniff the first 16 KiB of each file serially. At about 360 ms a request,

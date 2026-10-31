@@ -280,6 +280,8 @@ pub struct AccountService {
     graph: DriveClient,
     secrets: Arc<dyn SecretStore>,
     tokens: Arc<TokenManager>,
+    /// Cache deletion stays registered even while there is no mounted Graph source.
+    _header_invalidation: Arc<konedrive_graph::token::InvalidateHook>,
     sign_in_timeout: Duration,
     session: Mutex<Session>,
     /// The daemon's other accounts, for the identity guard (`docs/design/accounts.md` §6.2). Empty until a
@@ -323,6 +325,11 @@ impl AccountService {
         });
         let tokens = Arc::new(TokenManager::new(secrets.clone(), state.clone()));
         let graph = DriveClient::new(endpoints.graph.clone(), Arc::clone(&tokens) as Arc<dyn konedrive_graph::token::TokenSource>)?;
+        let headers = config.header_cache(id);
+        let header_invalidation: Arc<konedrive_graph::token::InvalidateHook> = Arc::new(move || {
+            if let Some(headers) = &headers { headers.invalidate(); }
+        });
+        graph.on_token_invalidate(&header_invalidation);
         let cache_lock = Arc::new(std::sync::Mutex::new(()));
         let quota = Quota::new(state.clone(), Some(keep_quota(paths.account_cache.clone(), Arc::clone(&cache_lock))));
         let service = Arc::new_cyclic(|me: &Weak<Self>| Self {
@@ -339,6 +346,7 @@ impl AccountService {
             graph,
             secrets,
             tokens,
+            _header_invalidation: header_invalidation,
             sign_in_timeout,
             session: Mutex::new(Session { generation: 0, cancel: None }),
             siblings: std::sync::Mutex::new(None),
@@ -590,7 +598,14 @@ impl AccountService {
                 let this = Arc::clone(self);
                 tokio::spawn(async move { this.refresh_account_info().await });
             }
-            Ok(false) => crate::account::cache::remove(&self.cache),
+            Ok(false) => {
+                if let Some(headers) = self.config.header_cache(&self.id) {
+                    if let Err(error) = headers.clear().await {
+                        tracing::warn!("could not delete signed-out account's header cache at startup: {error:#}");
+                    }
+                }
+                crate::account::cache::remove(&self.cache);
+            }
             Err(e) => self.state.update(|s| s.set_error(AccountTrouble::Token { detail: e.to_string() })),
         }
     }

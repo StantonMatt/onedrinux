@@ -68,15 +68,15 @@ impl Default for Transfers {
 /// Where a folder's files are filled from.
 pub(crate) trait Sources: Send + Sync {
     /// The source of a folder that shows `drive`.
-    fn onedrive(&self, drive: &DriveClient) -> Arc<dyn ContentSource>;
+    fn onedrive(&self, drive: &DriveClient, headers: Option<Arc<crate::config::header_cache::HeaderCache>>) -> Arc<dyn ContentSource>;
 }
 
 /// The daemon's source: Graph.
 pub(crate) struct RealSources;
 
 impl Sources for RealSources {
-    fn onedrive(&self, drive: &DriveClient) -> Arc<dyn ContentSource> {
-        Arc::new(GraphSource::new(drive.clone()))
+    fn onedrive(&self, drive: &DriveClient, headers: Option<Arc<crate::config::header_cache::HeaderCache>>) -> Arc<dyn ContentSource> {
+        Arc::new(GraphSource::with_headers(drive.clone(), headers))
     }
 }
 
@@ -99,6 +99,7 @@ pub struct Wiring {
     pub(crate) schedule: Schedule,
     pub(crate) transfers: Transfers,
     pub(crate) sources: Arc<dyn Sources>,
+    pub(crate) headers: Option<Arc<crate::config::header_cache::HeaderCache>>,
     /// The clock the account's pause is kept by.
     pub(crate) clock: Arc<dyn Clock>,
     /// The bus the desktop's programs are told on to read the folder's directories again
@@ -112,7 +113,9 @@ impl Wiring {
     /// the system's clock, the default schedule
     /// and transfer limits, and no Baloo. The caller sets what its account has.
     pub fn new(registry: Arc<Registry>, account: Arc<dyn FolderAccount>, persist: Persist) -> Self {
+        let headers = persist.store.header_cache(&persist.account);
         Self {
+            headers,
             registry,
             account,
             persist,

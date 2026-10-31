@@ -57,7 +57,7 @@ pub(crate) struct Fetched {
 
 /// Which version of a file a source's bytes belong to, when it can say: the
 /// cTag, and the quickXorHash the whole file must match.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Version {
     /// Empty when Graph supplied a hash without a cTag.
     pub(crate) ctag: String,
@@ -114,9 +114,10 @@ pub(crate) trait ContentSource: Send + Sync {
     /// generation checks are the same as for `read_range`.
     fn cached_range(&self, _item_id: &str, _opened_as: &konedrive_tree::ContentVersion, _from: u64, _end: u64) -> Option<Fetched> { None }
 
-    /// A held piece, or one an existing request is preparing. Joining that work must
-    /// start no network request, so a foreground caller needs no second transfer slot.
-    async fn prepared_range(&self, item_id: &str, opened_as: &konedrive_tree::ContentVersion, from: u64, end: u64) -> Option<Fetched> {
+    /// A held memory/disk piece, or one an existing request is preparing. Joining that
+    /// work must start no network request, so a foreground caller needs no second
+    /// transfer slot. `listed` carries current eTag facts when the mount has them.
+    async fn prepared_range(&self, item_id: &str, opened_as: &konedrive_tree::ContentVersion, _listed: Option<&ListedContent>, from: u64, end: u64) -> Option<Fetched> {
         self.cached_range(item_id, opened_as, from, end)
     }
 

@@ -56,3 +56,33 @@ fn a_saved_file_and_a_file_of_an_installed_version_load() {
     assert_eq!(older.quota, QuotaFigures { used: 1, total: 2, ..QuotaFigures::default() });
     assert_eq!(older.quota.as_drive_quota().remaining, None, "not read");
 }
+
+
+#[tokio::test]
+async fn unmounted_accounts_keep_headers_across_restart_but_drop_them_on_authentication_loss() {
+    use crate::config::{header_cache::Record, Paths};
+    use konedrive_graph::{oauth::Endpoints, secret::MemoryStore};
+    use std::{sync::Arc, time::Duration};
+    let dir = tempfile::tempdir().unwrap();
+    let base = url::Url::parse("http://127.0.0.1:1/").unwrap();
+    let endpoints = Endpoints { authority: base.clone(), graph: base };
+    let service = crate::account::testing::single_account(dir.path(), endpoints.clone(), Arc::new(MemoryStore::default()), Duration::from_secs(1)).await.unwrap();
+    let path = Paths::in_dir(dir.path()).account(service.id()).unwrap().headers;
+    let cache = service.config().header_cache(service.id()).unwrap();
+    cache.keep(cache.epoch(), "item", "version".into(), Record { from: 0, bytes: vec![9; 4096], facts: "source facts".into() });
+    cache.flush().await;
+    drop(cache);
+    drop(service);
+    let restarted = crate::account::testing::single_account(dir.path(), endpoints, Arc::new(MemoryStore::default()), Duration::from_secs(1)).await.unwrap();
+    let cache = restarted.config().header_cache(restarted.id()).unwrap();
+    let found = cache.find(cache.epoch(), "item", "version".into(), 0, 4096).await.unwrap();
+    assert_eq!(found.bytes, vec![9; 4096], "construction does not invalidate persistent headers");
+    restarted.tokens.invalidate().await;
+    cache.flush().await;
+    assert!(!path.exists(), "token invalidation deletes headers without a GraphSource");
+    cache.keep(cache.epoch(), "item", "version".into(), Record { from: 0, bytes: vec![9; 4096], facts: "source facts".into() });
+    cache.flush().await;
+    assert!(path.exists());
+    restarted.startup().await;
+    assert!(!path.exists(), "a missing stored sign-in clears headers at startup too");
+}

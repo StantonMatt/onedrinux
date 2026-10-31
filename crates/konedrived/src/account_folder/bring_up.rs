@@ -145,7 +145,7 @@ impl SyncService {
         let mut kept = stopped.folder().record().map(|record| record.kept.clone()).unwrap_or_default();
         if kept.source.is_none() {
             // Files are downloaded from the drive from the folder's first bring-up on.
-            kept.source = self.drive().map(|drive| self.wiring.sources.onedrive(drive));
+            kept.source = self.drive().map(|drive| self.wiring.sources.onedrive(drive, self.wiring.headers.clone()));
         }
         let record = Record { root, baloo, kept };
         stopped.folder_mut().is = Is::Up(Up { record, sync: Sync::Stopped(Why::NotStarted), take_down_try: None });

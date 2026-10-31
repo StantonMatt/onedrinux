@@ -463,11 +463,58 @@ PYCODE
     check_state b.png online-only
 }
 
+# The same cloud-only metadata probes across a real daemon stop/restart. The fake
+# OneDrive outlives the service, so its content-request count proves disk reuse.
+header_ranges_survive_a_daemon_restart_without_refetching() {
+    begin_folder
+    seed_random X R image.png 3145728
+    register_folder read-only
+    read_header_probes() {
+        $U python3 - "$F/image.png" "$SRC/seed-X" <<'PYCODE'
+import os, pathlib, sys
+expected = pathlib.Path(sys.argv[2]).read_bytes()
+fd = os.open(sys.argv[1], os.O_RDONLY)
+for at, size in [(0, 16384), (65536, 4096), (1048576, 4096), (2097152, 4096)]:
+    assert os.pread(fd, size, at) == expected[at:at+size]
+os.close(fd)
+PYCODE
+    }
+    read_header_probes
+    check_state image.png online-only
+    check "the first probes fetched three blocks" "$(onedrive count GET dl/X)" 3
+    header_writes_are_done() {
+        python3 - "$WORLD/state/cache" <<'PYCODE'
+import pathlib, sqlite3, sys
+files = list(pathlib.Path(sys.argv[1]).glob('*/headers.sqlite'))
+if len(files) != 1:
+    raise SystemExit(1)
+with sqlite3.connect(files[0]) as db:
+    count, size = db.execute("SELECT count(*), sum(length(bytes)) FROM headers WHERE item='X'").fetchone()
+    assert (count, size) == (4, 28672), (count, size)
+PYCODE
+    }
+    check_within 10 "only the four requested intervals were persisted" header_writes_are_done
+    check "the daemon stops cleanly" "$(stop_service)" Finished
+    restart_service read-only
+    read_header_probes
+    check "the same probes fetched no bytes after restart" "$(onedrive count GET dl/X)" 3
+    check_state image.png online-only
+    # Unasked padding in the earlier 1 MiB blocks must not have survived the restart.
+    $U python3 - "$F/image.png" "$SRC/seed-X" <<'PYCODE'
+import os, pathlib, sys
+fd = os.open(sys.argv[1], os.O_RDONLY)
+assert os.pread(fd, 4096, 131072) == pathlib.Path(sys.argv[2]).read_bytes()[131072:135168]
+os.close(fd)
+PYCODE
+    check "an unasked range needs a new fetch" "$(onedrive count GET dl/X)" 4
+}
+
 # The group: every scenario of reading beside a fault.
 file_reads() {
     echo "==== reading beside a fault ===="
     ip link set lo up
     for name in \
+        header_ranges_survive_a_daemon_restart_without_refetching \
         a_desktop_folder_scan_reads_ahead_without_landing_files \
         a_desktop_scan_of_tiny_files_keeps_only_the_decoded_image \
         a_desktop_launch_argument_shows_hydrating_and_keeps_a_tiny_file \

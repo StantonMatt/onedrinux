@@ -139,7 +139,7 @@ Keys the example leaves out, each absent until it is set (`config/model.rs`):
 
 - at the top: `pause_on_metered` (absent: `true`) and `on_battery` (absent or unknown:
   `power-saver`), the automatic hold's settings for every account ([writes.md](writes.md) §6.3);
-  `[transfers]` with `max`, `large`, `download_after` and `read_ahead` ([mount.md](mount.md) §5);
+  `[transfers]` with `max`, `large`, `download_after`, `read_ahead` and `header_cache` ([mount.md](mount.md) §5);
   `write_test_drive_ids`, the drives a development build may export a read-write token for
   (§10), which decides no account's mode;
 - in an account: `ignore` and `machine_name` ([writes.md](writes.md) §3, §5), `thumbnails` (absent:
@@ -403,6 +403,15 @@ exists: signing a signed-out account in again (`konedrivectl login`) and renamin
 build can also add a signed-out account under a chosen label, with no folder
 (`org.konedrive.DevTools.AddAccount`, `konedrivectl dev add-account`).
 
+`Account.SignOut` also closes and deletes the private header cache and its SQLite
+sidecars, even with no mounted folder. The account registers authentication invalidation
+independently of its source, and a missing stored sign-in clears this cache at startup
+([mount.md](mount.md) §5.1.1). A header-cache deletion failure is logged and returned after
+the credentials and account info have been cleared; the account remains signed out.
+Removal stops before deleting its configuration if this cleanup fails. The cache refuses
+reuse and retries deletion before reopening, including after a daemon restart.
+Shared freedesktop thumbnail PNGs are not this private cache.
+
 ### 8.3 Remove
 
 `Accounts.Remove(account)` (`AccountManager::remove`), under the manager's `changing` lock:
@@ -411,8 +420,8 @@ build can also add a signed-out account under a chosen label, with no folder
    in the same change the account's folder side is retired: no registration or bring-up is made for
    it from then on. An account held back at load is forgotten the same way;
 2. the account is signed out and retired: a sign-in under way is given up, and the refresh token
-   (and the version-1 item, while `legacy_token` is set) and the cached profile and quota are
-   deleted;
+   (and the version-1 item, while `legacy_token` is set), cached profile and quota, and the
+   private header cache are deleted;
 3. the account is taken out of `config.toml`;
 4. `accounts/<id>/` is archived beside the original as `<id>.removed-<timestamp>`, preserving
    its live/quarantined databases and pending-change exports; the parent directory is synced;

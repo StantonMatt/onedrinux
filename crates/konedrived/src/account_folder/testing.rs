@@ -191,9 +191,9 @@ impl Sources {
 }
 
 impl wiring::Sources for Sources {
-    fn onedrive(&self, drive: &DriveClient) -> Arc<dyn ContentSource> {
+    fn onedrive(&self, drive: &DriveClient, headers: Option<Arc<crate::config::header_cache::HeaderCache>>) -> Arc<dyn ContentSource> {
         assert!(!self.broken.load(Ordering::SeqCst), "broken on purpose");
-        Arc::new(Replaceable { real: Arc::new(GraphSource::new(drive.clone())), instead: Arc::clone(&self.instead) })
+        Arc::new(Replaceable { real: Arc::new(GraphSource::with_headers(drive.clone(), headers)), instead: Arc::clone(&self.instead) })
     }
 }
 
@@ -223,8 +223,8 @@ impl ContentSource for Replaceable {
         self.now().cached_range(item_id, opened_as, from, end)
     }
 
-    async fn prepared_range(&self, item_id: &str, opened_as: &konedrive_tree::ContentVersion, from: u64, end: u64) -> Option<Fetched> {
-        self.now().prepared_range(item_id, opened_as, from, end).await
+    async fn prepared_range(&self, item_id: &str, opened_as: &konedrive_tree::ContentVersion, listed: Option<&crate::content_source::source::ListedContent>, from: u64, end: u64) -> Option<Fetched> {
+        self.now().prepared_range(item_id, opened_as, listed, from, end).await
     }
 
     async fn read_ahead(&self, item_id: &str, opened_as: &konedrive_tree::ContentVersion, listed: &crate::content_source::source::ListedContent) {

@@ -191,11 +191,13 @@ impl AccountService {
     }
 
     /// Signs the account out: a sign-in under way is given up, the refresh token deleted,
-    /// the cached name and quota forgotten.
+    /// the cached name, quota and header ranges forgotten.
     ///
     /// When the wallet refuses the delete, this fails and the token stays. An account that
     /// was signed in stays signed in, as it was. One that was signing in is `signed-out` by
     /// then, its attempt given up: that does not wait for the wallet.
+    /// Header-cache cleanup can fail after the token is deleted: that error is reported,
+    /// but the account still becomes signed out and its cached profile is forgotten.
     pub async fn sign_out(&self) -> Result<(), AccountError> {
         // Held for the whole call: supersedes any in-flight sign-in attempt, and makes
         // this mutually exclusive with `refresh_account_info`'s cache-save-and-apply step,
@@ -216,6 +218,10 @@ impl AccountService {
         // Takes TokenManager's own lock, so an in-flight access-token refresh commits its
         // rotated refresh token to the wallet before this deletes it.
         self.tokens.forget().await.map_err(|e| AccountError::Failed(e.to_string()))?;
+        let header_cleanup = match self.config.header_cache(&self.id) {
+            Some(headers) => headers.clear().await,
+            None => Ok(()),
+        };
         crate::account::cache::remove(&self.cache);
         self.state.update(|s| {
             s.state = SignInState::SignedOut;
@@ -225,7 +231,10 @@ impl AccountService {
         // Nothing is granted any more: read-only until the next sign-in, which asks for the
         // mode config.toml keeps.
         self.recompute_mode();
-        Ok(())
+        header_cleanup.map_err(|error| {
+            tracing::warn!("could not delete signed-out account's header cache: {error:#}");
+            AccountError::Failed(format!("could not delete header cache: {error:#}"))
+        })
     }
 
     pub async fn refresh_account_info(&self) {

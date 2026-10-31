@@ -89,6 +89,10 @@ pub struct TransfersConfig {
     /// 0 disables both speculation and scan detection: every read counts as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) read_ahead: Option<i64>,
+    /// Per-account persistent header cache, in MiB. 0 disables and deletes it at start.
+    /// Default 256, clamped to 0–4096. Read once at account start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) header_cache: Option<i64>,
 }
 
 /// `[transfers] download_after` when `config.toml` does not say: 1 MiB.
@@ -96,6 +100,9 @@ pub const DOWNLOAD_AFTER: u64 = 1 << 20;
 
 /// At most 16 MiB of speculative head pieces in the 64 MiB range store.
 pub const READ_AHEAD: usize = 16;
+
+/// Default disk budget for small ranges actually read, per account, in MiB.
+pub const HEADER_CACHE: u64 = 256;
 
 /// How many gigabytes of the free space of the disk an account's folder is on the
 /// downloads of its pinned files and read-triggered whole copies leave, when its section names none.
@@ -128,6 +135,16 @@ impl Config {
             tracing::warn!("[transfers] read_ahead = {value} is outside 0-{READ_AHEAD}; using {clamped}");
         }
         clamped
+    }
+
+    /// The per-account disk cache budget in bytes; zero disables it.
+    pub(crate) fn header_cache(&self) -> u64 {
+        let value = self.transfers.as_ref().and_then(|t| t.header_cache).unwrap_or(HEADER_CACHE as i64);
+        let clamped = value.clamp(0, 4096) as u64;
+        if value != clamped as i64 {
+            tracing::warn!("[transfers] header_cache = {value} is outside 0-4096; using {clamped}");
+        }
+        clamped * 1024 * 1024
     }
 
     /// Each account's large-stream limit (the streams of large sync transfers, never an

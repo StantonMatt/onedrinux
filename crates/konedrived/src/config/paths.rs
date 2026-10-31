@@ -18,6 +18,8 @@ pub struct Paths {
     pub(crate) tree_db: PathBuf,
     /// The freedesktop thumbnail cache, shared by every account (keyed by file URI).
     pub thumbnails: PathBuf,
+    /// Private per-account range caches under `$XDG_CACHE_HOME/konedrive`.
+    pub(crate) headers: PathBuf,
 }
 
 /// Where one account's files are.
@@ -27,6 +29,8 @@ pub struct AccountPaths {
     pub(crate) dir: PathBuf,
     /// Its cached name and quota.
     pub account_cache: PathBuf,
+    /// Small ranges actually read from cloud-only files.
+    pub(crate) headers: PathBuf,
     /// Its tree store, activity log and conflicts.
     pub(crate) tree_db: PathBuf,
 }
@@ -48,10 +52,11 @@ impl Paths {
             tree_db: state.join(TREE_DB),
             state_dir: state,
             thumbnails: cache.join("thumbnails"),
+            headers: cache.join("konedrive"),
         })
     }
 
-    /// Every file directly under `dir`.
+    /// Test locations rooted at `dir`, including per-account caches.
     pub fn in_dir(dir: &Path) -> Self {
         Self {
             config_file: dir.join("config.toml"),
@@ -59,6 +64,7 @@ impl Paths {
             account_cache: dir.join("account.json"),
             tree_db: dir.join(TREE_DB),
             thumbnails: dir.join("thumbnails"),
+            headers: dir.join("cache"),
         }
     }
 
@@ -72,6 +78,7 @@ impl Paths {
         let dir = self.state_dir.join("accounts").join(id.as_str());
         Some(AccountPaths {
             account_cache: dir.join("account.json"),
+            headers: self.headers.join(id.as_str()).join("headers.sqlite"),
             tree_db: dir.join(TREE_DB),
             dir,
         })

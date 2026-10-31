@@ -130,7 +130,7 @@ impl ItemRangeFetcher {
         let asked = std::time::Instant::now();
         let asking = async {
             if self.cached_reads {
-                if let Some(fetched) = self.source.prepared_range(onedrive_item_id, &source.content, from, end).await {
+                if let Some(fetched) = self.source.prepared_range(onedrive_item_id, &source.content, source.listed.as_ref(), from, end).await {
                     return (Ok(fetched), None);
                 }
             }

@@ -954,9 +954,9 @@ neither admission budgets nor whole-download thresholds.
 
 The requirement is to work on any computer without modifying programs or the OS.
 A MIME override would depend on a particular Qt/database ambiguity and would not help
-other serial header scans. A persistent header cache would add disk state, version
-invalidation and privacy/lifetime rules; it remains a possible later step. This change
-uses the proven listed-range path and the current bounded five-minute memory cache.
+other serial header scans. The persistent header cache added on 2026-10-31 below supplies
+disk state, version invalidation and privacy/lifetime rules. Read-ahead continues to use the proven
+listed-range path and the bounded five-minute memory cache.
 
 The following scan-suppression and record-existence rules (`9b6de66` / `56c297c`)
 are superseded by the 2026-10-31 decision below.
@@ -981,8 +981,9 @@ eviction, allowing a temporary excess above the 4,096-item target rather than lo
 the opened image at the limit.
 
 The first file can still land before detection. A tiny image first read during the
-active scan is not kept, so it may be fetched again next time. This is the trade-off for keeping
-folder probes in memory without changing another program or the OS. Expiry, cancellation,
+active scan is not hydrated. Its requested small ranges are now retained by the persistent
+header cache below, so a later listing can reuse them without changing another program or
+the OS. Expiry, cancellation,
 the scanning identity losing eligibility and replacing the scan restore ordinary counting; skipped bytes are never
 counted later. `[transfers] read_ahead = 0` disables both behaviours.
 
@@ -1025,3 +1026,31 @@ D-Bus activation, Flatpak portal paths and in-app navigation fall back to covera
 A tiny decode during a scan without argv intent remains cloud-only. A large neighbour
 preloaded in full on one handle can land too. These are accepted limits of inferring
 use from reads; neither MIME overrides nor file-manager-specific hooks are introduced.
+
+## Keep the header ranges a reader actually used (2026-10-31)
+
+The user asked that reopening a cloud-only folder reuse the bytes applications already
+read. Gwenview's folder listing of 653 screenshots repeats Qt/KIO 16 KiB MIME probes,
+Exiv2 4 KiB date probes (including distant offsets), and remembered-file peeks. The
+freedesktop thumbnail PNGs already persist, but the file bytes expired from the five-minute
+memory store or disappeared at daemon restart, repeating roughly 650 cloud requests.
+
+A per-account SQLite tier now keeps only actually returned ranges of at most 64 KiB,
+first come up to 256 KiB per item/content generation. Speculative padding is excluded.
+It follows a memory miss and precedes network access; a single covering row must carry
+the original Fetched facts and a compatible first-range version binding. Version changes,
+content/deletion forgets and authentication invalidation remove stale data. No accounting
+or hydration rule changes: these are cloud-only files with a small private cache.
+
+The cache is under the XDG cache directory, in a 0700 per-account directory with a 0600
+file. The default 256 MiB cap includes SQLite pages and evicts least recently used rows;
+30 days without use expires a row. `[transfers] header_cache = 0` deletes and disables it.
+Sign-out and account removal delete it, including sidecars. Failed cleanup is reported,
+blocks reuse and is retried before reopening; a private marker retains pending deletion
+across daemon restarts. Metadata eTags are stored separately from endpoint bindings so
+legitimately different download ETags do not discard valid headers, while renames still
+invalidate old bindings. Free Up Space keeps it: its
+purpose is to make the next cloud-only listing fast. SQLite writes run on a bounded
+best-effort account worker, never blocking the FUSE read on a write. An unavailable cache
+costs a miss; corruption or an unknown schema permits one disposable rebuild. No other
+application or OS configuration is changed. See [mount.md](mount.md) §5.1.1.

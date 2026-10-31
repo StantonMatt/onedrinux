@@ -76,6 +76,8 @@ pub struct ConfigStore {
     pub(crate) change_guards: Mutex<std::collections::BTreeMap<AccountId, std::sync::Arc<crate::change_guard::ChangeGuard>>>,
     pub(crate) download_guard: std::sync::Arc<crate::download_guard::DownloadGuard>,
     pub(super) write_refusals: Mutex<std::collections::HashMap<AccountId, std::sync::Weak<super::write_refusals::WriteRefusals>>>,
+    pub(super) header_paths: Paths,
+    pub(super) header_caches: Mutex<std::collections::HashMap<AccountId, std::sync::Arc<super::header_cache::HeaderCache>>>,
     inner: Mutex<Inner>,
 }
 
@@ -161,7 +163,7 @@ impl ConfigStore {
         }
         let troubles = poisoned.iter().map(|detail| ConfigTrouble::Unreadable { detail: detail.clone() }).collect();
         let download_guard = std::sync::Arc::new(crate::download_guard::DownloadGuard::new(config.download_guard.unwrap_or(true), config.download_guard_limits.clone().unwrap_or_default()));
-        Self { state_dir: paths.state_dir.clone(), change_guards: Mutex::default(), write_refusals: Mutex::default(), file, download_guard, inner: Mutex::new(Inner { config, poisoned, troubles }) }
+        Self { header_paths: paths.clone(), header_caches: Mutex::default(), state_dir: paths.state_dir.clone(), change_guards: Mutex::default(), write_refusals: Mutex::default(), file, download_guard, inner: Mutex::new(Inner { config, poisoned, troubles }) }
     }
 
     pub fn file(&self) -> &Path {
@@ -318,10 +320,14 @@ impl ConfigStore {
     /// Takes the account's section out of the file and returns it. Its files, token and
     /// folder are the caller's to deal with (`Accounts.Remove`).
     pub fn remove_account(&self, id: &AccountId) -> Result<AccountConfig, ConfigError> {
-        self.update(|config| {
+        let removed = self.update(|config| {
             let at = config.accounts.iter().position(|a| a.id == *id).ok_or_else(|| ConfigError::NoAccount(id.clone()))?;
             Ok(config.accounts.remove(at))
-        })
+        })?;
+        // Ordinary removal has already awaited sign-out's deletion. Failed account
+        // construction/export can reach here without a sign-out; clear its cache too.
+        if let Some(cache) = crate::panic::lock(&self.header_caches).remove(id) { cache.invalidate(); }
+        Ok(removed)
     }
 
     /// The registration's record of the account's folder (`None`: forgotten). The drive
