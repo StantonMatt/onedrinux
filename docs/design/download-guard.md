@@ -239,11 +239,16 @@ program hosts, background readers and unidentified callers never trigger it, eve
 allowed. A policy block cancels pending speculation immediately; an always block also
 suppresses speculation when a session allowance still permits explicit reads. Real reads
 of prefetched bytes pass through ordinary admission and accounting, just like other
-memory hits. While the scan is active, all reads by that identity in that folder skip
-only the whole-download threshold, including the activating second head and non-head
-reads. Their bytes stay in memory even when they cover a small file in full. Other
+memory hits. While the scan is active, reads by that identity in that folder skip
+only the whole-download threshold when that content has no counting record. The
+activating second head and non-head reads follow this rule. Scan-started files stay
+in memory even when read in full; a file whose reading began outside the scan keeps
+counting, even while its first counted fetch is unfinished. Other
 identities and folders count as usual. The first file can land before detection; a
-small file deliberately viewed during the scan is not kept either. Detection and the
+small file first read during the active scan is not kept either. Counting records
+are created before fetching; failed or cancelled counted reads may leave a record,
+and changed content resets it. In-flight reads and the active scan pin existing
+coverage against eviction (mount.md §5.2). Detection and the
 counting decision happen synchronously before fetching, independently of scheduling.
 Expiry, cancellation, replacement or the scanning identity losing
 eligibility ends suppression (other refusals the guard announces do not); earlier coverage

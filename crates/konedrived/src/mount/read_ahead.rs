@@ -2,7 +2,8 @@
 //!
 //! One scan per mount bounds speculation across programs and folders. Its 16-file
 //! window holds at most 16 MiB, with six requests in flight, independently of the
-//! foreground transfer pool. Scan reads skip the whole-download threshold; no disk file is touched.
+//! foreground transfer pool. Only scan-started contents skip the whole-download
+//! threshold; contents already being read keep counting. Speculation touches no disk.
 
 // test: a_desktop_scan_reads_forty_heads_at_least_four_times_faster_with_one_request_each
 // test: a_scan_only_fetches_matching_cloud_files_within_its_window
@@ -12,6 +13,8 @@
 // test: read_ahead_scan_reads_small_files_in_full_without_keeping_them
 // test: read_ahead_lifecycle_changes_end_synchronous_suppression
 // test: read_ahead_skips_non_head_ranges_and_preserves_pre_scan_coverage
+// test: read_ahead_keeps_the_opened_image_after_a_cold_fetch_outlives_the_scan
+// test: read_ahead_keeps_the_opened_image_while_its_first_counted_fetch_is_in_flight
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -22,6 +25,7 @@ use konedrive_tree::{ContentPresence, ContentVersion, Item, ItemKind, LocalItemI
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 
+use super::item_download_states::{ItemDownloadStates, ReadCount};
 use super::item_read_origin::{decide_listed_content, RangeSource};
 use crate::content_source::source::ContentSource;
 use crate::download_guard::{DownloadGuard, ReadAheadCaller};
@@ -78,14 +82,18 @@ struct ScanState {
     scan: Option<ScanRecord>,
     next: u64,
     stopped: bool,
+    counted: Vec<ReadCount>,
 }
 
 impl ScanState {
     fn refresh(&mut self, guard: &DownloadGuard) {
         if self.scan.as_ref().is_some_and(|s| {
-            s.last.elapsed() >= IDLE || s.began.elapsed() >= LIFETIME || !guard.permits_read_ahead(&s.caller)
+            s.last.elapsed() >= IDLE
+                || s.began.elapsed() >= LIFETIME
+                || !guard.permits_read_ahead(&s.caller)
         }) {
             self.scan = None;
+            self.counted.clear();
         }
     }
 }
@@ -95,7 +103,7 @@ pub(super) struct HeadRead {
     state: Arc<Mutex<ScanState>>,
     cancel: watch::Sender<u64>,
     scan: u64,
-    pub(super) skip_count: bool,
+    pub(super) counting: Option<ReadCount>,
     pub(super) completed: bool,
 }
 
@@ -105,6 +113,7 @@ impl Drop for HeadRead {
             let mut state = crate::panic::lock(&self.state);
             if state.scan.as_ref().is_some_and(|s| s.id == self.scan) {
                 state.scan = None;
+                state.counted.clear();
             }
             self.cancel.send_replace(self.scan);
         }
@@ -116,6 +125,7 @@ pub(super) struct ReadAhead {
     cancel: watch::Sender<u64>,
     state: Arc<Mutex<ScanState>>,
     guard: Arc<DownloadGuard>,
+    downloads: Arc<ItemDownloadStates>,
     task: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -124,6 +134,7 @@ impl ReadAhead {
         store: Store,
         source: Arc<dyn ContentSource>,
         guard: Arc<DownloadGuard>,
+        downloads: Arc<ItemDownloadStates>,
         window: usize,
         runtime: &tokio::runtime::Handle,
     ) -> Self {
@@ -133,6 +144,7 @@ impl ReadAhead {
             scan: None,
             next: 0,
             stopped: window == 0,
+            counted: Vec::new(),
         }));
         let task = (window > 0).then(|| {
             runtime.spawn(run(
@@ -150,6 +162,7 @@ impl ReadAhead {
             cancel,
             state,
             guard,
+            downloads,
             task,
         }
     }
@@ -159,7 +172,8 @@ impl ReadAhead {
     }
 
     /// Observe every admitted desktop range before fetching it. The activating head
-    /// already skips counting even if the scheduling task has never been polled.
+    /// already skips counting for new content even if the scheduling task has never
+    /// been polled. Counting registration and scan activation share this lock.
     pub(super) fn head(
         &self,
         caller: ReadAheadCaller,
@@ -181,6 +195,7 @@ impl ReadAhead {
         if from < HEAD_END && content.size() > 0 {
             if let Some(ext) = &file.extension {
                 if !same {
+                    state.counted.clear();
                     state.next += 1;
                     state.scan = Some(ScanRecord {
                         id: state.next,
@@ -192,11 +207,18 @@ impl ReadAhead {
                         last: at,
                     });
                 }
+                let activating = state
+                    .scan
+                    .as_ref()
+                    .is_some_and(|s| !s.active && item != s.first);
+                if activating {
+                    state.counted = self.downloads.keep_counted_reads();
+                }
                 let s = state.scan.as_mut()?;
                 if !s.active && item != s.first {
                     s.active = true;
                     tracing::debug!(folder = %s.folder, identity = s.caller.identity(),
-                        "folder scan reads are served in memory and are not kept on disk");
+                        "scan-started file reads are served in memory and are not kept on disk");
                 }
                 s.last = at;
                 // A full scheduling queue may drop speculation, never scan detection.
@@ -218,7 +240,7 @@ impl ReadAhead {
             state: Arc::clone(&self.state),
             cancel: self.cancel.clone(),
             scan: s.id,
-            skip_count: s.active,
+            counting: self.downloads.begin_read_count(item, content, s.active),
             completed: false,
         })
     }
@@ -227,6 +249,7 @@ impl ReadAhead {
         let mut state = crate::panic::lock(&self.state);
         state.stopped = true;
         state.scan = None;
+        state.counted.clear();
         if let Some(task) = &self.task {
             task.abort();
         }

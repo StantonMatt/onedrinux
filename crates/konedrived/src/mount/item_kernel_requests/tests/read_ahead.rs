@@ -410,7 +410,12 @@ fn a_guard_notification_for_another_reader_keeps_the_scans_prefetches() {
     let scan = ScanFixture::new(40, 16, Duration::ZERO);
     scan.graph.with(|cloud| {
         for n in 2..8 {
-            cloud.delay("GET", &format!("dl/Shots!{n:02}.png"), Duration::from_millis(500), 1);
+            cloud.delay(
+                "GET",
+                &format!("dl/Shots!{n:02}.png"),
+                Duration::from_millis(500),
+                1,
+            );
         }
     });
     scan.read(0);
@@ -419,7 +424,9 @@ fn a_guard_notification_for_another_reader_keeps_the_scans_prefetches() {
     // The guard notifies on every refusal of another reader, not only on policy changes.
     let limits = scan.requests.download_guard.limits();
     scan.requests.download_guard.configure(true, limits);
-    scan.wait_until("pending prefetches publish", || (2..8).all(|n| scan.is_cached(n)));
+    scan.wait_until("pending prefetches publish", || {
+        (2..8).all(|n| scan.is_cached(n))
+    });
 }
 
 #[test]
@@ -513,6 +520,7 @@ fn read_ahead_activating_tiny_read_skips_counting_without_polling_the_actor() {
         scan.fixture.store.clone(),
         Arc::clone(&scan.source) as Arc<dyn ContentSource>,
         Arc::clone(&scan.requests.download_guard),
+        Arc::clone(&scan.requests.download_states),
         16,
         scheduler.handle(),
     )));
@@ -688,33 +696,20 @@ fn read_ahead_skips_non_head_ranges_and_preserves_pre_scan_coverage() {
         ),
         scan.bytes[0][from as usize..]
     );
-    assert!(
-        !scan.requests.download_states.is_downloading(scan.files[0]),
-        "a non-head MiB during the scan never reaches the threshold"
+    scan.wait_until("the pre-scan file lands from non-head coverage", || {
+        scan.fixture
+            .find_item(scan.files[0])
+            .unwrap()
+            .content_presence
+            == ContentPresence::OnDisk
+    });
+    assert_eq!(
+        scan.fixture
+            .find_item(scan.files[1])
+            .unwrap()
+            .content_presence,
+        ContentPresence::NotOnDisk
     );
-    // With detection stopped, only the old 16 KiB counts. The skipped MiB cannot
-    // combine with this tail, but the pre-scan head still contributes later.
-    scan.requests.read_ahead.as_ref().unwrap().stop();
-    let content = scan
-        .fixture
-        .find_item(scan.files[0])
-        .unwrap()
-        .local
-        .unwrap()
-        .content
-        .unwrap();
-    assert!(!scan.requests.download_states.count_bytes_read(
-        scan.files[0],
-        &content,
-        2 * 1024 * 1024 - 4096,
-        4096
-    ));
-    assert!(scan.requests.download_states.count_bytes_read(
-        scan.files[0],
-        &content,
-        HEAD as u64,
-        1024 * 1024 - HEAD as u64 - 4096
-    ));
 }
 
 #[test]
@@ -736,6 +731,9 @@ fn read_ahead_lifecycle_changes_end_synchronous_suppression() {
             fixture.store.clone(),
             fixture.content_source(),
             Arc::clone(&guard),
+            Arc::new(crate::mount::item_download_states::ItemDownloadStates::new(
+                1024 * 1024,
+            )),
             16,
             scheduler.handle(),
         );
@@ -750,7 +748,7 @@ fn read_ahead_lifecycle_changes_end_synchronous_suppression() {
         };
         let completed = |row: &Item| {
             let mut read = observe(row).unwrap();
-            let skipped = read.skip_count;
+            let skipped = read.counting.is_none();
             read.completed = true;
             skipped
         };
@@ -775,11 +773,13 @@ fn read_ahead_lifecycle_changes_end_synchronous_suppression() {
         assert!(completed(&second));
         guard.configure(true, guard.limits());
         assert!(
-            completed(&first),
+            completed(&second),
             "a guard notification that leaves the caller permitted keeps the scan"
         );
         let mut blocked = guard.limits();
-        blocked.blocked_apps.push(ScanFixture::caller().identity().into());
+        blocked
+            .blocked_apps
+            .push(ScanFixture::caller().identity().into());
         guard.configure(true, blocked);
         assert!(observe(&second).is_none(), "a blocked caller gets no scan");
         let mut unblocked = guard.limits();
@@ -801,4 +801,113 @@ fn read_ahead_lifecycle_changes_end_synchronous_suppression() {
             "stop disables suppression immediately"
         );
     });
+}
+
+/// A is opened, then a cold fetch outlives the old candidate scan. B and C start
+/// another scan before the decoder's remaining reads of A. Only A and B may land.
+fn opened_read_across_scan(in_flight: bool) {
+    let scan = ScanFixture::with_sizes(&[23493, 130, 20 * 1024, 512], 16, Duration::ZERO);
+    scan.graph
+        .with(|cloud| cloud.delay("GET", "dl/Shots!00.png", Duration::from_millis(6500), 1));
+    std::thread::scope(|scope| {
+        let first = scope.spawn(|| scan.read(0));
+        scan.wait_until("opened image's cold fetch started", || {
+            scan.content_requests()
+                .iter()
+                .any(|route| route.ends_with("!00.png"))
+        });
+        // The idle timer starts at the head decision, before the fake Graph delay.
+        std::thread::sleep(Duration::from_millis(3100));
+        let first = if in_flight {
+            assert!(!first.is_finished(), "the counted head is still fetching");
+            Some(first)
+        } else {
+            first.join().unwrap();
+            None
+        };
+        scan.read(1); // Tiny first file of the new scan may land.
+        scan.read(2); // Activates the scan and must stay cloud-only.
+        if let Some(first) = &first {
+            assert!(
+                !first.is_finished(),
+                "the decoder starts before the counted head completes"
+            );
+        }
+        let decode = || {
+            scan.read_part(
+                scan.files[0],
+                HEAD as u64,
+                HEAD,
+                Some(ScanFixture::caller()),
+            )
+        };
+        let rest = if in_flight {
+            let decoding = scope.spawn(decode);
+            let deadline = Instant::now() + Duration::from_secs(10);
+            // The shared cold fetch can outlast another idle window. Keep the actual
+            // scan running while the already-decided decoder read waits for it.
+            while !decoding.is_finished() {
+                assert!(Instant::now() < deadline, "decoder fetch timed out");
+                scan.read(2);
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            decoding.join().unwrap()
+        } else {
+            decode()
+        };
+        assert_eq!(rest, scan.bytes[0][HEAD as usize..]);
+        if let Some(first) = first {
+            first.join().unwrap();
+        }
+    });
+    for _ in 0..50 {
+        scan.read(2);
+        assert_eq!(
+            scan.read_part(
+                scan.files[2],
+                HEAD as u64,
+                HEAD,
+                Some(ScanFixture::caller())
+            ),
+            scan.bytes[2][HEAD as usize..]
+        );
+        scan.read(3);
+    }
+    scan.wait_until("opened image and first scan file land", || {
+        [0, 1].into_iter().all(|n| {
+            scan.fixture
+                .find_item(scan.files[n])
+                .unwrap()
+                .content_presence
+                == ContentPresence::OnDisk
+        })
+    });
+    for n in [2, 3] {
+        assert_eq!(
+            scan.fixture
+                .find_item(scan.files[n])
+                .unwrap()
+                .content_presence,
+            ContentPresence::NotOnDisk
+        );
+        assert!(!scan.requests.download_states.is_downloading(scan.files[n]));
+        assert_eq!(
+            scan.content_requests()
+                .iter()
+                .filter(|route| route.ends_with(&format!("!{n:02}.png")))
+                .count(),
+            1,
+            "no whole download for a scan-started file"
+        );
+    }
+}
+
+#[test]
+fn read_ahead_keeps_the_opened_image_after_a_cold_fetch_outlives_the_scan() {
+    opened_read_across_scan(false);
+}
+
+#[test]
+fn read_ahead_keeps_the_opened_image_while_its_first_counted_fetch_is_in_flight() {
+    opened_read_across_scan(true);
 }

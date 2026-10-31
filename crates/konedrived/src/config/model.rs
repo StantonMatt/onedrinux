@@ -84,7 +84,8 @@ pub struct TransfersConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) download_after: Option<i64>,
     /// Files ahead of a desktop folder scan, clamped to 0–16. While a scan is active,
-    /// its desktop identity's reads in that folder do not count toward `download_after`.
+    /// its desktop identity's reads of scan-started content in that folder do not count
+    /// toward `download_after`; content already being read keeps counting.
     /// 0 disables both speculation and scan detection: every read counts as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) read_ahead: Option<i64>,

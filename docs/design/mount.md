@@ -498,10 +498,13 @@ Speculation touches no disk, download-guard budget, `download_after` coverage, w
 download or hydrating state. Its messages are debug read-ahead messages. Real reads
 still undergo ordinary guard admission and charging, including hits in memory.
 
-Once the second distinct head activates a scan, every range read by that desktop
-identity in that folder skips `download_after` counting, including non-head reads and
-files with other extensions. Bytes remain in the existing memory store; no whole
-download is started by those reads, even when a tiny file is read in full. Detection
+Once the second distinct head activates a scan, range reads by that desktop identity
+in that folder skip `download_after` counting only for content without a counting
+record: files whose reading started in the scan. This includes the activating head,
+non-head reads and files with other extensions. A file already decided to count keeps
+counting during the scan, even while its first counted fetch is still in flight.
+Skipped bytes remain in the existing memory store; no whole download is started by
+those skipped reads, even when a tiny file is read in full. Detection
 lives in a mutex-held record updated synchronously before the foreground fetch, using
 folder facts from the row that decided its range origin. The activating read is already
 covered even if the async scheduling task has not run or its queue is full. No lock is
@@ -509,8 +512,10 @@ held across an await. The decision belongs to that admitted read; completing it 
 does not replay its skipped coverage. A debug message announces suppression once per scan.
 
 The first file was read before the scan existed and can still land normally; a started
-whole download is never cancelled retroactively. A tiny image deliberately viewed during
-an active scan is also not kept and may need fetching again next time. Other identities
+whole download is never cancelled retroactively. If a slow fetch of an opened image
+outlives the old scan, that image keeps counting through a later scan and can land normally.
+A file first read in an active scan is not kept, even after repeated reads; deliberately
+viewing it then may require fetching it again next time. Other identities
 and folders count normally. When a scan expires, is cancelled, loses policy eligibility
 or is replaced, subsequent reads count again; coverage accumulated before the scan stays,
 and skipped coverage is never added later. A guard notification ends the scan only when the
@@ -536,20 +541,28 @@ Once distinct coverage reaches `min(download_after, file size)` (`[transfers] do
 is 1 MiB by default; 0 downloads at the first read), the file is downloaded whole, with no
 waiter: reads continue as checked ranges until the verified backing file lands. One 16 KiB
 read of a 10 KiB file covers that whole file and therefore starts its whole download,
-except for reads admitted during an active desktop scan by that identity in that folder
+except for content first read during an active desktop scan by that identity in that folder
 (§5.1.1). That exception applies even with `download_after = 0`; `read_ahead = 0`
 disables it along with speculation. The whole download still fetches afresh and checks
 quickXorHash; the in-memory range cache is not a verified landing source. Unfinished staging is never a read origin.
 
-Coverage starts over when the threshold answers yes, after a successful whole download,
-when the item is forgotten, or when a read names another opened `ContentVersion`. Old and
+A counting record is created synchronously before a non-skipped fetch, even if that
+fetch later fails or is cancelled. No skipped read creates one. Threshold completion
+clears its intervals but retains its counting eligibility. Coverage starts over when
+the threshold answers yes, after a successful whole download, when the item is forgotten, or when a read names another opened `ContentVersion`. Old and
 new handles alternating can therefore undercount, but never combine different contents.
 Coverage lives with the mount, shared by readers of the same item and content. It keeps
 sorted, coalesced intervals, at most 64 per item. Above that cap the closest separated pair
 is reduced to its longer interval (the later on a tie): the shorter is forgotten and the
 gap is never counted. This downward merge can delay a download, never start one early.
-The map keeps at most 4,096 items; inserting another forgets an arbitrary existing entry,
-which likewise only undercounts. Neither bound changes the guard's accounting.
+The map targets 4,096 items, evicting arbitrary unpinned entries; this only undercounts.
+An in-flight counted read pins its record. On activation, the synchronous scan state
+also pins the existing records until expiry, cancellation, replacement or stop, so
+eviction cannot lose the opened image's eligibility or head coverage mid-scan. The
+map may temporarily exceed the target by records pinned by the scan and concurrent
+reads; the next insertion or scan activation trims unpinned entries. A changed
+`ContentVersion` replaces the record; a late fetch completes only its original record.
+These limits do not change the guard's accounting.
 
 Measured on build `1983691`, 2026-10-30: Gwenview opened one image in a folder of 653
 cloud-only PNGs and probed each image it passed with `16384@0`, four `4096@0` reads,

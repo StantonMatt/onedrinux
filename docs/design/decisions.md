@@ -962,13 +962,23 @@ After freeing the same folder on build `412dea0`, opening one image made 167 tin
 files land within about 12 seconds (1.5 MiB), while all 486 files of at least 24 KB
 stayed cloud-only. A 16 KiB MIME sniff covers a tiny file in full, and additional
 Exiv2 probes can cover others: distinct coverage alone cannot distinguish them from
-viewing a file. The daemon now skips whole-download coverage for every read by the
-scanning desktop identity in its active folder, including the second head that
-activates it. Detection is synchronous before fetching; async prefetch scheduling
-cannot race the threshold decision. Admission, charging and bytes returned are unchanged.
+viewing a file. The daemon skips whole-download coverage for content first read by
+the scanning desktop identity in its active folder, including the second head that
+activates it when that content has no counting record. Detection is synchronous before
+fetching; async prefetch scheduling cannot race the threshold decision. Admission, charging and bytes returned are unchanged.
 
-The first file can still land before detection. A tiny image viewed during the scan
-is not kept, so it may be fetched again next time. This is the trade-off for keeping
+On build `9b6de66`, a 23,493-byte image's cold 16 KiB head took 6.529 seconds. The old
+scan expired; a 130-byte file began the next scan and landed, while the opened image's
+remaining decoder reads were skipped. The refined rule creates a counting record
+before fetching: content whose reading began outside the scan keeps counting during
+it, even if that first fetch is unfinished. No skipped bytes create a record or count
+later. Failed or cancelled counted fetches may leave an empty record; another opened
+content resets it. In-flight reads and the active scan pin existing coverage against
+eviction, allowing a temporary excess above the 4,096-item target rather than losing
+the opened image at the limit.
+
+The first file can still land before detection. A tiny image first read during the
+active scan is not kept, so it may be fetched again next time. This is the trade-off for keeping
 folder probes in memory without changing another program or the OS. Expiry, cancellation,
 the scanning identity losing eligibility and replacing the scan restore ordinary counting; skipped bytes are never
 counted later. `[transfers] read_ahead = 0` disables both behaviours.

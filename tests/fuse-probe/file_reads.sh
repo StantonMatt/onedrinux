@@ -372,15 +372,18 @@ PYCODE
 }
 
 # Tiny MIME/metadata reads may cover a whole file. Only the first file, read
-# before a scan exists, may land; all later bytes remain in the range store.
-a_desktop_scan_of_tiny_files_keeps_only_the_first() {
+# before a scan exists, may land along with the image opened before that scan.
+# Files first read in the active scan remain in the range store.
+a_desktop_scan_of_tiny_files_keeps_the_first_and_the_opened_image() {
     begin_folder
     for n in $(seq -w 00 09); do
         seed_random T$n R "$n.png" "$((512 + 10#$n * 3072))"
     done
+    seed_random O R opened.png 23493
     register_folder read-only
-    tiny_names_are_shown() { [ "$(user 'ls | wc -l')" -eq 10 ]; }
+    tiny_names_are_shown() { [ "$(user 'ls | wc -l')" -eq 11 ]; }
     check_within 20 "all tiny scan names are shown" tiny_names_are_shown
+    onedrive delay GET dl/O 3800 1 > /dev/null
     mkdir -p /mnt/tiny-scan-cgroups
     mount -t cgroup2 none /mnt/tiny-scan-cgroups
     local app_group=/mnt/tiny-scan-cgroups/app-org.kde.gwenview-123.scope result
@@ -388,7 +391,11 @@ a_desktop_scan_of_tiny_files_keeps_only_the_first() {
     result=$(bash -c 'echo $$ > "$1/cgroup.procs"; shift; exec "$@"' bash "$app_group" $U python3 - "$F" "$SRC" <<'PYCODE'
 import os, pathlib, sys
 folder, seeds = map(pathlib.Path, sys.argv[1:])
-entries = [entry for entry in os.scandir(folder) if entry.name.endswith('.png')]
+opened = os.open(folder / 'opened.png', os.O_RDONLY)
+expected_opened = (seeds / 'seed-O').read_bytes()
+# The cold head takes longer than the scan's 3-second idle expiry.
+assert os.pread(opened, 16384, 0) == expected_opened[:16384]
+entries = [entry for entry in os.scandir(folder) if entry.name.endswith('.png') and entry.name != 'opened.png']
 assert len(entries) == 10
 for entry in entries:
     expected = (seeds / ('seed-T' + entry.name[:2])).read_bytes()
@@ -400,6 +407,9 @@ for entry in entries:
     finally:
         os.close(fd)
 assert all(entry.stat().st_blocks == 0 for entry in entries[1:])
+# Decode the image opened before the new scan: its counted head must survive.
+assert os.pread(opened, 16384, 16384) == expected_opened[16384:]
+os.close(opened)
 print(entries[0].name)
 PYCODE
 )
@@ -407,7 +417,9 @@ PYCODE
     umount /mnt/tiny-scan-cgroups
     first_tiny_is_local() { [ "$(state_of "$result")" = hydrated ]; }
     check_within 20 "the first file may land before detection" first_tiny_is_local
-    check "ten range reads and only one whole download" "$(onedrive count GET dl/)" 11
+    check_state opened.png hydrated
+    check "the opened image has one range and one whole download" "$(onedrive count GET dl/O)" 2
+    check "eleven range reads and only two whole downloads" "$(onedrive count GET dl/)" 13
     for n in $(seq -w 00 09); do
         if [ "$n.png" != "$result" ]; then
             check "tiny file $n has no whole download" "$(onedrive count GET dl/T$n)" 1
@@ -422,7 +434,7 @@ file_reads() {
     ip link set lo up
     for name in \
         a_desktop_folder_scan_reads_ahead_without_landing_files \
-        a_desktop_scan_of_tiny_files_keeps_only_the_first \
+        a_desktop_scan_of_tiny_files_keeps_the_first_and_the_opened_image \
         an_interrupted_range_read_answers_eintr_without_dropping_its_reply \
         download_cut_off_gives_no_wrong_bytes \
         download_cut_off_keeps_what_it_has_and_goes_on_from_there \

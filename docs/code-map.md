@@ -408,10 +408,10 @@ A file that is not on disk:
   fetches, disk/memory answers, errors, stale content, interrupts and throttle waits.
 - `read_ahead.rs` — synchronous desktop scan detection and threshold suppression,
   readdir snapshots, a bounded speculative window and cancellation; uses the existing
-  in-memory range store.
+  in-memory range store and pins existing counting records during a scan.
 - `item_kernel_requests/tests/read_ahead.rs` — 300 ms/40-file timing and request
   regression, exclusions, guard and idle cancellation, foreground priority, small-file
-  scan suppression and an unpolled-actor/full-queue regression.
+  scan suppression, delayed/in-flight opened-image retention and an unpolled-actor/full-queue regression.
 - `range_readers.rs` — the files being read as ranges, which go before the background
   downloads. `[tests]`
 - `item_downloader.rs` — `ItemDownloader`: a file downloaded whole into the backing directory,
@@ -422,7 +422,8 @@ A file that is not on disk:
   are counted against the app's admission budget.
 - `item_download_states.rs` — `ItemDownloadStates`: the state of each file's download, by the
   item and the content; bounded, coalesced coverage of distinct range bytes for the whole-download
-  threshold, reset on opened-content changes. `[tests]`
+  threshold, pre-fetch counting records and pins against eviction, reset on opened-content
+  changes. `[tests]`
 - `item_download_landing.rs` — conditional landings and atomic resident replacements on one existing place-change record; the landing: the last step of every download, the file given
   its name and then the row saying on disk. `[tests]`
 - `item_free_up.rs` — free up space: the row first, then the downloaded copy goes; app reclamation also requires the attributed content and no open reader. `[tests]`

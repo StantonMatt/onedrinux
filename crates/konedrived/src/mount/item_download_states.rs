@@ -6,8 +6,8 @@
 //! content in its last answer to a download of it, which the next download of it carries
 //! until it is answered; the handle each running download's task is aborted by, which
 //! download of its key it is, and whether anything but the plan asked for it; whether
-//! the mount stopped; and which distinct bytes of each item and opened content were read
-//! as ranges since the last download a read started. Changed by the downloader and by
+//! the mount stopped; which item and opened content were decided to count before a
+//! range fetch; and which distinct bytes were returned since the last threshold. Changed by the downloader and by
 //! read alone, through the functions here; no I/O.
 //!
 //! **Answers for:** who dedups (a download of the same
@@ -63,6 +63,8 @@
 // test: capped_intervals_remain_a_subset_of_the_bytes_read_after_scattering_and_rereading
 // test: the_interval_cap_reduces_the_closest_pair_to_its_longer_interval
 // test: the_number_of_items_with_range_coverage_is_bounded_and_eviction_never_adds_bytes
+// test: item_download_states_register_counting_before_fetch_and_reset_it_for_another_content
+// test: item_download_states_preserve_in_flight_and_scan_coverage_at_the_item_limit
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -90,9 +92,14 @@ pub(super) const ANOTHER_CONTENTS_REMEMBERED: usize = 256;
 /// whole download; a gap must never be counted as if the program had read it.
 const READ_INTERVALS_KEPT: usize = 64;
 
-/// The most items whose range coverage is remembered. Entries otherwise live until
-/// the threshold, a successful download or `forget_item`, as before.
+/// The target number of items with range coverage. In-flight reads and a scan
+/// protect their records from eviction; a successful download or `forget_item`
+/// removes the entry. See `trim_read_counts` for the temporary excess.
 const READ_ITEMS_KEPT: usize = 4096;
+
+/// Pins coverage while its fetch or the scan that followed it is in progress.
+#[derive(Clone)]
+pub(super) struct ReadCount(Arc<std::sync::Mutex<ReadCoverage>>);
 
 /// A conservative union of returned ranges of one opened content. Sorted, disjoint
 /// and non-adjacent; every byte kept here was returned to a program.
@@ -345,7 +352,7 @@ pub(crate) struct ItemDownloadStates {
     states: std::sync::Mutex<States>,
     pub(crate) changes: Arc<crate::sync_parts::state_changes::StateChanges>,
     pub(super) range_reads: Arc<super::range_read_states::RangeReadStates>,
-    bytes_read_as_ranges: std::sync::Mutex<HashMap<LocalItemId, ReadCoverage>>,
+    bytes_read_as_ranges: std::sync::Mutex<HashMap<LocalItemId, ReadCount>>,
     /// `[transfers] download_after`.
     download_after: u64,
     /// The number of the download started last.
@@ -754,28 +761,47 @@ impl ItemDownloadStates {
             || self.range_reads.is_hydrating(item)
     }
 
-    /// `bytes` starting at `from` of the opened `content` were returned as ranges;
-    /// whether their distinct coverage reaches the whole-download threshold. A change
-    /// of content resets the item's coverage, also when old and new handles alternate.
-    /// The count starts over once it answered yes: a download that ends without landing
-    /// is not started again by the next read, but by as many distinct bytes read again.
+    /// Existing counted contents stay eligible throughout a scan, even at the item
+    /// cap. Its synchronous state holds these pins, never its scheduling events.
+    pub(super) fn keep_counted_reads(&self) -> Vec<ReadCount> {
+        let mut records = crate::panic::lock(&self.bytes_read_as_ranges);
+        trim_read_counts(&mut records, READ_ITEMS_KEPT);
+        records.values().cloned().collect()
+    }
+
+    /// Decide before fetching. A scan-started content gets no record; a content
+    /// already decided to count keeps counting, including while its first fetch waits.
+    /// Failed or cancelled counted reads can leave an empty record. Another content
+    /// replaces it, without letting a late completion overwrite the new coverage.
+    pub(super) fn begin_read_count(&self, item: LocalItemId, content: &ContentVersion, in_scan: bool) -> Option<ReadCount> {
+        let mut records = crate::panic::lock(&self.bytes_read_as_ranges);
+        if records.get(&item).is_some_and(|record| crate::panic::lock(&record.0).content != *content) {
+            records.remove(&item);
+        }
+        if let Some(record) = records.get(&item) {
+            return Some(record.clone());
+        }
+        if in_scan { return None; }
+        trim_read_counts(&mut records, READ_ITEMS_KEPT - 1);
+        let record = ReadCount(Arc::new(std::sync::Mutex::new(ReadCoverage::new(content))));
+        records.insert(item, record.clone());
+        Some(record)
+    }
+
+    /// Count only returned bytes of the record chosen before fetching. At threshold,
+    /// coverage starts over but its eligibility remains until eviction or forgetting.
+    pub(super) fn finish_read_count(&self, record: &ReadCount, from: u64, bytes: u64) -> bool {
+        let mut coverage = crate::panic::lock(&record.0);
+        let size = coverage.content.size();
+        let reached = reaches_download_threshold(coverage.add(from, bytes), self.download_after, size);
+        if reached { coverage.intervals.clear(); }
+        reached
+    }
+
+    #[cfg(test)]
     pub(super) fn count_bytes_read(&self, item: LocalItemId, content: &ContentVersion, from: u64, bytes: u64) -> bool {
-        let mut bytes_read_as_ranges = crate::panic::lock(&self.bytes_read_as_ranges);
-        if !bytes_read_as_ranges.contains_key(&item) && bytes_read_as_ranges.len() >= READ_ITEMS_KEPT {
-            // No recency bookkeeping is needed: forgetting any item undercounts only.
-            if let Some(forgotten) = bytes_read_as_ranges.keys().next().copied() {
-                bytes_read_as_ranges.remove(&forgotten);
-            }
-        }
-        let coverage = bytes_read_as_ranges.entry(item).or_insert_with(|| ReadCoverage::new(content));
-        if coverage.content != *content {
-            *coverage = ReadCoverage::new(content);
-        }
-        let is_reached = reaches_download_threshold(coverage.add(from, bytes), self.download_after, content.size());
-        if is_reached {
-            bytes_read_as_ranges.remove(&item);
-        }
-        is_reached
+        let record = self.begin_read_count(item, content, false).unwrap();
+        self.finish_read_count(&record, from, bytes)
     }
 
     /// Nothing is kept of `item` any more: its row is gone, or it shows another content.
@@ -809,6 +835,20 @@ impl ItemDownloadStates {
             _ => 0,
         }
     }
+}
+
+/// Unpinned records alone are evicted. The 4,096-item target can temporarily be
+/// exceeded by a scan's snapshot and concurrent reads; their release permits trimming
+/// at the next insertion or scan. Eviction never loses an in-flight read's coverage.
+fn trim_read_counts(records: &mut HashMap<LocalItemId, ReadCount>, limit: usize) {
+    if records.len() <= limit { return; }
+    let mut left = records.len() - limit;
+    records.retain(|_, record| {
+        if left > 0 && Arc::strong_count(&record.0) == 1 {
+            left -= 1;
+            false
+        } else { true }
+    });
 }
 
 /// A caller in the daemon that waits for a download to end: told that it ended well, or the

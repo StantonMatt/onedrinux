@@ -621,8 +621,9 @@ impl ItemKernelRequests {
 
     /// The rest of a read as ranges, on the runtime: `ItemRangeFetcher::fetch_range`
     /// (another content than the one opened is `ESTALE`), the distinct returned ranges
-    /// counted towards the whole download except for an active desktop folder scan
-    /// (`count_bytes_read`, then `ItemDownloader::download` as
+    /// counted towards the whole download except for scan-started content in an active
+    /// desktop folder scan (`begin_read_count` before fetching, `finish_read_count`
+    /// after, then `ItemDownloader::download` as
     /// `DownloadAsker::Read`, with no waiter, at the threshold). No row is read here. The
     /// caller keeps the task's abort handle for the kernel's interrupt
     /// (`interruptible_reads`).
@@ -670,10 +671,13 @@ impl ItemKernelRequests {
         self.admit_remote(pid, &range, range.end.saturating_sub(range.from))?;
         let mut head = caller.and_then(|caller| self.read_ahead.as_ref()?.head(
             caller, range.item, &range.source.content, range.scan_file.as_ref()?, range.from));
-        let skip_count = head.as_ref().is_some_and(|head| head.skip_count);
+        let counting = match &head {
+            Some(head) => head.counting.clone(),
+            None => self.download_states.begin_read_count(range.item, &range.source.content, false),
+        };
         let bytes = self.fetch_range(&range).await?;
         if let Some(head) = &mut head { head.completed = true; }
-        if !skip_count && self.download_states.count_bytes_read(range.item, &range.source.content, range.from, bytes.len() as u64) {
+        if counting.as_ref().is_some_and(|record| self.download_states.finish_read_count(record, range.from, bytes.len() as u64)) {
             if !self.download_states.is_downloading(range.item) && self.downloader.read_fits(range.source.content.size()) {
                 if let Ok(charge) = self.charge_download(pid, &range) {
                     self.downloader.download_charged(range.download_at_threshold, None, charge);
