@@ -33,6 +33,8 @@ Related documents elsewhere in the repository:
 - [`../code-map.md`](../code-map.md) — every crate, directory and file, with its tests.
 - [`../kernel-behavior-7.2/`](../kernel-behavior-7.2/README.md) — what the kernel and the
   filesystems were measured to do on Linux 7.2, and how to reproduce each measurement.
+- [`../app-read-patterns.md`](../app-read-patterns.md) — local media, PDF and office
+  application captures and fake-Graph replay evidence.
 - [`../kio-behavior.md`](../kio-behavior.md) — what KIO and Dolphin open; the thumbnail cache.
 - [`../limitations/`](../limitations/README.md) — the limits that cannot simply be removed,
   because the kernel, the filesystem, OneDrive or the desktop decides, or because we chose them.

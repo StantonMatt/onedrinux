@@ -2,6 +2,7 @@
 
 // test: t3_agents_konsole_children_and_flatpak_scopes_keep_their_identities
 // test: host_matching_keeps_launch_prefixes_case_and_jetbrains_rules
+// test: thumbnail_helpers_keep_the_background_role_without_blocking_ordinary_ghostscript
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -94,6 +95,7 @@ pub(crate) trait ProcessReader: Send + Sync {
 #[derive(Clone)]
 pub(crate) struct ProcessInfo {
     pub(crate) start: u64,
+    pub(crate) parent: u32,
     pub(crate) executable: String,
     pub(crate) cgroup: String,
     pub(crate) cmdline: Arc<Vec<u8>>,
@@ -103,15 +105,18 @@ struct ProcReader;
 impl ProcessReader for ProcReader {
     fn read(&self, pid: u32) -> Option<ProcessInfo> {
         let root = format!("/proc/{pid}");
-        let start = start_time(&std::fs::read_to_string(format!("{root}/stat")).ok()?)?;
+        let stat = std::fs::read_to_string(format!("{root}/stat")).ok()?;
+        let start = start_time(&stat)?;
+        let parent = parent_pid(&stat)?;
         let executable = std::fs::read_link(format!("{root}/exe")).ok()?.to_str()?.to_owned();
         let cgroup = std::fs::read_to_string(format!("{root}/cgroup")).ok()?;
         let mut cmdline = Vec::new();
         File::open(format!("{root}/cmdline")).ok()?.take(65537).read_to_end(&mut cmdline).ok()?;
-        if cmdline.len() > 65536 || start_time(&std::fs::read_to_string(format!("{root}/stat")).ok()?)? != start {
+        let after = std::fs::read_to_string(format!("{root}/stat")).ok()?;
+        if cmdline.len() > 65536 || start_time(&after)? != start || parent_pid(&after)? != parent {
             return None;
         }
-        Some(ProcessInfo { start, executable, cgroup, cmdline: Arc::new(cmdline) })
+        Some(ProcessInfo { start, parent, executable, cgroup, cmdline: Arc::new(cmdline) })
     }
 }
 
@@ -162,11 +167,30 @@ impl Callers {
             crate::panic::lock(&self.cache).by_pid.remove(&pid);
             return None;
         };
-        let reader = reader_role(&process.executable, &process.cmdline);
+        let mut reader = reader_role(&process.executable, &process.cmdline);
+        // KIO's PDF thumbnailer delegates to Ghostscript, which opens the file
+        // itself. Preserve the thumbnail role for a direct helper, using only
+        // procfs facts; the same executable used elsewhere retains its own role.
+        if reader == "gs" && process.parent != 0 && self.reader.read(process.parent).is_some_and(|parent| {
+            reader_role(&parent.executable, &parent.cmdline) == "kio-thumbnail"
+        }) {
+            // The parent snapshot must still belong to this child generation.
+            let Some(current) = self.reader.read(pid) else {
+                crate::panic::lock(&self.cache).by_pid.remove(&pid);
+                return None;
+            };
+            if current.start != process.start || current.parent != process.parent
+                || current.executable != process.executable || current.cgroup != process.cgroup
+                || current.cmdline != process.cmdline {
+                crate::panic::lock(&self.cache).by_pid.remove(&pid);
+                return None;
+            }
+            reader = "kio-thumbnail".into();
+        }
         let mut cache = crate::panic::lock(&self.cache);
         if let Some(old) = cache.by_pid.get(&pid) {
             if old.process.start == process.start && old.process.executable == process.executable
-                && old.process.cgroup == process.cgroup && old.reader == reader {
+                && old.process.cgroup == process.cgroup && old.process.parent == process.parent && old.reader == reader {
                 return Some(IdentifiedProcess { caller: old.caller.clone(), generation: old.generation, cmdline: Arc::clone(&old.process.cmdline) });
             }
         }
@@ -183,6 +207,10 @@ impl Callers {
 fn start_time(stat: &str) -> Option<u64> {
     // comm may contain spaces and ')'; field 22 is index 19 after the last ')'.
     stat.rsplit_once(')')?.1.split_whitespace().nth(19)?.parse().ok()
+}
+
+fn parent_pid(stat: &str) -> Option<u32> {
+    stat.rsplit_once(')')?.1.split_whitespace().nth(1)?.parse().ok()
 }
 
 fn basename(path: &str) -> &str {

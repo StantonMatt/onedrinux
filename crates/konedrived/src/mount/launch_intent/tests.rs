@@ -11,6 +11,7 @@ impl ProcessReader for FakeProcess {
 
 fn process(path: &Path) -> Arc<FakeProcess> {
     Arc::new(FakeProcess(Mutex::new(Some(ProcessInfo {
+        parent: 0,
         start: 1,
         executable: "/usr/bin/viewer".into(),
         cgroup: "0::/app-org.example.viewer-123.scope".into(),

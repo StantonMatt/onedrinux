@@ -33,7 +33,14 @@ The default reader list is data (`download_guard/identity.rs`):
   ([kio-behavior.md](../kio-behavior.md) C). Launching an application does not require Dolphin
   to read content, so the application reads under its own identity.
 - `kio-thumbnail`: `kioworker`/`kioslave5`/`kioslave` with the `thumbnail` protocol or a
-  `thumbnail.so` plugin argument. Cached previews need no content; missing or stale previews
+  `thumbnail.so` plugin argument. Ghostscript (`gs`) directly launched by that
+  worker inherits `kio-thumbnail`: the PDF plugin passes it the source filename,
+  and Ghostscript opens the PDF itself. Its direct parent is inspected through the
+  same procfs seam on every request; the child generation and parent PID are
+  checked again before accepting that relationship. A `file.so` parent and
+  independently launched Ghostscript keep their own reader roles. This prevents
+  a helper in Dolphin's ordinary app unit from fetching content or treating its
+  PDF argument as launch intent. Cached previews need no content; missing or stale previews
   open it ([kio-behavior.md](../kio-behavior.md) B). `kioworker` with `file.so` remains eligible:
   it serves a deliberate copy out of the folder. Both roles may share a launcher's app unit;
   a thumbnail refusal does not itself block its file worker. Dolphin's `file.so` copies
@@ -72,7 +79,7 @@ With enforcement on, admission follows this order:
 3. A session allowance admits the caller without counting, including over an always block.
 4. An explicit always block refuses it.
 5. An always allowance admits it without counting.
-6. An ordinary `app:` identity (Gwenview, Okular, LibreOffice or Dolphin file copies) is
+6. An ordinary `app:` identity (Gwenview, VLC, Haruna, Okular, LibreOffice or Dolphin file copies) is
    admitted without counting. Every `exe:` identity and a matching program host is guarded.
 7. A guarded caller's existing bulk block refuses it; otherwise its fetch is admitted only
    within the unchanged limits below. Opening alone consumes no budget.

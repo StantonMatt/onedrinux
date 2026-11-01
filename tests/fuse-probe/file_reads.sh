@@ -190,19 +190,25 @@ with open(sys.argv[1], 'rb', buffering=0) as f:
     check_within 20 "after close the complete new version lands" replacement_landed
     check_state big.bin hydrated
     python3 -c "import pathlib; pathlib.Path('$SRC/grown-version').write_bytes(b'G' * 8388608)"
+    onedrive delay GET dl/X 3000 1 > /dev/null
     onedrive edit X "$SRC/grown-version" > /dev/null
     daemon refresh > /dev/null
     growth_started() { [ "$(onedrive count GET dl/X)" -ge 3 ]; }
     check_within 20 "the larger replacement started" growth_started
     check_state big.bin hydrated
-    check "a new open sees the complete larger version" "$(user "cmp -s big.bin '$SRC/grown-version'" && echo equal)" equal
+    # Resident state and an admitted request do not prove replacement landing:
+    # the old verified copy stays resident while the new transfer runs.
+    growth_landed() { user "cmp -s big.bin '$SRC/grown-version'"; }
+    check_within 20 "a new open sees the complete larger version" growth_landed
     python3 -c "import pathlib; pathlib.Path('$SRC/shrunk-version').write_bytes(b'S' * 2048)"
+    onedrive delay GET dl/X 3000 1 > /dev/null
     onedrive edit X "$SRC/shrunk-version" > /dev/null
     daemon refresh > /dev/null
     shrink_started() { [ "$(onedrive count GET dl/X)" -ge 4 ]; }
     check_within 20 "the smaller replacement started" shrink_started
     check_state big.bin hydrated
-    check "a new open sees the smaller version with no cached tail" "$(user "cmp -s big.bin '$SRC/shrunk-version'" && echo equal)" equal
+    shrink_landed() { user "cmp -s big.bin '$SRC/shrunk-version'"; }
+    check_within 20 "a new open sees the smaller version with no cached tail" shrink_landed
 
 }
 

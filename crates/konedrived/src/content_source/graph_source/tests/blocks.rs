@@ -85,3 +85,25 @@ async fn an_incomplete_block_is_never_cached_or_partly_answered() {
     assert!(source.read_blocks.find("P0", &content, 0, 5).is_none());
     assert_eq!(read_whole(source.read_range("P0", &content, Some(&listed), 0, 5).await.unwrap()).await, bytes_of(0, BLOCK as usize + 1)[..5]);
 }
+
+
+/// VLC/Haruna reads straddle aligned pieces. A block already fetched for a
+/// prior packet must not be transferred again with the next packet's block.
+#[tokio::test]
+async fn a_partly_cached_crossing_read_fetches_only_its_missing_block() {
+    for cached in [0, BLOCK] {
+        let size = 2 * BLOCK as usize;
+        let (graph, source) = folder_of(1, size).await;
+        let (content, listed) = opened_now(&graph, "P0");
+        source.read_range("P0", &content, Some(&listed), cached, cached + 10).await.unwrap();
+        let from = BLOCK - 17;
+        let end = BLOCK + 100;
+        assert_eq!(read_whole(source.read_range("P0", &content, Some(&listed), from, end).await.unwrap()).await,
+            bytes_of(0, size)[from as usize..end as usize]);
+        let missing = BLOCK - cached;
+        assert_eq!(byte_ranges(&graph).await, [
+            format!("bytes={cached}-{}", cached + BLOCK - 1),
+            format!("bytes={missing}-{}", missing + BLOCK - 1),
+        ], "a crossing packet reuses either its cached prefix or its cached suffix");
+    }
+}

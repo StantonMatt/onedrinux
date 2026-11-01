@@ -997,6 +997,7 @@ fn launch_intent_absolute_paths_and_file_urls_show_immediately_and_land_during_s
             };
             let mut guard = DownloadGuard::default();
             guard.set_process_reader(Arc::new(FakeProcess(ProcessInfo {
+                parent: 0,
                 start: 42,
                 executable: "/usr/bin/gwenview".into(),
                 cgroup: "0::/app-org.kde.gwenview-123.scope".into(),
@@ -1128,6 +1129,7 @@ fn read_ahead_tiny_promotion_rechecks_policy_after_awaiting_the_store() {
     impl ProcessReader for Fake {
         fn read(&self, _: u32) -> Option<ProcessInfo> {
             Some(ProcessInfo {
+                parent: 0,
                 start: 1,
                 executable: "/usr/bin/gwenview".into(),
                 cgroup: "0::/app-org.kde.gwenview-123.scope".into(),
@@ -1241,6 +1243,7 @@ fn read_ahead_tiny_promotion_survives_reader_exit_without_charging_a_new_pid() {
     impl ProcessReader for Fake {
         fn read(&self, _: u32) -> Option<ProcessInfo> {
             self.0.load(Ordering::Relaxed).then(|| ProcessInfo {
+                parent: 0,
                 start: 1,
                 executable: "/usr/bin/gwenview".into(),
                 cgroup: "0::/app-org.kde.gwenview-123.scope".into(),

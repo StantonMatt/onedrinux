@@ -93,6 +93,28 @@ impl ReadBlocks {
         self.find_piece(item_id, opened_as, from, end).map(Piece::into_fetched)
     }
 
+    /// Trim complete cached blocks from the edges of an aligned network miss.
+    /// Keep one request for any remaining middle, even when it has cached holes.
+    pub(super) fn missing_edges(&self, item_id: &str, opened_as: &ContentVersion, mut from: u64, mut end: u64) -> (u64, u64) {
+        let mut held = crate::panic::lock(&self.held);
+        held.retain(|held| held.since.elapsed() < HELD_FOR);
+        let covers = |from, end| held.iter().any(|held| {
+            held.item_id == item_id && &held.opened_as == opened_as
+                && held.piece.from <= from && held.piece.from + held.piece.bytes.len() as u64 >= end
+        });
+        while from < end {
+            let next = from.saturating_add(BLOCK).min(end);
+            if !covers(from, next) { break; }
+            from = next;
+        }
+        while from < end {
+            let previous = ((end - 1) / BLOCK * BLOCK).max(from);
+            if !covers(previous, end) { break; }
+            end = previous;
+        }
+        (from, end)
+    }
+
     /// Split an aligned answer into separate blocks so overlapping fetches share one
     /// memory budget. A repeated block replaces itself; lookup never extends its life.
     pub(super) fn keep(&self, item_id: &str, opened_as: &ContentVersion, piece: &Piece) {

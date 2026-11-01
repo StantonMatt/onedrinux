@@ -268,7 +268,7 @@ Where a download gets its bytes from, and the download of a whole file.
 - `graph_source/links/tests.rs` — URL expiry pruning, the entry cap and background cancellation.
 - `graph_source/read_blocks.rs` — aligned 1 MiB pieces and small whole files in one 64 MiB
   memory cache, keyed by item and opened generation; five-minute expiry, oldest-first eviction,
-  crossing-range assembly, forget and token invalidation. `[tests]`
+  crossing-range assembly and cached-edge trimming, forget and token invalidation. `[tests]`
 - `graph_source/read_blocks/tests.rs` — alignment, clipping, shared memory bound, expiry and
   generation separation.
 - `graph_source/tests/blocks.rs` — request counts on both paths, boundary reads, incomplete
@@ -441,6 +441,11 @@ A file that is not on disk:
 - `read_ahead.rs` — synchronous desktop scan detection and tiny-promotion cancellation,
   readdir snapshots, a bounded speculative window and cancellation; uses the existing
   in-memory range store; scan reads count on their own cloud-only handle.
+- `item_kernel_requests/tests/app_reads.rs` — captured VLC, Haruna, Okular,
+  LibreOffice and KIO thumbnail reads over fake Graph with 300 ms content latency;
+  desktop identities, seeking, verified landing and thumbnail-helper refusal.
+- `item_kernel_requests/tests/app_reads/traces.json` — normalized local strace
+  handles/ranges and corpus sizes for those replays; no media or account data.
 - `item_kernel_requests/tests/header_cache/lag.rs` — two concurrent Gwenview/KIO readers,
   120 cloud-only files, 300 ms fake Graph latency and cache-restart timing comparisons.
 - `item_kernel_requests/tests/header_cache.rs` — real disk-hit guard charging, counted
@@ -1276,7 +1281,7 @@ suite".
   of tiny files whose full reads stay in memory after activation; an interrupted libc
   pread receives EINTR promptly without an unanswered FUSE reply warning; failed-download
   and recovery IN_ATTRIB notifications agree with file and ancestor state attributes.
-- `download_guard.sh` — the group `download_guard`: app-download reclamation and its keep/open skip rules, bulk and background refusals, an ordinary app scope reading 100 files without counting, explicit actions,
+- `download_guard.sh` — the group `download_guard`: app-download reclamation and its keep/open skip rules, bulk and background refusals, Ghostscript thumbnail-parent classification, an ordinary app scope reading 100 files without counting, explicit actions,
   initial-placement readiness, missing-name accounting, low-space ranges, already-open handles and mmap.
 - `daemon_restarts.sh` — the group `daemon_restarts`: stops and kills in the middle of work.
 - `offline_keep.sh` — the group `offline_keep`: pinned offline saves, reconnect, conflicts,
@@ -1383,6 +1388,8 @@ What `docs/kio-behavior.md` was measured with.
 - `SECURITY.md` — what runs with which rights, the credentials, reporting a vulnerability.
 - `docs/limitations/` — the technical limits that cannot simply be removed, one file each; its
   `README.md` is the index.
+- `docs/app-read-patterns.md` — isolated desktop/media/office read captures, replay
+  methodology and limits; Ghostscript PDF-thumbnail provenance.
 - `docs/kio-behavior.md` — what KIO and Dolphin open, and what KIO does with the trash.
 - `docs/releasing.md` — the version, and how a release is made.
 - `docs/release-notes/` — the notes of each release, by its version.

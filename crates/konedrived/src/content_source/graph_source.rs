@@ -42,6 +42,7 @@
 // test: a_refused_listed_binding_sends_no_request
 // test: a_five_mib_file_in_128_kib_reads_costs_five_blocks
 // test: an_uncached_crossing_read_fetches_both_blocks_and_clips_the_last
+// test: a_partly_cached_crossing_read_fetches_only_its_missing_block
 // test: the_careful_path_fetches_and_remembers_whole_blocks
 // test: a_later_block_cannot_switch_the_version_even_after_cache_eviction
 // test: an_incomplete_block_is_never_cached_or_partly_answered
@@ -213,6 +214,8 @@ impl GraphSource {
         if link.etag != listed.etag { return Ok(None); }
         if !self.drive.cached_content_allowed() { return Ok(None); }
         let (ask_from, ask_end) = covering(from, end, listed.size);
+        let (ask_from, ask_end) = self.read_blocks.missing_edges(item_id, opened_as, ask_from, ask_end);
+        if ask_from == ask_end { return Ok(self.memory_range(item_id, opened_as, from, end)); }
         #[cfg(test)]
         if _foreground { self.foreground_requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst); }
         let download = match self.drive.download(&link.url, ask_from, Some(ask_end)).await {
@@ -246,7 +249,10 @@ impl GraphSource {
         if !self.drive.cached_content_allowed() || !self.cache_epoch_is(epoch) { return Ok(None); }
         let piece = Piece { from: ask_from, size: Some(listed.size), mtime: SystemTime::UNIX_EPOCH, version, bytes };
         self.read_blocks.keep(item_id, opened_as, &piece);
-        Ok(Some(piece.range(from, end)))
+        // A crossing read can reuse either cached edge. Assemble only proven
+        // bytes of this opened generation; concurrent eviction may instead
+        // make the caller fall back to the checked metadata path.
+        Ok(self.read_blocks.find_piece(item_id, opened_as, from, end).map(Piece::into_fetched))
     }
 
     /// Whether a range answered with the `ETag` `etag` by the listed version may be

@@ -130,6 +130,52 @@ PY
     check_holds "blocking is visible" "$(daemon guard apps)" background
 }
 
+
+# The installed PDF thumbnailer launches gs, which opens the PDF in its own
+# process. Copied interpreters exercise the actual procfs parent and executable
+# roles without needing a PDF renderer in the VM.
+kio_ghostscript_helpers_keep_the_thumbnail_role() {
+    begin_folder
+    seed_file A R away.pdf "remote PDF content"
+    seed_file B R here.pdf "resident PDF content"
+    register_folder read-only
+    daemon hydrate "$F/here.pdf" > /dev/null
+    for reader in kioworker gs; do
+        cp /usr/bin/python3 "$SRC/$reader"
+        chown 1000:1000 "$SRC/$reader"
+    done
+    mkdir -p /mnt/guard-cgroups
+    mount -t cgroup2 none /mnt/guard-cgroups
+    local app_group=/mnt/guard-cgroups/app-org.kde.dolphin-123.scope result
+    mkdir "$app_group"
+    result=$(bash -c 'echo $$ > "$1/cgroup.procs"; shift; exec "$@"' bash "$app_group" $U "$SRC/kioworker" - "$SRC/gs" "$F" /usr/lib/qt6/plugins/kf6/kio/thumbnail.so <<'PYCODE'
+import subprocess, sys
+code = """import errno, sys
+try:
+    print(open(sys.argv[1]).read())
+except OSError as e:
+    print(errno.errorcode[e.errno])
+print(open(sys.argv[2]).read())
+"""
+subprocess.run([sys.argv[1], '-c', code, sys.argv[2] + '/away.pdf', sys.argv[2] + '/here.pdf'], check=True)
+PYCODE
+)
+    check "Ghostscript in Dolphin's scope cannot fetch a thumbnail source" "$result" $'EACCES\nresident PDF content'
+    check "the helper fetched no cloud content" "$(onedrive count GET dl/A)" 0
+    check_state away.pdf online-only
+    # Revalidate the parent role on every request. The executable gs itself is
+    # not a background-reader rule, so a deliberate file worker still works.
+    result=$(bash -c 'echo $$ > "$1/cgroup.procs"; shift; exec "$@"' bash "$app_group" $U "$SRC/kioworker" - "$SRC/gs" "$F/away.pdf" /usr/lib/qt6/plugins/kf6/kio/file.so <<'PYCODE'
+import subprocess, sys
+subprocess.run([sys.argv[1], '-c', 'import sys; print(open(sys.argv[1]).read())', sys.argv[2]], check=True)
+PYCODE
+)
+    check "a file worker's Ghostscript child remains an ordinary reader" "$result" "remote PDF content"
+    check_within 10 "the deliberate read lands" state_is away.pdf hydrated
+    rmdir "$app_group"
+    umount /mnt/guard-cgroups
+}
+
 normal_open_and_kio_file_copy_still_hydrate() {
     begin_folder
     seed_file A R normal.txt "opened deliberately"
@@ -317,6 +363,7 @@ download_guard() {
         an_ordinary_app_unit_reads_a_hundred_files_without_a_bulk_block \
         missing_names_do_not_consume_or_bypass_the_download_limit \
         background_readers_are_refused_before_fetch_and_local_content_still_works \
+        kio_ghostscript_helpers_keep_the_thumbnail_role \
         normal_open_and_kio_file_copy_still_hydrate \
         explicit_hydrate_and_pin_bypass_a_blocked_app \
         read_below_the_reserve_stays_as_ranges \

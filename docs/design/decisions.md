@@ -1129,3 +1129,40 @@ narrowed cached scope schedules a refresh immediately and recovers a wider grant
 user action. An unknown grant stays false until a successful refresh; persisting an old
 observation would not establish Microsoft's current permission while offline. The settings
 row is a separate visual change.
+
+## Preserve KIO's PDF-thumbnail role in Ghostscript (2026-11-01)
+
+Isolated local-file strace captures on Kubuntu found that `gsthumbnail` starts
+`gs -sDEVICE=png16m -sOutputFile=- ... <file.pdf>` rather than reading the PDF in
+its `kioworker` process. Ghostscript read about 1.94 MB of a 46.2 MB image PDF
+for one preview. In a Dolphin app unit it was an ordinary reader, and its argv
+also looked like an explicit document launch: automatic previews could request
+a whole download, bypassing the thumbnail worker's existing refusal.
+
+Keep the existing `kio-thumbnail` role for a `gs` process whose direct parent is
+provably a KIO thumbnail worker. Revalidate the parent's executable and plugin
+arguments, and the child generation/parent relationship. Do not add `gs` to the
+background-reader executable list: deliberate Ghostscript use and KIO `file.so`
+children still follow their ordinary policy. Only Ghostscript needs the extra
+parent lookup; unrelated app reads keep their current inspection cost.
+
+No media landing rule changes. An argv launch still requests a verified whole
+copy at the first read; otherwise distinct 1 MiB coverage triggers hydration.
+Watching a whole video therefore keeps it on disk under the existing contract.
+Haruna's measured playlist probes of neighbouring videos do not reach that
+threshold in this corpus. Their metadata bandwidth is application behavior;
+suppressing those reads while allowing playback requires a separate intent or
+application decision. See [../app-read-patterns.md](../app-read-patterns.md).
+
+
+## Reuse cached edges of crossing media reads (2026-11-01)
+
+VLC and Haruna strace replays show reads straddling the 1 MiB cache boundary.
+A miss previously fetched the entire aligned interval, even with a complete
+cached block at one edge. The regression first fetched `0-1048575`, then
+`0-2097151` for a crossing packet. Listed-version requests now trim complete
+cached blocks at both edges and assemble the full answer from the same opened
+content's checked pieces. A missing middle remains one HTTP request; no finer
+fetch scheduler or parallelism is introduced. Cache eviction during the fetch
+can require the existing metadata fallback instead. Header publication still
+records only the original foreground interval and retains its existing limits.

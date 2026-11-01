@@ -402,7 +402,11 @@ A read through a handle opened not on disk is decided on the mount's thread
 A range asks the content source for the program's bytes (`ItemRangeFetcher::fetch_range`). Over
 Graph, a cache miss fetches the aligned 1 MiB block containing the range, clipped to the file's
 size; a range crossing blocks fetches from the first block's start to the last block's end.
-Files of at most 256 KiB retain their whole-file fetch. The same rule applies on both paths:
+Listed reads trim complete cached blocks from either edge of an aligned miss,
+so a playback read crossing a block boundary fetches only its missing edge. The
+answer is assembled only from version-checked bytes of that opened generation;
+concurrent eviction can fall back to the checked metadata path. A missing middle
+still uses one contiguous request. Files of at most 256 KiB retain their whole-file fetch. The same rule applies on both paths:
 
 - **By the listed version, in one request.** Where the row's OneDrive version is the opened
   content, the read carries the eTag and size OneDrive listed with it, and the OneDrive id of
