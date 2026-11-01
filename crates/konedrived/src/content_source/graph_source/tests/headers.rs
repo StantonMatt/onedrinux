@@ -3,6 +3,52 @@ use crate::config::header_cache::HeaderCache;
 
 const BUDGET: u64 = 256 * 1024 * 1024;
 
+#[tokio::test]
+async fn a_ready_prefetch_answers_without_waiting_for_a_paused_disk_lookup() {
+    let (graph, _) = folder_of(1, LARGE).await;
+    let dir = tempfile::tempdir().unwrap();
+    let cache = Arc::new(HeaderCache::open(dir.path().join("headers.sqlite"), BUDGET));
+    let source = cached_source(&graph, &cache);
+    let (content, listed) = opened_now(&graph, "P0");
+    source
+        .read_range("P0", &content, Some(&listed), 0, 4096)
+        .await
+        .unwrap();
+    cache.flush().await;
+    let piece = source
+        .read_blocks
+        .find_piece("P0", &content, 0, LARGE as u64)
+        .unwrap();
+    source.read_blocks.clear();
+    requests_since(&graph);
+    let release = cache.pause_for_test();
+    // A deterministic ready shared fetch publishes bytes when polled. The disk
+    // worker cannot answer first, regardless of timer scheduling or machine load.
+    let publish = source.clone();
+    let opened = content.clone();
+    let prepared = Arc::new(Prepared {
+        read: async move {
+            publish.read_blocks.keep("P0", &opened, &piece);
+            Ok(true)
+        }
+        .boxed()
+        .shared(),
+    });
+    crate::panic::lock(&source.pending).insert(
+        GraphSource::prepared_key("P0", &content, 0, 4096),
+        Arc::downgrade(&prepared),
+    );
+    let answer = source
+        .prepared_range("P0", &content, Some(&listed), 0, 4096)
+        .now_or_never();
+    release.send(()).unwrap();
+    assert_eq!(
+        read_whole(answer.expect("ready in the first poll").unwrap()).await,
+        bytes_of(0, LARGE)[..4096]
+    );
+    assert!(requests_since(&graph).is_empty());
+}
+
 fn cached_source(graph: &FakeGraph, cache: &Arc<HeaderCache>) -> GraphSource {
     GraphSource::with_headers(graph.client(), Some(Arc::clone(cache)))
 }
@@ -503,7 +549,7 @@ async fn forgotten_prepared_ranges_cannot_repopulate_memory_or_disk() {
         let epoch = cache.epoch();
         // Prepare the old-generation work without polling it. It will complete
         // strictly after forget, with no sleeps or timing assumptions.
-        let prepared = source.listed_read("P0", &content, &listed, 0, 4096);
+        let prepared = source.listed_read("P0", &content, &listed, 0, 4096, true);
         source.forget("P0");
         if listed_path {
             assert!(!prepared.read.clone().await.unwrap());

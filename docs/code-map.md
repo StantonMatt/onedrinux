@@ -129,8 +129,13 @@ The directories below are in layer order: a directory uses only the directories 
 - `model.rs` — what `config.toml` holds (version 2), and the rules of labels, client ids and
   held accounts.
 - `store.rs` — `ConfigStore`, the one owner of the file.
-- `header_cache.rs` — one per-account worker and bounded best-effort range publication,
-  authentication epochs, bounded lookup waits and sign-out deletion with failure propagation.
+- `header_cache.rs` — per-account ownership and bounded best-effort range publication,
+  authentication epochs, indexed misses, coalesced publication, bounded lookup waits and
+  sign-out deletion with failure propagation.
+- `header_cache/catalog.rs` — in-memory interval/fact metadata for stored and bounded
+  queued publications, fenced with cache invalidation; no content bytes.
+- `header_cache/reader.rs` — independent read-only lookups with short SQLite lock waits,
+  authentication epochs and acknowledged connection closure before deletion/rebuild.
 - `header_cache/database.rs` — private disposable SQLite schema, version pruning, covering
   lookup with batched maintenance, persistent deletion markers, per-range/item limits,
   30-day expiry and LRU eviction against actual file size.
@@ -431,6 +436,8 @@ A file that is not on disk:
 - `read_ahead.rs` — synchronous desktop scan detection and tiny-promotion cancellation,
   readdir snapshots, a bounded speculative window and cancellation; uses the existing
   in-memory range store; scan reads count on their own cloud-only handle.
+- `item_kernel_requests/tests/header_cache/lag.rs` — two concurrent Gwenview/KIO readers,
+  120 cloud-only files, 300 ms fake Graph latency and cache-restart timing comparisons.
 - `item_kernel_requests/tests/header_cache.rs` — real disk-hit guard charging, counted
   tiny-file hydration outside scans, and a 24-file restart/Exiv2 scan with concurrent read-ahead.
 - `item_kernel_requests/tests/read_ahead.rs` — 300 ms/40-file timing and request

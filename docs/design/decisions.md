@@ -1054,7 +1054,8 @@ purpose is to make the next cloud-only listing fast. SQLite writes run on a boun
 best-effort account worker, never blocking the FUSE read on a write. An unavailable cache
 costs a miss; a lookup taking over 20 ms falls through rather than waiting behind writes
 or maintenance. Lookup answers precede their pruning/LRU journal commits; those updates
-are batched after 50 ms idle or 64 uses, and applied before any later insertion so
+are batched (hit timestamps as described below; miss/pruning observations after 50 ms
+idle or 64 observations) and applied before any later insertion so
 old version pruning cannot remove new rows. Corruption or an unknown schema permits one disposable rebuild.
 
 Persisted MIME heads never suppress folder-scan read-ahead. Doing so froze Gwenview on
@@ -1063,4 +1064,24 @@ Read-ahead still warms the first min(size, 1 MiB) of each file in the existing b
 window, six at a time, just as before this disk tier. A late disk lookup also preserves
 any full block that arrived meanwhile. Only bytes actually read persist; reopening can
 use the same speculative bandwidth as before, while foreground probes reuse memory.
+Repeated foreground memory hits previously published the same bytes again, even when a
+larger row already covered them. Those writes could fill the 64-record queue, drop a new
+file's first head, and delay disk lookups behind redundant journal commits. The new
+in-memory interval catalog skips known misses and coalesces covered disk and queued
+publications; hits coalesce LRU timestamps on the existing catalog rows. They flush
+in groups of 64 after 50 ms without a hit, or before insertion/shutdown: a warm scan
+must not contend with its own LRU commits. Miss/version-pruning observations have a
+separate 64-entry queue budget. The content queue now bounds actual bytes (4 MiB) separately from its
+1024-record ceiling: the previous 64-record ceiling discarded bursts of small probes
+with much of the content budget unused. The worker refreshes the
+catalog after writes and removals, and invalidation fences it before queued cleanup.
+Known disk hits use an independent read-only connection and worker, with at most a
+5 ms SQLite lock wait inside the 20 ms answer deadline. They never queue behind
+publication, LRU or vacuum. Invalidation fences both workers, and deletion/rebuild
+acknowledges closing the reader before replacing files. An existing read-ahead request
+races the lookup so bytes arriving in memory need not wait for SQLite. A completed speculative owner is
+also followed by another memory check. The 64 KiB range, 256 KiB item and total disk
+budgets remain; a single covering row is still required. Joining rows cannot restore a
+missing byte-zero prefix, and is unnecessary for the foreground intervals kept here.
+
 No other application or OS configuration is changed. See [mount.md](mount.md) §5.1.1.

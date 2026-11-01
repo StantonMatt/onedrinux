@@ -1,6 +1,7 @@
 //! Foreground-only publication and lookup of persistent ranges, with their original facts
 //! and range binding. Speculative reads use memory_range and never publish disk records.
 
+// test: a_ready_prefetch_answers_without_waiting_for_a_paused_disk_lookup
 // test: a_header_survives_memory_eviction_and_source_restart_without_graph_requests
 // test: a_disk_header_of_another_content_misses_and_old_rows_are_deleted
 // test: read_ahead_bytes_reach_disk_only_when_a_reader_asks_for_them

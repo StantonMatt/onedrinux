@@ -1,4 +1,5 @@
-//! SQLite operations for the disposable header cache; only the account's worker calls these.
+//! SQLite operations for the disposable header cache. The writer owns mutations;
+//! the read-only worker shares the covering query.
 //!
 //! Schema 1 stores an item id, serialized content version, offset, bytes, opaque source
 //! facts and last-use time. A covering row answers a request; partial coverage misses.
@@ -25,6 +26,7 @@ const SCHEMA: i64 = 1;
 pub(super) struct Database {
     pub(super) conn: Connection,
     limit: u64,
+    pub(super) removed: std::cell::Cell<bool>,
 }
 
 pub(super) fn now() -> i64 {
@@ -216,17 +218,24 @@ impl Database {
                 COMMIT;",
             )?;
         }
-        let db = Self { conn, limit };
+        let db = Self {
+            conn,
+            limit,
+            removed: std::cell::Cell::new(true),
+        };
         db.expire(now())?;
         db.evict()?;
         Ok(db)
     }
 
     fn expire(&self, at: i64) -> anyhow::Result<()> {
-        self.conn.execute(
+        if self.conn.execute(
             "DELETE FROM headers WHERE last_used <= ?1",
             [at.saturating_sub(LIFETIME)],
-        )?;
+        )? > 0
+        {
+            self.removed.set(true);
+        }
         Ok(())
     }
 
@@ -236,10 +245,13 @@ impl Database {
     }
 
     fn current(&self, item: &str, version: &str) -> anyhow::Result<()> {
-        self.conn.execute(
+        if self.conn.execute(
             "DELETE FROM headers WHERE item = ?1 AND version <> ?2",
             params![item, version],
-        )?;
+        )? > 0
+        {
+            self.removed.set(true);
+        }
         Ok(())
     }
 
@@ -253,34 +265,14 @@ impl Database {
         end: u64,
         at: i64,
     ) -> anyhow::Result<Option<Record>> {
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT offset, bytes, facts FROM headers
-             WHERE item = ?1 AND version = ?2 AND offset <= ?3 AND offset + length(bytes) >= ?4
-             AND last_used > ?5 ORDER BY last_used DESC LIMIT 1",
-                params![
-                    item,
-                    version,
-                    from as i64,
-                    end as i64,
-                    at.saturating_sub(LIFETIME)
-                ],
-                |row| {
-                    Ok(Record {
-                        from: row.get::<_, i64>(0)? as u64,
-                        bytes: row.get(1)?,
-                        facts: row.get(2)?,
-                    })
-                },
-            )
-            .optional()?)
+        lookup(&self.conn, item, version, from, end, at)
     }
 
     /// Batch lookup maintenance after foreground answers. Call before an insertion
     /// so an earlier version's delayed pruning cannot discard the newly kept row.
-    pub(super) fn use_lookups(&self, used: &[LookupUse]) -> anyhow::Result<()> {
+    pub(super) fn use_lookups(&self, used: &[LookupUse]) -> anyhow::Result<Vec<LookupUse>> {
         let tx = self.conn.unchecked_transaction()?;
+        let mut touched = Vec::new();
         for usage in used {
             self.expire(usage.at)?;
             self.current(&usage.item, &usage.version)?;
@@ -291,10 +283,18 @@ impl Database {
                     "UPDATE headers SET last_used = ?1 WHERE item = ?2 AND version = ?3 AND offset = ?4",
                     params![usage.at, usage.item, usage.version, record.from as i64],
                 )?;
+                touched.push(LookupUse {
+                    epoch: usage.epoch,
+                    item: usage.item.clone(),
+                    version: usage.version.clone(),
+                    from: record.from,
+                    end: record.from + record.bytes.len() as u64,
+                    at: usage.at,
+                });
             }
         }
         tx.commit()?;
-        Ok(())
+        Ok(touched)
     }
 
     #[cfg(test)]
@@ -330,10 +330,13 @@ impl Database {
             return Ok(());
         }
         let tx = self.conn.transaction()?;
-        tx.execute(
+        if tx.execute(
             "DELETE FROM headers WHERE last_used <= ?1 OR (item = ?2 AND version <> ?3)",
             params![at.saturating_sub(LIFETIME), item, version],
-        )?;
+        )? > 0
+        {
+            self.removed.set(true);
+        }
         let (total, old): (i64, i64) = tx.query_row(
             "SELECT coalesce(sum(length(bytes)), 0), coalesce(max(CASE WHEN offset = ?3 THEN length(bytes) END), 0)
              FROM headers WHERE item = ?1 AND version = ?2", params![item, version, record.from as i64], |row| Ok((row.get(0)?, row.get(1)?)))?;
@@ -371,6 +374,35 @@ impl Database {
         Ok((self.bytes_on_disk()?, rows as u64))
     }
 
+    /// Metadata only, never copies the content into the catalog. A single item's
+    /// publication normally refreshes only that item; eviction refreshes all rows.
+    pub(super) fn inventory(&self, item: Option<&str>) -> anyhow::Result<super::catalog::Entries> {
+        let sql = if item.is_some() {
+            "SELECT item, version, offset, length(bytes), facts, last_used FROM headers WHERE item = ?1"
+        } else {
+            "SELECT item, version, offset, length(bytes), facts, last_used FROM headers WHERE ?1 IS NULL"
+        };
+        let mut query = self.conn.prepare(sql)?;
+        let rows = query.query_map([item], |row| {
+            Ok((
+                (row.get::<_, String>(0)?, row.get::<_, String>(1)?),
+                super::catalog::Range {
+                    from: row.get::<_, i64>(2)? as u64,
+                    end: row.get::<_, i64>(2)? as u64 + row.get::<_, i64>(3)? as u64,
+                    facts: row.get(4)?,
+                    at: row.get(5)?,
+                    used: None,
+                },
+            ))
+        })?;
+        let mut entries = super::catalog::Entries::new();
+        for row in rows {
+            let (key, range) = row?;
+            entries.entry(key).or_default().push(range);
+        }
+        Ok(entries)
+    }
+
     fn evict(&self) -> anyhow::Result<()> {
         loop {
             let bytes = self.bytes_on_disk()?;
@@ -384,6 +416,39 @@ impl Database {
             if removed == 0 {
                 return Ok(());
             }
+            self.removed.set(true);
         }
     }
+}
+
+/// Shared query for the writer's maintenance and the independent read connection.
+pub(super) fn lookup(
+    conn: &Connection,
+    item: &str,
+    version: &str,
+    from: u64,
+    end: u64,
+    at: i64,
+) -> anyhow::Result<Option<Record>> {
+    Ok(conn
+        .query_row(
+            "SELECT offset, bytes, facts FROM headers
+             WHERE item = ?1 AND version = ?2 AND offset <= ?3 AND offset + length(bytes) >= ?4
+             AND last_used > ?5 ORDER BY last_used DESC LIMIT 1",
+            params![
+                item,
+                version,
+                from as i64,
+                end as i64,
+                at.saturating_sub(LIFETIME)
+            ],
+            |row| {
+                Ok(Record {
+                    from: row.get::<_, i64>(0)? as u64,
+                    bytes: row.get(1)?,
+                    facts: row.get(2)?,
+                })
+            },
+        )
+        .optional()?)
 }

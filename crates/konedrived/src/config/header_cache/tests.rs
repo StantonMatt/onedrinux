@@ -10,6 +10,194 @@ fn record(from: u64, size: usize) -> Record {
     }
 }
 
+#[tokio::test]
+async fn header_cache_memory_hits_coalesce_lru_on_rows_until_the_writer_flushes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("headers.sqlite");
+    let before = now() - 1000;
+    {
+        let mut db = Database::open(&path, 8 * 1024 * 1024).unwrap();
+        db.keep("head", "v", &record(0, 16384), before).unwrap();
+    }
+    let cache = HeaderCache::open(path.clone(), 8 * 1024 * 1024);
+    cache.flush().await;
+    let release = cache.pause_for_test();
+    for _ in 0..1000 {
+        cache.keep(0, "head", "v".into(), record(0, 4096));
+    }
+    let dirty = crate::panic::lock(&cache.catalog).dirty;
+    let content_slots = cache.writes.available_permits();
+    let metadata_slots = cache.touches.available_permits();
+    let db = rusqlite::Connection::open(path).unwrap();
+    let last_used = || {
+        db.query_row(
+            "SELECT last_used FROM headers WHERE item = 'head'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap()
+    };
+    let paused = last_used();
+    release.send(()).unwrap();
+    cache.flush().await;
+    assert_eq!(
+        (dirty, content_slots, metadata_slots),
+        (1, WRITE_RECORDS, 64)
+    );
+    assert_eq!(
+        paused, before,
+        "no LRU write or per-read command on the paused writer"
+    );
+    assert!(
+        last_used() >= before + 1000,
+        "the single coalesced timestamp becomes durable"
+    );
+    assert_eq!(crate::panic::lock(&cache.catalog).dirty, 0);
+}
+
+#[tokio::test]
+async fn header_cache_repeated_memory_hits_do_not_crowd_out_a_new_head() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("headers.sqlite");
+    let cache = HeaderCache::open(path.clone(), 8 * 1024 * 1024);
+    cache.keep(0, "known", "v".into(), record(0, 16384));
+    cache.flush().await;
+    let (entered, inside) = mpsc::channel();
+    let (release, wait) = mpsc::channel();
+    cache.send(Command::Pause {
+        entered,
+        release: wait,
+    });
+    inside
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    for _ in 0..64 {
+        cache.keep(0, "known", "v".into(), record(0, 4096));
+    }
+    let touches = cache.touches.available_permits();
+    cache.keep(0, "new-head", "v".into(), record(0, 16384));
+    cache.keep(0, "new-head", "v".into(), record(33, 4096));
+    release.send(()).unwrap();
+    cache.flush().await;
+    assert_eq!(
+        touches, 64,
+        "covered reads coalesce timestamps without queued metadata"
+    );
+    cache.keep(0, "new-head", "v".into(), record(33, 4096));
+    cache.flush().await;
+    // Admission is a persistence invariant, independent of the public lookup's
+    // deliberately bounded deadline under unrelated concurrent test I/O.
+    let db = rusqlite::Connection::open(path).unwrap();
+    let covers = |from: i64, end: i64| {
+        db.query_row(
+        "SELECT EXISTS (SELECT 1 FROM headers WHERE item = 'new-head' AND version = 'v' AND offset <= ?1 AND offset + length(bytes) >= ?2)",
+        [from, end], |row| row.get::<_, bool>(0)).unwrap()
+    };
+    assert!(covers(33, 4129));
+    assert!(
+        covers(0, 16384),
+        "already-covered memory hits leave capacity for the first real head"
+    );
+}
+
+#[tokio::test]
+async fn header_cache_small_records_have_a_separate_bounded_queue() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = HeaderCache::open(dir.path().join("headers.sqlite"), 8 * 1024 * 1024);
+    let release = cache.pause_for_test();
+    for n in 0..WRITE_RECORDS + 1 {
+        cache.keep(0, &format!("head-{n}"), "v".into(), record(0, 1));
+    }
+    let records_left = cache.writes.available_permits();
+    let bytes_left = cache.write_bytes.available_permits();
+    cache.invalidate();
+    release.send(()).unwrap();
+    cache.flush().await;
+    assert_eq!(records_left, 0);
+    assert_eq!(bytes_left, WRITE_BYTES - WRITE_RECORDS);
+    assert_eq!(cache.writes.available_permits(), WRITE_RECORDS);
+    assert_eq!(cache.write_bytes.available_permits(), WRITE_BYTES);
+}
+
+#[tokio::test]
+async fn header_cache_catalog_tracks_eviction_versions_and_forget() {
+    use futures_util::FutureExt;
+    let dir = tempfile::tempdir().unwrap();
+    let cache = HeaderCache::open(dir.path().join("headers.sqlite"), 180 * 1024);
+    for item in ["first", "second"] {
+        cache.keep(0, item, "v".into(), record(0, MAX_RANGE as usize));
+        cache.flush().await;
+    }
+    assert!(cache.find(0, "first", "v".into(), 0, 1).await.is_some());
+    cache.keep(0, "third", "v".into(), record(0, MAX_RANGE as usize));
+    cache.flush().await;
+    assert!(matches!(
+        cache.find(0, "second", "v".into(), 0, 1).now_or_never(),
+        Some(None)
+    ));
+    cache.keep(0, "third", "new".into(), record(0, 1024));
+    cache.flush().await;
+    assert!(matches!(
+        cache.find(0, "third", "v".into(), 0, 1).now_or_never(),
+        Some(None)
+    ));
+    assert!(cache.find(0, "third", "new".into(), 0, 1).await.is_some());
+    cache.forget("third");
+    assert!(matches!(
+        cache
+            .find(cache.epoch(), "third", "new".into(), 0, 1)
+            .now_or_never(),
+        Some(None)
+    ));
+    cache.flush().await;
+    assert!(matches!(
+        cache
+            .find(cache.epoch(), "third", "new".into(), 0, 1)
+            .now_or_never(),
+        Some(None)
+    ));
+}
+
+#[tokio::test]
+async fn header_cache_known_misses_and_pending_duplicates_never_wait_for_the_writer() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = HeaderCache::open(dir.path().join("headers.sqlite"), 8 * 1024 * 1024);
+    cache.keep(0, "known", "v".into(), record(33, 4096));
+    cache.flush().await;
+    let (entered, inside) = mpsc::channel();
+    let (release, wait) = mpsc::channel();
+    cache.send(Command::Pause {
+        entered,
+        release: wait,
+    });
+    inside
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    for _ in 0..100 {
+        cache.keep(0, "new-head", "v".into(), record(0, 16384));
+        cache.keep(0, "new-head", "v".into(), record(33, 4096));
+    }
+    let queued = WRITE_RECORDS - cache.writes.available_permits();
+    // No yield or timer is needed: both absent intervals must complete in the
+    // first poll while the worker cannot execute any command.
+    use futures_util::FutureExt;
+    let absent = cache.find(0, "absent", "v".into(), 0, 4096).now_or_never();
+    let gap = cache.find(0, "known", "v".into(), 0, 4096).now_or_never();
+    cache.invalidate();
+    let fenced = cache
+        .find(cache.epoch(), "known", "v".into(), 33, 4096)
+        .now_or_never();
+    release.send(()).unwrap();
+    cache.flush().await;
+    assert_eq!(
+        queued, 1,
+        "one queued head covers every repeated foreground interval"
+    );
+    assert!(
+        matches!(absent, Some(None)) && matches!(gap, Some(None)) && matches!(fenced, Some(None))
+    );
+}
+
 #[test]
 fn header_cache_keeps_ranges_across_restart_and_preserves_facts() {
     let dir = tempfile::tempdir().unwrap();
@@ -443,11 +631,12 @@ async fn header_cache_publication_never_waits_for_a_paused_writer_and_has_a_boun
             record(0, MAX_RANGE as usize),
         );
     }
-    assert_eq!(cache.writes.available_permits(), 0);
+    assert_eq!(cache.write_bytes.available_permits(), 0);
     cache.invalidate();
     release.send(()).unwrap();
     cache.flush().await;
-    assert_eq!(cache.writes.available_permits(), 64);
+    assert_eq!(cache.writes.available_permits(), WRITE_RECORDS);
+    assert_eq!(cache.write_bytes.available_permits(), WRITE_BYTES);
     assert!(
         !path.exists(),
         "all queued pre-invalidation writes were fenced"
@@ -476,7 +665,7 @@ async fn header_cache_lock_contention_never_deletes_a_good_database() {
 }
 
 #[tokio::test]
-async fn header_cache_lookup_falls_through_while_writes_are_queued() {
+async fn header_cache_lookup_bypasses_queued_writes() {
     let dir = tempfile::tempdir().unwrap();
     let cache = HeaderCache::open(dir.path().join("headers.sqlite"), 8 * 1024 * 1024);
     cache.keep(0, "head", "v".into(), record(0, 4096));
@@ -498,7 +687,7 @@ async fn header_cache_lookup_falls_through_while_writes_are_queued() {
             record(0, MAX_RANGE as usize),
         );
     }
-    assert_eq!(cache.writes.available_permits(), 0);
+    assert_eq!(cache.write_bytes.available_permits(), 0);
     let began = std::time::Instant::now();
     let found = tokio::time::timeout(
         std::time::Duration::from_millis(100),
@@ -511,8 +700,8 @@ async fn header_cache_lookup_falls_through_while_writes_are_queued() {
     cache.flush().await;
     eprintln!("header lookup behind 64 paused writes: {elapsed:?}");
     assert!(
-        matches!(found, Ok(None)),
-        "busy disk must become a prompt miss"
+        matches!(found, Ok(Some(_))),
+        "a lookup bypasses the paused writer and all queued publications"
     );
     let began = std::time::Instant::now();
     let idle = cache.find(0, "head", "v".into(), 0, 4096).await;

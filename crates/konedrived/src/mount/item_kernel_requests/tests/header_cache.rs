@@ -7,6 +7,8 @@ use crate::content_source::{
 };
 use crate::download_guard::{DownloadGuard, GuardConfig, ReadAheadCaller};
 
+mod lag;
+
 struct CachedMount {
     fixture: ItemFixture,
     graph: crate::fake_onedrive::FakeGraph,

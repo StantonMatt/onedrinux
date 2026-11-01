@@ -473,7 +473,13 @@ cannot answer later Exiv2 probes beyond it. The disk tier never suppresses that 
 replaces a full memory block with a late head lookup. It never retains unasked read-ahead
 or block padding, and never reads hydrated backing files. Up to 256 KiB of ranges per item and opened `ContentVersion` are kept, first come; overlapping stored
 ranges conservatively consume that budget too. One row must cover the whole request:
-partial coverage misses, without stitching disk rows or mixing sources.
+partial coverage misses, without stitching disk rows or mixing sources. An in-memory
+catalog of the stored intervals and version facts is loaded on the cache worker at
+startup and updated after publication, eviction and invalidation. A range absent from
+that catalog skips SQLite immediately, including during startup. Covered memory reads
+coalesce their last-use timestamps on the indexed rows instead of queuing duplicate
+content or one LRU command per read; covering queued publications are coalesced too. This leaves the bounded content queue available for new
+foreground heads. The catalog stores metadata, never speculative or cached content bytes.
 
 Rows preserve the original size, modification time, cTag/hash and first-range metadata /
 endpoint ETag binding. Lookup uses the same full opened generation as the memory store,
@@ -503,14 +509,25 @@ at startup, lookup and insertion; the worker also prunes hourly while idle.
 Insertions evict least recently used rows in batches; full auto-vacuum bounds the actual
 SQLite file, including indexes and metadata, rather than only the content bytes.
 
-A single account worker runs all SQLite and file I/O. A foreground lookup waits at most
+An account writer runs publication, maintenance and file management; an independent
+read-only connection and worker answer known disk hits without waiting behind its queue.
+SQLite lock contention waits at most 5 ms; the overall foreground lookup waits at most
 20 ms per attempt before falling through to the existing memory/network path. On a miss,
-the mount can try both `prepared_range` and `read_range`, each with that budget. Queued writes,
-eviction, vacuum or a slow disk cannot extend that FUSE lookup wait. Cancelled queued lookups are
-skipped. The worker answers each lookup before its expiry, version-pruning and LRU
-maintenance. At most 64 lookup uses collect for one transaction after 50 ms idle,
-when that bound fills, or before an insertion; invalidation discards old uses. Writes never wait for that worker or queue
-space: at most 64 records / 4 MiB of content may be queued, and excess writes are skipped. Read/write failures are warned once and ignored;
+the mount can try both `prepared_range` and `read_range`, each with that budget. A slow
+disk cannot extend that FUSE lookup wait. Cancelled queued lookups are skipped.
+Invalidation fences both workers immediately; sign-out and rebuild close the reader
+with an acknowledged barrier before deleting or replacing the database. An existing read-ahead request and a known disk hit race to answer a foreground
+prepared range; either may finish first. If the speculative owner disappears during a
+lookup, memory is checked again before acquiring a foreground pool slot.
+Lookup answers enqueue expiry, version-pruning and LRU maintenance on the writer
+without waiting for it. Dirty last-use timestamps are bounded by the stored catalog rows. After 50 ms
+without a hit, the writer flushes at most 64 in one transaction; active warm scans
+do no LRU writes. An insertion or shutdown flushes pending timestamps before eviction,
+and invalidation discards them. Up to 64 best-effort miss/version-pruning observations
+may queue separately, without consuming content slots.
+Writes never wait for that worker or queue space: at most 1024 records and 4 MiB of content may be queued, and excess writes are skipped.
+The independent byte bound lets small 4 KiB probes use the same content budget that
+previously allowed only 64 maximum-sized records. Read/write failures are warned once and ignored;
 awaited deletion failures are returned to the caller. A corrupt or
 unsupported database is deleted and rebuilt once, then disabled on further failure;
 lock contention disables it without deleting another process's database. One startup info

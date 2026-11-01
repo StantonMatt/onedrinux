@@ -49,6 +49,7 @@
 // test: read_ahead_and_a_real_read_share_one_request_and_keep_the_single_version_binding
 // test: signing_out_cancels_speculative_bodies
 // test: a_real_read_keeps_its_joined_request_when_speculation_is_cancelled
+// test: a_ready_prefetch_answers_without_waiting_for_a_paused_disk_lookup
 // test: a_header_survives_memory_eviction_and_source_restart_without_graph_requests
 // test: read_ahead_prefetches_past_persisted_heads_after_restart
 // test: signed_out_or_revoked_accounts_never_serve_disk_headers
@@ -119,6 +120,8 @@ pub(crate) struct GraphSource {
     headers: Option<Arc<crate::config::header_cache::HeaderCache>>,
     /// Keeps the token source's weak invalidation callback registered until this source drops.
     _on_invalidate: Arc<konedrive_graph::token::InvalidateHook>,
+    #[cfg(test)]
+    foreground_requests: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl GraphSource {
@@ -143,7 +146,14 @@ impl GraphSource {
             if let Some(headers) = &clear_headers { headers.invalidate(); }
         });
         drive.on_token_invalidate(&on_invalidate);
-        Self { drive, pending: Default::default(), invalidated, ranges: Default::default(), cache_use, links, read_blocks, headers, _on_invalidate: on_invalidate }
+        Self { drive, pending: Default::default(), invalidated, ranges: Default::default(), cache_use, links, read_blocks, headers, _on_invalidate: on_invalidate, #[cfg(test)] foreground_requests: Default::default() }
+    }
+
+    /// Actual content-range requests initiated by foreground reads, excluding
+    /// speculative owners and memory/disk answers, for the latency regression.
+    #[cfg(test)]
+    pub(crate) fn foreground_range_requests(&self) -> usize {
+        self.foreground_requests.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn prepared_key(item_id: &str, opened_as: &ContentVersion, from: u64, end: u64) -> PreparedKey {
@@ -151,7 +161,7 @@ impl GraphSource {
         (item_id.to_owned(), opened_as.clone(), from, end)
     }
 
-    fn listed_read(&self, item_id: &str, opened_as: &ContentVersion, listed: &ListedContent, from: u64, end: u64) -> Arc<Prepared> {
+    fn listed_read(&self, item_id: &str, opened_as: &ContentVersion, listed: &ListedContent, from: u64, end: u64, _foreground: bool) -> Arc<Prepared> {
         let mut pending = crate::panic::lock(&self.pending);
         pending.retain(|_, weak| weak.strong_count() > 0);
         let entry = pending.entry(Self::prepared_key(item_id, opened_as, from, end)).or_default();
@@ -169,7 +179,7 @@ impl GraphSource {
             tokio::select! {
                 biased;
                 _ = cancelled => Err(SourceError::SignedOut("the listed read's authentication was invalidated".into())),
-                answer = source.read_listed(&item_id, &opened_as, &listed, from, end, epoch) => answer.map(|answer| answer.is_some()),
+                answer = source.read_listed(&item_id, &opened_as, &listed, from, end, epoch, _foreground) => answer.map(|answer| answer.is_some()),
             }
         }.boxed().shared();
         let prepared = Arc::new(Prepared { read });
@@ -179,7 +189,7 @@ impl GraphSource {
 
     /// A range of `opened_as` by the listed version, in one request: `None` when it cannot
     /// be taken that way, and the metadata is to be asked. See the module's documentation.
-    async fn read_listed(&self, item_id: &str, opened_as: &ContentVersion, listed: &ListedContent, from: u64, end: u64, epoch: Option<u64>) -> Result<Option<Fetched>, SourceError> {
+    async fn read_listed(&self, item_id: &str, opened_as: &ContentVersion, listed: &ListedContent, from: u64, end: u64, epoch: Option<u64>, _foreground: bool) -> Result<Option<Fetched>, SourceError> {
         let ContentVersion::Hashed { hash, ctag, .. } = opened_as else { return Ok(None) };
         if listed.etag.is_empty() || listed.size == 0 {
             return Ok(None);
@@ -203,6 +213,8 @@ impl GraphSource {
         if link.etag != listed.etag { return Ok(None); }
         if !self.drive.cached_content_allowed() { return Ok(None); }
         let (ask_from, ask_end) = covering(from, end, listed.size);
+        #[cfg(test)]
+        if _foreground { self.foreground_requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst); }
         let download = match self.drive.download(&link.url, ask_from, Some(ask_end)).await {
             Ok(download) => download,
             Err(DriveError::UrlExpired | DriveError::Failed(_)) => {
@@ -271,6 +283,8 @@ impl GraphSource {
             None => self.drive.content_url(item_id).await.map_err(source_error)?,
         };
         let (ask_from, ask_end) = covering(from, end, item.size.unwrap_or(opened_as.size()));
+        #[cfg(test)]
+        self.foreground_requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let download = self.drive.download(&address, ask_from, Some(ask_end)).await.map_err(source_error)?;
         if download.served_from != ask_from {
             return Err(SourceError::Transient("the range started at another offset".into()));
@@ -336,7 +350,7 @@ impl ContentSource for GraphSource {
         if let Some(answer) = self.disk_range(item_id, opened_as, listed, from, end, epoch).await { return Ok(answer); }
         if !self.drive.cached_content_allowed() { return self.read_checked(item_id, opened_as, from, end, epoch).await; }
         if let Some(listed) = listed {
-            let prepared = self.listed_read(item_id, opened_as, listed, from, end);
+            let prepared = self.listed_read(item_id, opened_as, listed, from, end, true);
             prepared.read.clone().await?;
             if let Some(answer) = self.reader_memory(item_id, opened_as, from, end, epoch) { return Ok(answer); }
         }
@@ -350,11 +364,24 @@ impl ContentSource for GraphSource {
     async fn prepared_range(&self, item_id: &str, opened_as: &ContentVersion, listed: Option<&ListedContent>, from: u64, end: u64) -> Option<Fetched> {
         let epoch = self.headers.as_ref().map(|headers| headers.epoch());
         if let Some(answer) = self.reader_memory(item_id, opened_as, from, end, epoch) { return Some(answer); }
-        if let Some(answer) = self.disk_range(item_id, opened_as, listed, from, end, epoch).await { return Some(answer); }
-        let prepared = crate::panic::lock(&self.pending).get(&Self::prepared_key(item_id, opened_as, from, end)).and_then(std::sync::Weak::upgrade)?;
-        // A real read keeps polling the shared request if the scan is cancelled or
-        // replaced. Only speculative owners dropping cannot force a foreground retry.
-        let _ = prepared.read.clone().await;
+        let prepared = crate::panic::lock(&self.pending).get(&Self::prepared_key(item_id, opened_as, from, end)).and_then(std::sync::Weak::upgrade);
+        let disk = self.disk_range(item_id, opened_as, listed, from, end, epoch);
+        tokio::pin!(disk);
+        if let Some(prepared) = prepared {
+            // Neither an existing speculative fetch nor a disk answer waits for
+            // the other tier. A busy writer cannot delay bytes already arriving.
+            tokio::select! {
+                answer = &mut disk => { if answer.is_some() { return answer; } }
+                _ = prepared.read.clone() => {
+                    if let Some(answer) = self.reader_memory(item_id, opened_as, from, end, epoch) { return Some(answer); }
+                    return disk.await;
+                }
+            }
+            // A real read keeps polling the shared request if the scan is cancelled or
+            // replaced. Only speculative owners dropping cannot force a foreground retry.
+            let _ = prepared.read.clone().await;
+        } else if let Some(answer) = disk.await { return Some(answer); }
+        // The speculative owner may have finished and disappeared during lookup.
         self.reader_memory(item_id, opened_as, from, end, epoch)
     }
 
@@ -362,7 +389,7 @@ impl ContentSource for GraphSource {
         if !self.drive.cached_content_allowed() || self.drive.pool().throughput().retry_after > 0 { return; }
         let end = opened_as.size().min(read_blocks::BLOCK);
         if end == 0 || self.memory_range(item_id, opened_as, 0, end).is_some() { return; }
-        let prepared = self.listed_read(item_id, opened_as, listed, 0, end);
+        let prepared = self.listed_read(item_id, opened_as, listed, 0, end, false);
         match prepared.read.clone().await {
             Ok(true) => tracing::debug!("read ahead of {item_id}: first {end} bytes retained"),
             Ok(false) => {},
