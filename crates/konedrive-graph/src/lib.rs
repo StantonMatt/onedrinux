@@ -23,6 +23,9 @@ pub mod quickxor;
 pub mod secret;
 pub mod token;
 
+#[cfg(any(test, feature = "testing"))]
+pub mod test_server;
+
 /// `mutex`, locked; also after a holder of it panicked. What is done under a lock of this
 /// crate is one assignment or one reading, so the data is whole either way.
 pub(crate) fn lock<T: ?Sized>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {

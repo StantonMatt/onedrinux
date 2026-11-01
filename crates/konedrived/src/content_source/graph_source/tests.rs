@@ -4,7 +4,8 @@ use konedrive_graph::token::StaticToken;
 use serde_json::json;
 use tokio::io::AsyncReadExt;
 use wiremock::matchers::{method, path, path_regex};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use konedrive_graph::test_server::MockServer;
+use wiremock::{Mock, ResponseTemplate};
 
 use super::*;
 

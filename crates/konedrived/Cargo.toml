@@ -11,7 +11,7 @@ publish = false
 # builds the fake OneDrive (`crate::fake_onedrive`, on wiremock), which the suite runs the
 # daemon's service against inside the VM, and the test support of `account_folder/` (`account_folder::testing`),
 # which makes a service with a `config.toml` in a temporary directory.
-fault-injection = ["dep:wiremock", "dep:tempfile"]
+fault-injection = ["dep:wiremock", "dep:tempfile", "konedrive-graph/testing"]
 # Development builds only (issue #79): each account's `org.konedrive.TokenExport`, which
 # hands out access tokens for the stress tests and the test-account harness. Off by default: the released package has no such interface, and
 # its `%build` refuses a daemon that names it. `scripts/dev-install.sh` turns it on.

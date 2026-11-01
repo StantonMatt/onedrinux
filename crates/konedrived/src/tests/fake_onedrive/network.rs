@@ -9,7 +9,7 @@ use tokio::task::JoinHandle;
 /// A gated wiremock server. Dereferencing exposes its mock/recording operations,
 /// while `uri()` and `address()` always name the transport clients must use.
 pub struct Server {
-    inner: Arc<wiremock::MockServer>,
+    inner: Arc<konedrive_graph::test_server::MockServer>,
     address: std::net::SocketAddr,
     down: Arc<watch::Sender<bool>>,
     listener: JoinHandle<()>,
@@ -18,7 +18,7 @@ pub struct Server {
 
 impl Server {
     pub(super) async fn start() -> Self {
-        let inner = Arc::new(wiremock::MockServer::start().await);
+        let inner = Arc::new(konedrive_graph::test_server::MockServer::start().await);
         let serving = Arc::clone(&inner);
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("the fake Graph transport gate");
         let address = listener.local_addr().unwrap();
@@ -69,7 +69,7 @@ impl Server {
 }
 
 impl std::ops::Deref for Server {
-    type Target = wiremock::MockServer;
+    type Target = konedrive_graph::test_server::MockServer;
 
     fn deref(&self) -> &Self::Target {
         self.inner.as_ref()

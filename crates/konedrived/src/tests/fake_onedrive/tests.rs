@@ -40,3 +40,24 @@ async fn network_down_interrupts_an_http_request_already_in_flight() {
     graph.set_network_down(true);
     assert!(tokio::time::timeout(Duration::from_secs(2), request).await.expect("the connection is cut without waiting for Graph").unwrap().is_err());
 }
+
+#[tokio::test]
+async fn port_probes_do_not_enter_cloud_or_connection_fault_logs() {
+    let graph = FakeGraph::start().await;
+    let proxy = graph.connection_faults().await;
+    let probe = reqwest::Client::builder().user_agent("node").build().unwrap();
+    probe.get(graph.uri()).send().await.unwrap();
+    // The fault proxy closes unsolicited probes before recording or forwarding them.
+    let _ = probe.get(&proxy.url).send().await;
+    assert!(graph.with(|cloud| cloud.log.is_empty()), "a probe must not change the fake cloud's log");
+    assert!(graph.server.received_requests().await.unwrap().is_empty());
+    assert!(proxy.asked().is_empty(), "a probe must not use the proxy's request budget");
+
+    let client = graph.client();
+    for count in 1..=2 {
+        let _ = client.download(&proxy.url, 0, None).await;
+        assert_eq!(proxy.asked().len(), count, "keep unexpected requests from our client");
+        assert_eq!(graph.with(|cloud| cloud.log.len()), count);
+        assert_eq!(graph.server.received_requests().await.unwrap().len(), count);
+    }
+}

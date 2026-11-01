@@ -7,8 +7,9 @@ publish = false
 
 [features]
 # Test-only: `secret::MemoryStore`, and `TransferPool::starting_at`, `try_acquire` and
-# `large_held`. The daemon's tests turn it on; never enable it in a build that ships.
-testing = []
+# `large_held`, plus the loopback request recorder. The daemon's tests turn it on;
+# never enable it in a build that ships.
+testing = ["dep:wiremock"]
 
 [dependencies]
 httpdate = "1"
@@ -27,6 +28,8 @@ tokio-util.workspace = true
 tokio-tungstenite.workspace = true
 tracing.workspace = true
 url.workspace = true
+
+wiremock = { workspace = true, optional = true }
 
 [dev-dependencies]
 # Tests only: the paused clock of the transfer pool's tests.

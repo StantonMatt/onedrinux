@@ -4,7 +4,8 @@ use std::time::Duration;
 use konedrive_graph::drive::RetryPolicy;
 use konedrive_graph::token::StaticToken;
 use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use konedrive_graph::test_server::MockServer;
+use wiremock::{Mock, ResponseTemplate};
 
 use super::*;
 

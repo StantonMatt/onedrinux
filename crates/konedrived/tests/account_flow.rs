@@ -15,7 +15,8 @@ use konedrived::account::secret::SecretStore;
 use konedrived::account::state::SignInState;
 use konedrive_graph::token::SESSION_EXPIRED;
 use wiremock::matchers::{body_string_contains, header, method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use konedrive_graph::test_server::MockServer;
+use wiremock::{Mock, ResponseTemplate};
 
 #[tokio::test]
 async fn sign_in_with_no_client_id_set_uses_the_built_in_one() {

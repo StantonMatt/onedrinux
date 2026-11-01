@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use serde_json::json;
 use wiremock::matchers::{body_json, header, method, path, query_param};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use crate::test_server::MockServer;
+use wiremock::{Mock, ResponseTemplate};
 
 use super::*;
 use crate::drive::RetryPolicy;

@@ -27,7 +27,7 @@ pub async fn start_daemon_showing(bus: &TestBus, dir: &Path, drive: konedrived::
 
 /// [`start_daemon`], with Microsoft played by `server` ([`mock_identity`]): a sign-in can
 /// succeed.
-pub async fn start_daemon_signing_in(bus: &TestBus, dir: &Path, server: &wiremock::MockServer) -> konedrived::daemon::startup::Daemon {
+pub async fn start_daemon_signing_in(bus: &TestBus, dir: &Path, server: &konedrive_graph::test_server::MockServer) -> konedrived::daemon::startup::Daemon {
     let base = url::Url::parse(&format!("{}/", server.uri())).unwrap();
     let endpoints = konedrive_graph::oauth::Endpoints { authority: base.clone(), graph: base };
     start_daemon_with(bus, dir, konedrived::daemon::manager::no_drive(), endpoints).await
@@ -88,7 +88,7 @@ pub fn err_text(output: &std::process::Output) -> String {
 
 /// A Microsoft account at `server`: the authorization code `code` signs it in, with `email`
 /// and the drive `drive`.
-pub async fn mock_identity(server: &wiremock::MockServer, code: &str, token: &str, email: &str, drive: &str) {
+pub async fn mock_identity(server: &konedrive_graph::test_server::MockServer, code: &str, token: &str, email: &str, drive: &str) {
     use serde_json::json;
     use wiremock::matchers::{body_string_contains, header, method, path};
     use wiremock::{Mock, ResponseTemplate};

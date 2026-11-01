@@ -71,7 +71,8 @@ fn granted_scopes_are_read_by_permission() {
 
 use serde_json::json;
 use wiremock::matchers::{body_string_contains, method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use crate::test_server::MockServer;
+use wiremock::{Mock, ResponseTemplate};
 
 fn mock_client(server: &MockServer) -> OAuthClient {
     let base = Url::parse(&format!("{}/", server.uri())).unwrap();

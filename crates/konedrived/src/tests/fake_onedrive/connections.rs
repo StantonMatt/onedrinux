@@ -101,6 +101,7 @@ async fn serve(mut socket: TcpStream, upstream: std::net::SocketAddr, faults: Ar
     let text = String::from_utf8_lossy(&head);
     let mut words = text.lines().next().unwrap_or_default().split_whitespace();
     let (method, path) = (words.next().unwrap_or_default(), words.next().unwrap_or_default());
+    if konedrive_graph::test_server::is_port_probe(method, path, field(&text, "user-agent").as_deref()) { return Ok(()); }
     let at = {
         let mut faults = faults.lock().unwrap();
         faults.asked.push(Asked { method: method.into(), path: path.into(), range: field(&text, "range"), content_range: field(&text, "content-range") });

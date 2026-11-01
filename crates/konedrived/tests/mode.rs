@@ -25,7 +25,8 @@ use konedrived::account::secret::Slot;
 use konedrived::account::testing::{single_account, MemoryWallet};
 use serde_json::json;
 use wiremock::matchers::{body_string_contains, header, method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use konedrive_graph::test_server::MockServer;
+use wiremock::{Mock, ResponseTemplate};
 
 const READ_WRITE: &str = "Files.ReadWrite User.Read offline_access";
 

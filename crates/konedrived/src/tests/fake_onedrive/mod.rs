@@ -881,6 +881,7 @@ struct Responder(Arc<Mutex<Cloud>>, Arc<FakeSockets>);
 
 impl Respond for Responder {
     fn respond(&self, request: &Request) -> ResponseTemplate {
+        if konedrive_graph::test_server::is_probe(request) { return ResponseTemplate::new(404); }
         let mut cloud = self.0.lock().unwrap();
         let before = cloud.changes.len();
         let lost = cloud.answer_lost(request);

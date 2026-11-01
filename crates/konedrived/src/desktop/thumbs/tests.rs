@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use url::Url;
 use wiremock::matchers::{method, path, path_regex};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use konedrive_graph::test_server::MockServer;
+use wiremock::{Mock, ResponseTemplate};
 
 use super::*;
 use crate::mount::item_fixture::{onedrive_id_of, ItemFixture, ONEDRIVE_MTIME};

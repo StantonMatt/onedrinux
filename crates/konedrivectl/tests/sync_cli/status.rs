@@ -91,7 +91,8 @@ async fn binary_skipped_with_no_folder_registered_says_so() {
 #[ignore = "mounts a filesystem: run in the VM"]
 async fn binary_skipped_of_a_onedrive_folder_still_listing_says_the_list_may_be_partial() {
     use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use konedrive_graph::test_server::MockServer;
+    use wiremock::{Mock, ResponseTemplate};
     let graph = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/me/drive"))

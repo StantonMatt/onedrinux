@@ -146,6 +146,15 @@ cargo test --workspace
 cmake -S app -B build/app -DBUILD_TESTING=ON && cmake --build build/app && ctest --test-dir build/app --output-on-failure
 ```
 
+Loopback HTTP fixtures use `konedrive_graph::test_server::MockServer` (test builds
+and the `testing` feature only). Its recorder ignores query-free `GET /` requests
+without the client's `konedrive/<version>` User-Agent: IDE port discovery can send
+these to any new listening port. The fake cloud and connection-fault proxy use the
+same predicate before logging or applying faults. Every request from our Graph
+client still counts, including `GET /`; OAuth requests without a User-Agent and
+all other request shapes still count too. This is deliberately narrower than a
+User-Agent allowlist, so unexpected requests remain visible.
+
 The Secret Service test touches your real KWallet (under a test-only attribute) and is opt-in:
 
 ```

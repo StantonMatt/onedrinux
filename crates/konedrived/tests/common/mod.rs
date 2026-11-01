@@ -14,7 +14,8 @@ use konedrived::account::state::{AccountSnapshot, StateHandle};
 use serde_json::json;
 use url::Url;
 use wiremock::matchers::{body_string_contains, header, method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use konedrive_graph::test_server::MockServer;
+use wiremock::{Mock, ResponseTemplate};
 
 pub const CLIENT_ID: &str = "0f8fad5b-d9cb-469f-a165-70867728950e";
 

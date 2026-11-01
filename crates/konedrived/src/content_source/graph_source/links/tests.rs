@@ -22,7 +22,8 @@ fn download_links_prune_expired_entries_and_cap_their_count() {
 #[tokio::test]
 async fn clearing_download_links_cancels_a_background_listing() {
     use serde_json::json;
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use konedrive_graph::test_server::MockServer;
+    use wiremock::{Mock, ResponseTemplate};
     use wiremock::matchers::{method, path, query_param};
     use konedrive_graph::token::StaticToken;
     let server = MockServer::start().await;

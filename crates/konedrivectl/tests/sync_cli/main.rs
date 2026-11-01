@@ -106,7 +106,7 @@ async fn build_harness_showing(
 
 /// A signed-in harness whose account's folder shows the
 /// drive of the mocked Graph at `graph`.
-async fn harness_showing(graph: &wiremock::MockServer) -> Harness {
+async fn harness_showing(graph: &konedrive_graph::test_server::MockServer) -> Harness {
     let drive = konedrive_graph::drive::DriveClient::new(
         url::Url::parse(&format!("{}/", graph.uri())).unwrap(),
         std::sync::Arc::new(konedrive_graph::token::StaticToken::new("T")),
@@ -126,9 +126,10 @@ const MOCKED_DRIVE: &str = "D1";
 /// one folder, one file inside it, and the Personal Vault (skipped) — the
 /// shape `sync skipped`, `sync status`'s `Items:`/`Skipped:` lines, and
 /// `sync refresh` all need a real listing to exercise.
-async fn harness_onedrive() -> (Harness, wiremock::MockServer) {
+async fn harness_onedrive() -> (Harness, konedrive_graph::test_server::MockServer) {
     use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use konedrive_graph::test_server::MockServer;
+    use wiremock::{Mock, ResponseTemplate};
     let graph = MockServer::start().await;
     let mut hash = konedrive_graph::quickxor::QuickXor::new();
     hash.update(b"abc");

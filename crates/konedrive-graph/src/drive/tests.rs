@@ -4,7 +4,8 @@ use std::time::Duration;
 use serde_json::json;
 use tokio::io::AsyncReadExt;
 use wiremock::matchers::{header, method, path, query_param};
-use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+use crate::test_server::MockServer;
+use wiremock::{Mock, Request, ResponseTemplate};
 
 use super::*;
 use crate::token::{AuthError, StaticToken};

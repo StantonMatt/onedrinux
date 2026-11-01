@@ -797,6 +797,8 @@ Integration tests: the compiled binary against a daemon on a private bus.
 - `secret.rs` — the refresh token's store, as the token manager sees it.
 - `pool.rs` — the transfer pool: how many requests an account has in flight. `[tests]`
 - `quickxor.rs` — QuickXorHash. `[tests]`
+- `test_server.rs` — test-only wiremock recorder and shared predicate excluding unsolicited
+  root port probes while retaining all client requests. `[tests]`
 - `drive/mod.rs` — the drive API, reading: the delta feed, one item, a folder's files with
   their download URLs, content. `[tests]`
 - `drive/error.rs` — an answer's status, what it and Graph's error code mean, a read's error.

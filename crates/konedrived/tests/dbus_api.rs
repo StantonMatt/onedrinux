@@ -13,7 +13,7 @@ use konedrive_dbus::ACCOUNT_INTERFACE_NAME;
 use konedrived::account::secret::Slot;
 use konedrived::account::testing::MemoryWallet;
 use konedrived::config::{AccountId, DEFAULT_CLIENT_ID};
-use wiremock::MockServer;
+use konedrive_graph::test_server::MockServer;
 
 const XML: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../dbus/org.konedrive.Account.xml"));
 

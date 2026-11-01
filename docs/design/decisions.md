@@ -1166,3 +1166,16 @@ content's checked pieces. A missing middle remains one HTTP request; no finer
 fetch scheduler or parallelism is introduced. Cache eviction during the fetch
 can require the existing metadata fallback instead. Header publication still
 records only the original foreground interval and retains its existing limits.
+
+
+## Exclude unsolicited port discovery from test request budgets (2026-11-01)
+
+Captured stray requests were query-free `GET /` with `User-Agent: node`, sent by
+the IDE's port discovery rather than KOneDrive. Test fixtures share one predicate
+in `konedrive_graph::test_server`: exclude only that root request shape without
+KOneDrive's exact User-Agent, regardless of which IDE sent it. A full User-Agent
+allowlist would hide valid OAuth requests (whose supplied HTTP client may omit
+it) and unrelated unexpected requests. Requests bearing our client's User-Agent
+are always recorded, even at `/`, so genuine extra requests still fail budgets.
+The fake cloud and raw connection-fault proxy apply the same rule before logging
+or consuming faults. Shipping builds and network behavior are unchanged.

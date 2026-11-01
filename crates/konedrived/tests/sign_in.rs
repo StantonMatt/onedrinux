@@ -19,7 +19,8 @@ use konedrived::account::testing::MemoryWallet;
 use konedrived::config::Paths;
 use serde_json::json;
 use wiremock::matchers::{body_string_contains, header, method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use konedrive_graph::test_server::MockServer;
+use wiremock::{Mock, ResponseTemplate};
 use zbus::zvariant::OwnedObjectPath;
 
 /// What a `SignInFinished` said: the sign-in's number, the outcome, the message, the account.

@@ -5,7 +5,8 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use crate::test_server::MockServer;
+use wiremock::{Mock, ResponseTemplate};
 
 use super::*;
 use crate::token::StaticToken;

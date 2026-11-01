@@ -116,7 +116,7 @@ async fn accounts_are_added_chosen_renamed_and_removed() {
 async fn account_add_signs_in_and_names_the_account_by_its_email() {
     let bus = TestBus::start();
     let dir = tempfile::tempdir().unwrap();
-    let server = wiremock::MockServer::start().await;
+    let server = konedrive_graph::test_server::MockServer::start().await;
     common::mock_identity(&server, "ann-code", "AT1", "ann@outlook.com", "D1").await;
     common::mock_identity(&server, "bob-code", "AT2", "bob@live.com", "D2").await;
     let daemon = common::start_daemon_signing_in(&bus, dir.path(), &server).await;
