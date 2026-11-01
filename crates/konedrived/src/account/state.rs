@@ -91,6 +91,15 @@ impl Default for AccountSnapshot {
 }
 
 impl AccountSnapshot {
+    /// Microsoft still grants writes to an account running read-only. A wider
+    /// read-only refresh is retained separately from the narrowed usable scopes.
+    /// Unknown grants, signed-out accounts and read-write mode publish false.
+    pub fn write_still_granted(&self) -> bool {
+        self.state == SignInState::SignedIn
+            && self.mode == Mode::ReadOnly
+            && (konedrive_graph::oauth::grants_writes(&self.granted_scopes) || !self.wider_grant.is_empty())
+    }
+
     /// `LastError` as published: what went wrong, or with nothing wrong the mode's note.
     pub fn published_error(&self) -> String {
         match (&self.trouble, &self.mode_note) {

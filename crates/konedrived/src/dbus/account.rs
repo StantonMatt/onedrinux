@@ -88,6 +88,12 @@ impl Account {
         self.service.mode().as_str().to_owned()
     }
 
+    /// Retained Microsoft write permission while signed in and running read-only.
+    #[zbus(property)]
+    async fn write_still_granted(&self) -> bool {
+        self.service.state().get().write_still_granted()
+    }
+
     #[zbus(property)]
     async fn state(&self) -> String {
         self.service.state().get().state.as_str().to_owned()
@@ -236,6 +242,9 @@ async fn emit_changes(
     }
     if old.quota.state != new.quota.state {
         account.quota_state_changed(emitter).await?;
+    }
+    if old.write_still_granted() != new.write_still_granted() {
+        account.write_still_granted_changed(emitter).await?;
     }
     if old.mode != new.mode {
         account.mode_changed(emitter).await?;

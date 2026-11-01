@@ -1,6 +1,7 @@
 #include "accountcontroller.h"
 #include "fakedaemon.h"
 
+#include <QMetaProperty>
 #include <QSignalSpy>
 #include <QTest>
 
@@ -45,6 +46,26 @@ private Q_SLOTS:
         QCOMPARE(controller.state(), QStringLiteral("signed-out"));
         QCOMPARE(controller.label(), QStringLiteral("Personal"));
         QCOMPARE(controller.mode(), QStringLiteral("read-only"));
+    }
+
+    void publishesWriteStillGrantedToQml()
+    {
+        startFake();
+        m_daemon->account->set({{QStringLiteral("WriteStillGranted"), true}});
+        AccountController controller(fake::FirstAccount);
+        QSignalSpy changed(&controller, &AccountController::accountChanged);
+        QTRY_VERIFY(controller.serviceAvailable());
+        QVERIFY(controller.metaObject()->indexOfProperty("writeStillGranted") >= 0);
+        const auto property = controller.metaObject()->property(controller.metaObject()->indexOfProperty("writeStillGranted"));
+        QVERIFY(property.hasNotifySignal());
+        QCOMPARE(property.notifySignal().name(), QByteArray("accountChanged"));
+        QVERIFY(controller.property("writeStillGranted").toBool());
+        changed.clear();
+        m_daemon->account->set({{QStringLiteral("WriteStillGranted"), false}});
+        QTRY_VERIFY(!controller.property("writeStillGranted").toBool());
+        QVERIFY(!changed.isEmpty());
+        m_daemon->account->set({{QStringLiteral("WriteStillGranted"), true}});
+        QTRY_VERIFY(controller.property("writeStillGranted").toBool());
     }
 
     void noticesDaemonStartingLater()

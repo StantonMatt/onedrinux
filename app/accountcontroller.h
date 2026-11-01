@@ -27,6 +27,9 @@ class AccountController : public QObject
     /// The mode the account runs in (Account.Mode): "read-only", or "read-write" while
     /// changes made on this computer are uploaded.
     Q_PROPERTY(QString mode READ mode NOTIFY accountChanged)
+    /// Microsoft still grants write permission while signed in and running read-only.
+    /// False when the grant is unknown; presentation also checks serviceAvailable.
+    Q_PROPERTY(bool writeStillGranted READ writeStillGranted NOTIFY accountChanged)
     /// The mode a switch under way goes to, empty when none is: from setMode() until the
     /// daemon has answered and its properties have been read again, and for "read-write"
     /// on while its sign-in waits in the browser (modeSignInPending).
@@ -68,6 +71,7 @@ public:
     QString id() const { return m_id; }
     QString label() const { return m_label.isEmpty() ? m_id : m_label; }
     QString mode() const { return m_mode; }
+    bool writeStillGranted() const { return m_writeStillGranted; }
     QString switchingTo() const { return m_switchingTo; }
     bool modeSignInPending() const { return m_switchingTo == QLatin1String("read-write") && !m_signInUrl.isEmpty(); }
     QString state() const { return m_state; }
@@ -157,6 +161,7 @@ private:
     bool m_serviceAvailable = false;
     QString m_label;
     QString m_mode = QStringLiteral("read-only");
+    bool m_writeStillGranted = false;
     QString m_state = QStringLiteral("signed-out");
     QString m_lastError;
     bool m_switchingToReadOnly = false;

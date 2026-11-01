@@ -67,3 +67,28 @@ fn an_error_and_the_mode_note_take_each_others_place() {
     s.clear_error();
     assert_eq!((s.published_error().as_str(), &s.mode_note), ("", &None), "a clear takes both");
 }
+
+#[test]
+fn write_still_granted_requires_read_only_signed_in_and_known_write_consent() {
+    let mut s = AccountSnapshot::default();
+    assert!(!s.write_still_granted());
+    s.state = SignInState::SignedIn;
+    assert!(!s.write_still_granted());
+    s.granted_scopes = "Files.Read User.Read".into();
+    assert!(!s.write_still_granted());
+    s.granted_scopes = "Files.ReadWrite User.Read".into();
+    assert!(s.write_still_granted());
+    s.mode = Mode::ReadWrite;
+    assert!(!s.write_still_granted());
+    s.mode = Mode::ReadOnly;
+    s.granted_scopes = "Files.Read".into();
+    s.wider_grant = "Files.ReadWrite".into();
+    assert!(s.write_still_granted());
+    s.state = SignInState::SigningIn;
+    assert!(!s.write_still_granted());
+    s.state = SignInState::SignedOut;
+    assert!(!s.write_still_granted());
+    s.state = SignInState::SignedIn;
+    s.clear_account();
+    assert!(!s.write_still_granted());
+}

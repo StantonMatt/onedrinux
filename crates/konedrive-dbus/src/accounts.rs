@@ -169,6 +169,10 @@ pub trait Account {
     /// The mode the account runs in: `read-only` or `read-write`.
     #[zbus(property)]
     fn mode(&self) -> zbus::Result<String>;
+    /// Retained Microsoft write permission while signed in and running read-only;
+    /// false in read-write mode, signed out or unknown.
+    #[zbus(property)]
+    fn write_still_granted(&self) -> zbus::Result<bool>;
     /// `signed-out`, `signing-in` or `signed-in`.
     #[zbus(property)]
     fn state(&self) -> zbus::Result<String>;

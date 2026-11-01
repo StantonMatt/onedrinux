@@ -1116,3 +1116,16 @@ listing page alone does nothing, then checks that listing completion admits the 
 retry and keeps a locked file waiting. The VM's `offline_keep` group uses a loopback
 transport gate, including GETs and notifications, to cover offline saves, restart,
 conflicts and the change guard without a real account or NetworkManager.
+
+## Publish retained Microsoft write consent (2026-11-01)
+
+A read-only account can hold a token granted `Files.ReadWrite`, or receive it again on a
+read-only refresh. `Account.WriteStillGranted` publishes that fact separately from mode
+and `LastError`, only while signed in and running read-only. The app's QML account object
+exposes `writeStillGranted` with `accountChanged`. It does not change write authorization.
+
+No extra disk flag is stored. The startup-refresh regression proves that restoring a
+narrowed cached scope schedules a refresh immediately and recovers a wider grant without
+user action. An unknown grant stays false until a successful refresh; persisting an old
+observation would not establish Microsoft's current permission while offline. The settings
+row is a separate visual change.

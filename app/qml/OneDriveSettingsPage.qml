@@ -158,6 +158,17 @@ FormCard.FormCardPage {
                 page.account.setMode(wanted ? "read-write" : "read-only", false);
             }
         }
+        // Read-only with no switch under way, while Microsoft still grants KOneDrive writes
+        // (Account.WriteStillGranted): Microsoft's page where the user can take that back.
+        FormCard.FormLinkDelegate {
+            objectName: "removePermissionLink"
+            visible: page.signedIn && page.account.mode === "read-only" && !twoWaySwitch.towardTwoWay && !twoWaySwitch.towardReadOnly
+                     && page.account.writeStillGranted
+            url: "https://account.live.com/consent/Manage"
+            text: i18nc("@action:button", "Remove Permission at Microsoft")
+            description: i18n("Microsoft still allows KOneDrive to change your files, but KOneDrive changes nothing while two-way sync is off.")
+            icon.name: "object-unlocked"
+        }
         FormCard.FormTextDelegate {
             objectName: "modeSwitchLine"
             visible: twoWaySwitch.towardTwoWay || twoWaySwitch.towardReadOnly

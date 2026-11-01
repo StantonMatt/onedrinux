@@ -10,6 +10,7 @@
 #include <QDesktopServices>
 #include <QFile>
 #include <QLocale>
+#include <QPointer>
 #include <QQmlApplicationEngine>
 #include <QElapsedTimer>
 #include <QQuickItem>
@@ -526,6 +527,85 @@ private Q_SLOTS:
         QVERIFY(!twoWay->property("checked").toBool() && twoWay->isEnabled());
 
         fake.stop();
+    }
+
+    /// Remove Permission at Microsoft, under the two-way switch: only while the account is
+    /// signed in, read-only with no switch under way, and Microsoft still grants writes
+    /// (Account.WriteStillGranted). It opens Microsoft's page in the browser and asks the
+    /// daemon nothing.
+    void theRemovePermissionLink()
+    {
+        FakeDaemon fake;
+        fake.account->set({{QStringLiteral("State"), QStringLiteral("signed-in")}});
+        fake.sync->folder->set({{QStringLiteral("Path"), QStringLiteral("/home/u/OneDrive")},
+                                {QStringLiteral("State"), QStringLiteral("ready")},
+                                {QStringLiteral("Source"), QStringLiteral("onedrive")}});
+        QVERIFY(fake.start());
+        App app;
+        QVERIFY(app.load());
+        QTRY_COMPARE(app.accounts.count(), 1);
+        QPointer<AccountController> account = app.accounts.at(0)->account();
+        QTRY_VERIFY(app.accounts.at(0)->sync()->serviceAvailable() && account->state() == QLatin1String("signed-in"));
+        QMetaObject::invokeMethod(app.window, "showPage", Q_ARG(QVariant, QStringLiteral("oneDriveSettings")));
+        auto *twoWay = app.findOn<QQuickItem>("oneDriveSettingsPage", "twoWaySwitch");
+        QPointer<QQuickItem> link = app.findOn<QQuickItem>("oneDriveSettingsPage", "removePermissionLink");
+        auto *now = app.findOn<QQuickItem>("oneDriveSettingsPage", "switchToReadOnlyNow");
+        auto *cancel = app.findOn<QQuickItem>("oneDriveSettingsPage", "cancelTwoWayButton");
+        QVERIFY(twoWay && link && now && cancel);
+        QTRY_VERIFY(twoWay->isVisible() && twoWay->isEnabled());
+
+        // Read-only, and Microsoft grants only reading: nothing to remove.
+        QVERIFY(!link->isVisible());
+
+        // Microsoft still grants writes.
+        fake.account->set({{QStringLiteral("WriteStillGranted"), true}});
+        QTRY_VERIFY(link->isVisible());
+        QCOMPARE(link->property("text").toString(), QStringLiteral("Remove Permission at Microsoft"));
+        QCOMPARE(link->property("description").toString(),
+                 QStringLiteral("Microsoft still allows KOneDrive to change your files, but KOneDrive changes nothing while two-way sync is off."));
+        const QStringList asked = fake.account->calls;
+        QMetaObject::invokeMethod(link, "clicked");
+        QTRY_COMPARE(m_opened.size(), 1);
+        QCOMPARE(m_opened.first(), QUrl(QStringLiteral("https://account.live.com/consent/Manage")));
+        QCOMPARE(fake.account->calls, asked);
+
+        // Turning two-way on waits for the browser: hidden until that is cancelled.
+        twoWay->setProperty("checked", true);
+        QMetaObject::invokeMethod(twoWay, "toggled");
+        QTRY_VERIFY(account->modeSignInPending());
+        QVERIFY(!link->isVisible());
+        QMetaObject::invokeMethod(cancel, "clicked");
+        QTRY_VERIFY(!account->modeSignInPending());
+        QTRY_VERIFY(link->isVisible());
+
+        // Two-way, then switching to read-only with changes unsent: hidden throughout.
+        fake.account->set({{QStringLiteral("Mode"), QStringLiteral("read-write")}, {QStringLiteral("WriteStillGranted"), false}});
+        QTRY_VERIFY(!link->isVisible());
+        fake.account->set({{QStringLiteral("WriteStillGranted"), true}});
+        QTest::qWait(50);
+        QVERIFY(!link->isVisible());
+        fake.account->unsentChanges = 2;
+        twoWay->setProperty("checked", false);
+        QMetaObject::invokeMethod(twoWay, "toggled");
+        QTRY_VERIFY(account->switchingToReadOnly());
+        QVERIFY(!link->isVisible());
+        QTRY_VERIFY(now->isEnabled());
+        QMetaObject::invokeMethod(now, "clicked");
+        QTRY_COMPARE(account->mode(), QStringLiteral("read-only"));
+        QTRY_VERIFY(!account->switchingToReadOnly() && account->switchingTo().isEmpty());
+        QTRY_VERIFY(link->isVisible());
+
+        // Signed out: hidden.
+        fake.account->set({{QStringLiteral("State"), QStringLiteral("signed-out")}});
+        QTRY_VERIFY(!link->isVisible());
+        fake.account->set({{QStringLiteral("State"), QStringLiteral("signed-in")}});
+        QTRY_VERIFY(link->isVisible());
+
+        // The daemon gone: hidden, though the account keeps the grant it last heard.
+        fake.stop();
+        QTRY_VERIFY(!account || !account->serviceAvailable());
+        QVERIFY(account && account->writeStillGranted());
+        QTRY_VERIFY(!link || !link->isVisible());
     }
 
     /// Disconnecting and moving to another folder are never refused for what is unsent:

@@ -60,6 +60,7 @@ a property cannot be read one way and announced another:
 |---|---|
 | `Id` (`s`), `Label` (`s`) | the account's id, the last element of its object path, and its name ([accounts.md](accounts.md) §2) |
 | `Mode` (`s`) | the access mode the account runs in, `read-only` or `read-write` ([accounts.md](accounts.md) §10) |
+| `WriteStillGranted` (`b`) | true while signed in and running read-only when the token in hand grants `Files.ReadWrite` or the last read-only refresh returned a wider grant; false in read-write, signed out or unknown. Changes emit `PropertiesChanged`; the app exposes `account.writeStillGranted` with `accountChanged` |
 | `State` (`s`) | `signed-out`, `signing-in` or `signed-in` |
 | `LastError` (`s`) | the reason for the last failure, a sign-in refused as another account's included; with none, why an account `config.toml` says is read-write runs read-only, or, for such a configured read-write account, that Microsoft answered a read-only request with a token that can write (F66); empty otherwise |
 | `ReadOnlyWanted` (`b`), `UnsentBeforeReadOnly` (`t`) | a switch to read-only that waits for the unsent changes, and how many are still to send ([writes.md](writes.md) §2.3) |
@@ -429,7 +430,9 @@ with "Choose Folder…".
 opens for a sign-in allowing KOneDrive to change files; then `SetMode("read-write", false)`, whose
 URL opens as Sign In's does, and while that sign-in waits the switch says so. Turned off while
 changes are unsent, the switch to read-only waits for them, and the page says how many are still to
-send, with "Switch Now" (`force`) and "Keep Two-Way Sync" ([writes.md](writes.md) §2). Two-way, its
+send, with "Switch Now" (`force`) and "Keep Two-Way Sync" ([writes.md](writes.md) §2). Read-only
+with no switch under way, while `Account.WriteStillGranted` is true, "Remove Permission at
+Microsoft" below it opens <https://account.live.com/consent/Manage> in the browser. Two-way, its
 words say that large changes wait for review, or, with Settings' "Hold large changes" off, a warning
 line says they are not held.
 

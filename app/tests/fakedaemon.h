@@ -73,6 +73,7 @@ class FakeAccount : public QDBusAbstractAdaptor
     Q_CLASSINFO("D-Bus Interface", "org.konedrive.Account")
     Q_PROPERTY(QString Id READ id)
     Q_PROPERTY(QString Label READ label)
+    Q_PROPERTY(bool WriteStillGranted READ writeStillGranted)
     Q_PROPERTY(QString Mode READ mode)
     Q_PROPERTY(QString State READ state)
     Q_PROPERTY(QString LastError READ lastError)
@@ -99,6 +100,7 @@ public:
 
     QString id() const { return m_properties.value(QStringLiteral("Id")).toString(); }
     QString label() const { return m_properties.value(QStringLiteral("Label")).toString(); }
+    bool writeStillGranted() const { return m_properties.value(QStringLiteral("WriteStillGranted")).toBool(); }
     QString mode() const { return m_properties.value(QStringLiteral("Mode")).toString(); }
     QString state() const { return m_properties.value(QStringLiteral("State")).toString(); }
     QString lastError() const { return m_properties.value(QStringLiteral("LastError")).toString(); }

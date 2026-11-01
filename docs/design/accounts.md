@@ -500,6 +500,14 @@ account's side (`account/mode.rs`, `account/state.rs`):
   grant is expected for an account configured read-only: it raises no mode note or `LastError`,
   and switching the configuration to read-only clears an existing wider-grant note. The note
   remains for an account configured read-write whose token was asked for read-only.
+  `Account.WriteStillGranted` separately publishes whether a signed-in account running
+  read-only still has `Files.ReadWrite` in its token grant or a wider read-only refresh grant.
+  It is false while read-write, signed out, or unknown, and sign-out clears both sources.
+  The app exposes it as `account.writeStillGranted`; presentation also checks service
+  availability and whether a mode switch is under way. This fact is not persisted: startup
+  restores any cached token scope and immediately schedules an account-info refresh, which
+  recovers a wider grant even from a narrowed cache. Until that refresh succeeds, an unknown
+  wider grant reads false (including while offline).
 - **To read-write**, `Account.SetMode("read-write", false)` answers a sign-in URL — empty when the
   account runs read-write already — whose sign-in asks for `Files.ReadWrite`, pinned to the
   account: its password asked for again, its email filled in. Only when the token response grants

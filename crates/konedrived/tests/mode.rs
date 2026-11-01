@@ -899,3 +899,52 @@ async fn a_read_write_account_signing_in_as_someone_else_stores_nothing() {
     assert_eq!(s.config().account(&s.id).unwrap().drive_id, DriveId::new("D1"));
     assert_eq!(s.account.mode().await.unwrap(), "read-only");
 }
+
+/// Consent is separate from the mode: the token in hand can still write after switching
+/// off, and a later read-only refresh can report the same retained Microsoft consent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn write_still_granted_follows_tokens_mode_and_sign_out() {
+    let s = signed_in_with(&[], "good-code", true).await;
+    let granted = || s.account.write_still_granted();
+    assert!(!granted().await.unwrap(), "read-only grant alone says nothing about write consent");
+    let url = s.account.set_mode("read-write", false).await.unwrap();
+    simulate_browser(&url, "code=rw-code").await;
+    let account = &s.account;
+    eventually("read-write", || async move { account.mode().await.unwrap() == "read-write" }).await;
+    assert!(!granted().await.unwrap(), "hidden while read-write");
+    s.account.set_mode("read-only", true).await.unwrap();
+    assert!(granted().await.unwrap(), "the token in hand still carries Files.ReadWrite");
+    s.service.tokens().invalidate().await;
+    s.service.tokens().access_token().await.unwrap();
+    assert!(!s.service.state().get().wider_grant.is_empty());
+    assert_eq!(s.service.state().get().granted_scopes, "Files.Read User.Read offline_access");
+    assert!(granted().await.unwrap(), "a wider read-only refresh keeps the fact visible");
+    assert_eq!(s.account.last_error().await.unwrap(), "", "consent is no error for read-only");
+    s.account.sign_out().await.unwrap();
+    assert!(!granted().await.unwrap(), "sign-out clears both sources");
+}
+
+/// Startup itself refreshes a narrowed cache; no user refresh or persisted consent flag
+/// is needed to recover Microsoft's wider grant after restarting the daemon.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn write_still_granted_recovers_at_startup_without_persistence() {
+    let server = MockServer::start().await;
+    mock_microsoft(&server).await;
+    mock_read_write(&server, true).await;
+    let dir = tempfile::tempdir().unwrap();
+    let svc = single_account(dir.path(), endpoints(&server), Arc::new(MemoryStore::with_token("RT0")), Duration::from_secs(5)).await.unwrap();
+    let cache = Paths::in_dir(dir.path()).account(svc.id()).unwrap().account_cache;
+    konedrived::account::cache::save(&cache, &AccountInfo {
+        granted_scopes: "Files.Read User.Read offline_access".into(),
+        drive_id: "D1".into(),
+        ..AccountInfo::default()
+    }).unwrap();
+    svc.startup().await;
+    eventually("startup refresh recovers wider consent", || async {
+        !svc.state().get().wider_grant.is_empty()
+    }).await;
+    assert_eq!(refreshes(&server).await, ["Files.Read User.Read offline_access"]);
+    assert_eq!(svc.mode(), Mode::ReadOnly);
+    assert!(svc.state().get().write_still_granted());
+    assert_eq!(konedrived::account::cache::load(&cache).unwrap().granted_scopes, "Files.Read User.Read offline_access");
+}

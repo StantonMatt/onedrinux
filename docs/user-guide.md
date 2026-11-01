@@ -282,7 +282,8 @@ Turning **Two-way sync** off does not drop what is still to be sent.
 The wish survives a restart of the service.
 
 Microsoft keeps the permission to change files that the account gave. KOneDrive changes nothing
-while the account is read-only; to remove the permission too, remove KOneDrive at
+while the account is read-only. To remove the permission too, use **Remove Permission at
+Microsoft** below **Two-way sync**, shown while Microsoft still allows it, or remove KOneDrive at
 <https://account.live.com/consent/Manage>.
 
 ## Using another folder

@@ -84,6 +84,12 @@
          account; otherwise "read-only", with LastError saying why when
          config.toml says read-write. -->
     <property name="Mode" type="s" access="read"/>
+    <!-- True while signed in and running read-only if the token grant includes
+         Files.ReadWrite or the last read-only refresh returned a wider grant.
+         False in read-write mode, signed out or unknown. Changes are announced
+         through PropertiesChanged. Startup refresh recovers wider grants; this
+         fact is not separately persisted. -->
+    <property name="WriteStillGranted" type="b" access="read"/>
     <!-- signed-out | signing-in | signed-in -->
     <property name="State" type="s" access="read"/>
     <property name="LastError" type="s" access="read"/>

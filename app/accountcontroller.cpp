@@ -101,6 +101,9 @@ void AccountController::applyProperties(const QVariantMap &properties)
     };
     take(QStringLiteral("Label"), m_label);
     take(QStringLiteral("Mode"), m_mode);
+    if (const auto it = properties.constFind(QStringLiteral("WriteStillGranted")); it != properties.constEnd()) {
+        m_writeStillGranted = it->toBool();
+    }
     take(QStringLiteral("State"), m_state);
     take(QStringLiteral("LastError"), m_lastError);
     take(QStringLiteral("DisplayName"), m_displayName);
