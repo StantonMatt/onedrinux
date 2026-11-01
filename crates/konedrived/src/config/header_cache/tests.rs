@@ -11,6 +11,207 @@ fn record(from: u64, size: usize) -> Record {
 }
 
 #[tokio::test]
+async fn header_cache_rebuild_rejects_reader_reopen_from_the_replaced_generation() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("headers.sqlite");
+    let epoch = Arc::new(AtomicU64::new(0));
+    let reader = reader::Reader::open(path.clone(), Arc::clone(&epoch));
+    let mut worker = Worker {
+        path,
+        limit: 1024 * 1024,
+        db: None,
+        disabled: false,
+        warned: false,
+        rebuilt: false,
+        clear_pending: false,
+        catalog: Arc::new(std::sync::Mutex::new(catalog::Catalog::default())),
+        reader: reader.port(),
+        epoch: Arc::clone(&epoch),
+    };
+    worker.start();
+    worker
+        .db
+        .as_mut()
+        .unwrap()
+        .keep("head", "v", &record(0, 4096), now())
+        .unwrap();
+    worker.publish(0, None);
+    let find = |generation| {
+        let (answer, receive) = oneshot::channel();
+        reader
+            .port()
+            .find(generation, "head".into(), "v".into(), 0, 4096, answer);
+        receive
+    };
+    assert!(find(0).await.unwrap().is_some(), "prime the old reader");
+    assert!(crate::panic::lock(&worker.catalog).covers(
+        0,
+        &("head".into(), "v".into()),
+        0,
+        4096,
+        None
+    ));
+
+    // Stop at the rebuild's acknowledged-close boundary. A known-hit request
+    // admitted just before that boundary arrives before unlink/replacement.
+    worker.db = None;
+    worker.close_for_rebuild();
+    let stale = find(0).await.ok().flatten();
+    let ready_during_replacement = crate::panic::lock(&worker.catalog).ready;
+    database::remove(&worker.path).unwrap();
+    worker.ensure_open();
+    let mut fresh = record(0, 4096);
+    fresh.bytes.fill(7);
+    worker
+        .db
+        .as_mut()
+        .unwrap()
+        .keep("head", "v", &fresh, now())
+        .unwrap();
+    worker.publish(epoch.load(Ordering::SeqCst), None);
+    let found = find(epoch.load(Ordering::SeqCst)).await.unwrap().unwrap();
+    assert!(
+        stale.is_none(),
+        "a stale lookup cannot reopen the file after close"
+    );
+    assert!(
+        !ready_during_replacement,
+        "reader admission stays suspended until publication"
+    );
+    assert_eq!(
+        found.bytes, fresh.bytes,
+        "the reader uses the replacement file"
+    );
+
+    // The non-busy writer-error path must use that same fenced close.
+    let before = epoch.load(Ordering::SeqCst);
+    worker.run::<()>(|_| anyhow::bail!("injected non-busy writer failure"));
+    assert!(epoch.load(Ordering::SeqCst) > before);
+    assert!(!crate::panic::lock(&worker.catalog).ready);
+}
+
+#[tokio::test]
+async fn header_cache_reversed_forgets_refresh_the_catalog_after_each_deletion() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("headers.sqlite");
+    let cache = HeaderCache::open(path.clone(), 1024 * 1024);
+    for item in ["A", "B"] {
+        cache.keep(0, item, "v".into(), record(0, 4096));
+    }
+    cache.flush().await;
+    // A has fenced but not enqueued; B completes and restores readiness first.
+    let first = cache.fence();
+    cache.forget("B");
+    cache.flush().await;
+    assert!(crate::panic::lock(&cache.catalog).covers(
+        cache.epoch(),
+        &("A".into(), "v".into()),
+        0,
+        4096,
+        None
+    ));
+    cache.send(Command::Forget {
+        epoch: first,
+        item: "A".into(),
+    });
+    cache.flush().await;
+    let advertised = crate::panic::lock(&cache.catalog).covers(
+        cache.epoch(),
+        &("A".into(), "v".into()),
+        0,
+        4096,
+        None,
+    );
+    cache.keep(cache.epoch(), "A", "v".into(), record(0, 4096));
+    cache.flush().await;
+    let db = rusqlite::Connection::open(path).unwrap();
+    let restored: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM headers WHERE item = 'A')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        !advertised,
+        "the later old-epoch deletion also refreshes the ready catalog"
+    );
+    assert!(
+        restored,
+        "a stale catalog entry must not suppress republication"
+    );
+}
+
+fn catalog_entries(items: std::ops::Range<usize>, at: i64) -> catalog::Entries {
+    items
+        .map(|n| {
+            (
+                (format!("item-{n}"), "v".into()),
+                vec![catalog::Range {
+                    from: 0,
+                    end: 4096,
+                    facts: "f".into(),
+                    at,
+                    used: None,
+                }],
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn header_cache_clean_catalog_does_not_scan_for_uses() {
+    let mut catalog = catalog::Catalog::default();
+    catalog.replace(catalog_entries(0..1000, now()), false);
+    catalog.rows_examined = 0;
+    assert!(catalog.take_uses(0, usize::MAX).is_empty());
+    assert_eq!(
+        catalog.rows_examined, 0,
+        "clean extraction never scans the catalog"
+    );
+}
+
+#[test]
+fn header_cache_catalog_dirty_accounting_only_examines_replaced_rows() {
+    let mut catalog = catalog::Catalog::default();
+    catalog.ready = true;
+    let before = now() - 1000;
+    catalog.replace(catalog_entries(0..1000, before), false);
+    catalog.rows_examined = 0;
+    for n in [0, 1] {
+        catalog.touch(0, &(format!("item-{n}"), "v".into()), 0, 4096, None, None);
+    }
+    assert_eq!(catalog.dirty, 2);
+    catalog.replace(catalog_entries(0..1, before), true);
+    assert_eq!(
+        catalog.dirty, 2,
+        "preserve an unflushed touch on the replaced row"
+    );
+    assert_eq!(
+        catalog.rows_examined, 2,
+        "partial accounting visits only old and new rows for that key"
+    );
+    catalog.replace(catalog_entries(0..1, now() + 1000), true);
+    assert_eq!(
+        catalog.dirty, 1,
+        "a durable timestamp consumes only the replaced row's touch"
+    );
+    let used = catalog.take_uses(0, 1);
+    assert_eq!(used.len(), 1);
+    assert_eq!(used[0].item, "item-1");
+    assert_eq!(catalog.dirty, 0);
+    catalog.rows_examined = 0;
+    assert!(catalog.take_uses(0, usize::MAX).is_empty());
+    assert_eq!(catalog.rows_examined, 0);
+    catalog.touch(0, &("item-1".into(), "v".into()), 0, 4096, None, None);
+    catalog.replace(catalog_entries(2..3, before), false);
+    assert_eq!(
+        catalog.dirty, 0,
+        "a full refresh drops touches for removed keys"
+    );
+}
+
+#[tokio::test]
 async fn header_cache_memory_hits_coalesce_lru_on_rows_until_the_writer_flushes() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("headers.sqlite");

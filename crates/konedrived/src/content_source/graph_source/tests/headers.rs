@@ -15,19 +15,26 @@ async fn a_ready_prefetch_answers_without_waiting_for_a_paused_disk_lookup() {
         .await
         .unwrap();
     cache.flush().await;
-    let piece = source
+    let mut piece = source
         .read_blocks
         .find_piece("P0", &content, 0, LARGE as u64)
         .unwrap();
     source.read_blocks.clear();
     requests_since(&graph);
-    let release = cache.pause_for_test();
-    // A deterministic ready shared fetch publishes bytes when polled. The disk
-    // worker cannot answer first, regardless of timer scheduling or machine load.
+    let release = cache.pause_reader_for_test();
+    let disk_pending = source
+        .disk_range("P0", &content, Some(&listed), 0, 4096, Some(cache.epoch()))
+        .now_or_never()
+        .is_none();
+    // Distinguish the prepared bytes from the persisted head. Hold both futures
+    // pending for the first poll, then make only the shared fetch ready.
+    piece.bytes[..4096].fill(0xa5);
+    let (ready, wait) = tokio::sync::oneshot::channel();
     let publish = source.clone();
     let opened = content.clone();
     let prepared = Arc::new(Prepared {
         read: async move {
+            wait.await.unwrap();
             publish.read_blocks.keep("P0", &opened, &piece);
             Ok(true)
         }
@@ -38,13 +45,21 @@ async fn a_ready_prefetch_answers_without_waiting_for_a_paused_disk_lookup() {
         GraphSource::prepared_key("P0", &content, 0, 4096),
         Arc::downgrade(&prepared),
     );
-    let answer = source
-        .prepared_range("P0", &content, Some(&listed), 0, 4096)
-        .now_or_never();
+    let answer = source.prepared_range("P0", &content, Some(&listed), 0, 4096);
+    tokio::pin!(answer);
+    let pending = answer.as_mut().now_or_never().is_none();
+    ready.send(()).unwrap();
+    let answer = answer.as_mut().now_or_never();
     release.send(()).unwrap();
+    assert!(disk_pending, "the known disk hit waits on the gated reader");
+    assert!(
+        pending,
+        "both the disk lookup and shared fetch started pending"
+    );
     assert_eq!(
-        read_whole(answer.expect("ready in the first poll").unwrap()).await,
-        bytes_of(0, LARGE)[..4096]
+        read_whole(answer.expect("ready on the next poll").unwrap()).await,
+        vec![0xa5; 4096],
+        "the prepared fetch supplies the answer while the disk reader is paused"
     );
     assert!(requests_since(&graph).is_empty());
 }

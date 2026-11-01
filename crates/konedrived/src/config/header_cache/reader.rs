@@ -1,5 +1,7 @@
 //! A read-only SQLite connection on its own worker: foreground lookups never sit
 //! behind publication, LRU or vacuum commands. Closing is acknowledged before deletion.
+// test: header_cache_rebuild_rejects_reader_reopen_from_the_replaced_generation
+// test: a_ready_prefetch_answers_without_waiting_for_a_paused_disk_lookup
 // test: header_cache_lookup_bypasses_queued_writes
 // test: header_cache_invalidation_fences_queued_writes_and_deletes_the_file
 
@@ -21,6 +23,11 @@ enum Command {
         answer: oneshot::Sender<Option<Record>>,
     },
     Close(mpsc::Sender<()>),
+    #[cfg(test)]
+    Pause {
+        entered: mpsc::Sender<()>,
+        release: mpsc::Receiver<()>,
+    },
 }
 
 #[derive(Clone)]
@@ -52,6 +59,22 @@ impl Port {
             let _ = receive.recv();
         }
     }
+
+    #[cfg(test)]
+    pub(super) fn pause_for_test(&self) -> mpsc::Sender<()> {
+        let (entered, inside) = mpsc::channel();
+        let (release, wait) = mpsc::channel();
+        self.0
+            .send(Command::Pause {
+                entered,
+                release: wait,
+            })
+            .unwrap();
+        inside
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        release
+    }
 }
 
 pub(super) struct Reader {
@@ -68,6 +91,11 @@ impl Reader {
                 let mut connection: Option<(u64, rusqlite::Connection)> = None;
                 for command in receiver {
                     match command {
+                        #[cfg(test)]
+                        Command::Pause { entered, release } => {
+                            let _ = entered.send(());
+                            let _ = release.recv();
+                        }
                         Command::Close(answer) => {
                             connection = None;
                             let _ = answer.send(());

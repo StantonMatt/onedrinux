@@ -8,6 +8,8 @@
 //! queued work against authentication invalidation. The source owns the meaning of the
 //! opaque version and facts, and checks both on use.
 
+// test: header_cache_rebuild_rejects_reader_reopen_from_the_replaced_generation
+// test: header_cache_reversed_forgets_refresh_the_catalog_after_each_deletion
 // test: header_cache_repeated_memory_hits_do_not_crowd_out_a_new_head
 // test: header_cache_known_misses_and_pending_duplicates_never_wait_for_the_writer
 // test: header_cache_keeps_ranges_across_restart_and_preserves_facts
@@ -141,6 +143,7 @@ impl HeaderCache {
                     clear_pending: false,
                     catalog: inventory,
                     reader: lookup,
+                    epoch: Arc::clone(&current),
                 };
                 store.start();
                 store.publish(current.load(Ordering::SeqCst), None);
@@ -471,6 +474,11 @@ impl HeaderCache {
             .unwrap();
         release
     }
+
+    #[cfg(test)]
+    pub(crate) fn pause_reader_for_test(&self) -> mpsc::Sender<()> {
+        self.reader.port().pause_for_test()
+    }
 }
 
 impl Drop for HeaderCache {
@@ -492,6 +500,7 @@ struct Worker {
     clear_pending: bool,
     catalog: Arc<std::sync::Mutex<catalog::Catalog>>,
     reader: reader::Port,
+    epoch: Arc<AtomicU64>,
 }
 
 impl Worker {
@@ -622,7 +631,7 @@ impl Worker {
                     return;
                 }
                 self.rebuilt = true;
-                self.reader.close();
+                self.close_for_rebuild();
                 match database::remove(&self.path)
                     .and_then(|()| Database::open(&self.path, self.limit))
                 {
@@ -668,7 +677,7 @@ impl Worker {
                 self.db = None;
                 if !database::is_busy(&error) && !self.rebuilt {
                     self.rebuilt = true;
-                    self.reader.close();
+                    self.close_for_rebuild();
                     if database::remove(&self.path).is_ok() {
                         self.ensure_open();
                     } else {
@@ -680,6 +689,24 @@ impl Worker {
                 None
             }
         }
+    }
+
+    fn close_for_rebuild(&self) {
+        {
+            let mut catalog = crate::panic::lock(&self.catalog);
+            // Reject lookups already admitted by the old catalog, even if they
+            // reach the reader after its close acknowledgment. New lookups miss
+            // until the replacement database's inventory is published.
+            // Startup has not admitted any reader work and can retain its queued
+            // publications; only a previously published inventory needs fencing.
+            if catalog.ready || !catalog.stored.is_empty() {
+                catalog.epoch = self.epoch.fetch_add(1, Ordering::SeqCst) + 1;
+            }
+            catalog.ready = false;
+            catalog.stored.clear();
+            catalog.dirty = 0;
+        }
+        self.reader.close();
     }
 }
 

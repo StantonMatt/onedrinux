@@ -5,6 +5,7 @@
 //! facts and last-use time. A covering row answers a request; partial coverage misses.
 //! DELETE journals and full auto-vacuum keep the actual database under its byte budget.
 
+// test: header_cache_reversed_forgets_refresh_the_catalog_after_each_deletion
 // test: header_cache_keeps_ranges_across_restart_and_preserves_facts
 // test: header_cache_bounds_ranges_items_and_evicts_lru_rows
 // test: header_cache_expires_unused_rows_and_removes_other_versions
@@ -352,8 +353,13 @@ impl Database {
     }
 
     pub(super) fn forget(&mut self, item: &str) -> anyhow::Result<()> {
-        self.conn
-            .execute("DELETE FROM headers WHERE item = ?1", [item])?;
+        if self
+            .conn
+            .execute("DELETE FROM headers WHERE item = ?1", [item])?
+            > 0
+        {
+            self.removed.set(true);
+        }
         Ok(())
     }
 

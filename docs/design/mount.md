@@ -516,7 +516,10 @@ SQLite lock contention waits at most 5 ms; the overall foreground lookup waits a
 the mount can try both `prepared_range` and `read_range`, each with that budget. A slow
 disk cannot extend that FUSE lookup wait. Cancelled queued lookups are skipped.
 Invalidation fences both workers immediately; sign-out and rebuild close the reader
-with an acknowledged barrier before deleting or replacing the database. An existing read-ahead request and a known disk hit race to answer a foreground
+with an acknowledged barrier before deleting or replacing the database. Rebuilding a
+published database advances the epoch and suspends catalog admission until the replacement
+inventory is published, so old lookups cannot reopen the closed database generation. An
+existing read-ahead request and a known disk hit race to answer a foreground
 prepared range; either may finish first. If the speculative owner disappears during a
 lookup, memory is checked again before acquiring a foreground pool slot.
 Lookup answers enqueue expiry, version-pruning and LRU maintenance on the writer

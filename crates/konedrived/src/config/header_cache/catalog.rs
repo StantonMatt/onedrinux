@@ -1,5 +1,7 @@
 //! In-memory range metadata: absent intervals never wait for a disk lookup, and covered
 //! foreground reads only touch LRU metadata instead of publishing duplicate bytes.
+// test: header_cache_clean_catalog_does_not_scan_for_uses
+// test: header_cache_catalog_dirty_accounting_only_examines_replaced_rows
 // test: header_cache_memory_hits_coalesce_lru_on_rows_until_the_writer_flushes
 // test: header_cache_catalog_tracks_eviction_versions_and_forget
 // test: header_cache_repeated_memory_hits_do_not_crowd_out_a_new_head
@@ -28,6 +30,8 @@ pub(super) struct Catalog {
     pub(super) pending: Vec<(u64, Key, Range)>,
     pub(super) dirty: usize,
     last_use: Option<std::time::Instant>,
+    #[cfg(test)]
+    pub(super) rows_examined: usize,
 }
 
 impl Catalog {
@@ -74,13 +78,17 @@ impl Catalog {
 
     pub(super) fn take_uses(&mut self, epoch: u64, limit: usize) -> Vec<LookupUse> {
         let mut used = Vec::new();
-        if self.blocked || self.epoch != epoch {
+        if self.blocked || self.epoch != epoch || self.dirty == 0 {
             return used;
         }
         for (key, ranges) in &mut self.stored {
             for range in ranges {
                 if used.len() == limit {
                     break;
+                }
+                #[cfg(test)]
+                {
+                    self.rows_examined += 1;
                 }
                 if let Some(at) = range.used.take() {
                     used.push(LookupUse {
@@ -102,9 +110,22 @@ impl Catalog {
     }
 
     pub(super) fn replace(&mut self, mut entries: Entries, partial: bool) {
+        let mut dirty = if partial { self.dirty } else { 0 };
         for (key, ranges) in &mut entries {
             if let Some(old) = self.stored.get(key) {
-                for range in ranges {
+                if partial {
+                    dirty -= old
+                        .iter()
+                        .filter(|range| {
+                            #[cfg(test)]
+                            {
+                                self.rows_examined += 1;
+                            }
+                            range.used.is_some()
+                        })
+                        .count();
+                }
+                for range in ranges.iter_mut() {
                     range.used = old
                         .iter()
                         .find(|other| other.from == range.from && other.facts == range.facts)
@@ -112,18 +133,23 @@ impl Catalog {
                         .filter(|at| *at > range.at);
                 }
             }
+            dirty += ranges
+                .iter()
+                .filter(|range| {
+                    #[cfg(test)]
+                    {
+                        self.rows_examined += 1;
+                    }
+                    range.used.is_some()
+                })
+                .count();
         }
         if partial {
             self.stored.extend(entries);
         } else {
             self.stored = entries;
         }
-        self.dirty = self
-            .stored
-            .values()
-            .flatten()
-            .filter(|range| range.used.is_some())
-            .count();
+        self.dirty = dirty;
     }
 
     pub(super) fn covers(
