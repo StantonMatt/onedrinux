@@ -59,6 +59,7 @@
 // test: no_try_of_a_step_towards_onedrive_from_an_unsent_row_is_kept
 // test: the_tries_of_a_step_towards_onedrive_from_a_row_that_is_not_unsent_are_kept_and_told_as_a_sending
 // test: a_refresh_makes_every_try_due_and_keeps_its_count
+// test: a_network_recovery_makes_only_network_download_retries_due
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -222,6 +223,11 @@ impl LocalStepTries {
     pub(crate) fn list_next_tries(&self) -> BTreeMap<(LocalItemId, TriedStep), NextTry> {
         let next_try = |((item, kind), kept): (&(LocalItemId, LocalStepKind), &LocalStepTry)| Some(((*item, kind.tried_step()), NextTry { not_before: kept.next_try_at?, reason: kept.last_failure.clone() }));
         self.tries.iter().filter_map(next_try).collect()
+    }
+
+    /// A listing succeeded: network failures can run now; unrelated backoffs stand.
+    pub(crate) fn clear_next_tries_for(&mut self, reason: &Reason) -> usize {
+        self.tries.values_mut().filter(|kept| kept.last_failure == *reason).filter_map(|kept| kept.next_try_at.take()).count()
     }
 
     /// Every try is due now, with its count and its reason kept: the user asked for a

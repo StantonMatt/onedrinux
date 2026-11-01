@@ -439,6 +439,13 @@ impl StepMemory<'_> {
         self.write(|tx| clear_next_tries(tx))
     }
 
+    /// Only timed failures of this exact reason are due now. A successful listing
+    /// uses `Reason::Network`: reachability does not end a lock or other backoff.
+    /// The failure count is kept, and nothing about a refusal or session changes.
+    pub fn clear_next_tries_for(&mut self, reason: &Reason) -> Result<usize, TreeError> {
+        self.write(|tx| Ok(tx.prepare_cached("UPDATE step_memory SET next_try_at = NULL WHERE next_try_at IS NOT NULL AND last_failure = ?1")?.execute([reason.to_string()])?))
+    }
+
     /// OneDrive refused the content of `item`, sent by a step planned from a row stamped
     /// `unsent_since`, for lack of space. Not written when the row has another stamp or
     /// none, or the bytes that were refused are not the file's any more. Refused for an id

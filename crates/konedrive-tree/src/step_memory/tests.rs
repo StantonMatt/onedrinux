@@ -737,3 +737,16 @@ fn what_was_learnt_of_a_place_in_a_directory_goes_with_the_directorys_row() {
     let after = kept(&store, file);
     assert_eq!((after.refusal, after.taken_name, after.failed_tries.map(|tries| tries.count)), (None, None, Some(1)));
 }
+
+#[test]
+fn a_network_recovery_makes_only_network_tries_due_and_keeps_their_count() {
+    let mut store = TreeStore::in_memory().unwrap();
+    let (network, locked) = (make_file(&mut store, ROOT, "network"), make_file(&mut store, ROOT, "locked"));
+    assert_eq!(remember_try(&mut store, network, &Reason::Network, Some(300)), Counted(1));
+    assert_eq!(remember_try(&mut store, network, &Reason::Network, Some(600)), Counted(2));
+    assert_eq!(remember_try(&mut store, locked, &Reason::Locked, Some(300)), Counted(1));
+    assert_eq!(store.step_memory().clear_next_tries_for(&Reason::Network).unwrap(), 1);
+    assert_eq!(store.step_memory().clear_next_tries_for(&Reason::Network).unwrap(), 0);
+    assert_eq!(said(&mut store, network).failed_tries, Some(FailedTries { count: 2, next_try_at: None, last_failure: Reason::Network }));
+    assert_eq!(store.step_memory().list_timed_waits(10).unwrap(), [TimedWait { item: locked, until: 300 }]);
+}

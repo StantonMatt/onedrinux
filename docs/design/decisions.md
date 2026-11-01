@@ -1098,3 +1098,21 @@ budgets remain; a single covering row is still required. Joining rows cannot res
 missing byte-zero prefix, and is unnecessary for the foreground intervals kept here.
 
 No other application or OS configuration is changed. See [mount.md](mount.md) §5.1.1.
+
+
+## Resume offline edits when a background listing succeeds (2026-11-01)
+
+A downloaded kept file remains editable with Graph and its notification socket fully
+unreachable. Transport failures never discard its unsent version or exhaust retries.
+However, after a long outage, an upload's exponential retry could still wait an hour
+after a background listing had proved Graph reachable. NetworkManager's refresh made
+it due, but machines without that service depended on the old upload timer.
+
+Every successful listing now makes only `network` retries due, in the durable sender
+memory and in the plan task's download memory. Counts, sessions, refusals and unrelated
+backoffs remain. The normal version checks and conflict policy still precede sending.
+A deterministic test starts with sixteen failures and an hour still to wait, proves a
+listing page alone does nothing, then checks that listing completion admits the network
+retry and keeps a locked file waiting. The VM's `offline_keep` group uses a loopback
+transport gate, including GETs and notifications, to cover offline saves, restart,
+conflicts and the change guard without a real account or NetworkManager.

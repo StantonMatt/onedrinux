@@ -9,7 +9,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 #[tokio::main]
 async fn main() {
     let mut onedrive = FakeOneDriveCommands::start().await;
-    println!("ready {}", onedrive.graph().server.uri());
+    println!("ready {}", onedrive.graph().uri());
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     while let Ok(Some(line)) = lines.next_line().await {
         let words: Vec<&str> = line.split_whitespace().collect();

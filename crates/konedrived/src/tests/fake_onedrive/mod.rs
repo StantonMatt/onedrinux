@@ -16,6 +16,10 @@
 mod sockets;
 #[cfg(test)]
 pub(crate) mod connections;
+mod network;
+
+#[cfg(test)]
+mod tests;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
@@ -24,7 +28,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use url::Url;
 use wiremock::matchers::any;
-use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+use wiremock::{Mock, Request, Respond, ResponseTemplate};
 
 use konedrive_graph::drive::item::format_graph_time;
 use konedrive_graph::drive::{DriveClient, RetryPolicy};
@@ -32,6 +36,7 @@ use konedrive_graph::quickxor::QuickXor;
 use konedrive_graph::token::StaticToken;
 
 pub(crate) use sockets::FakeSockets;
+pub use network::Server as FakeServer;
 
 pub(crate) const ROOT: &str = "R";
 pub(crate) const APPLICATION: &str = "384b100c-c384-4a68-99b2-17a596bb66b9";
@@ -888,7 +893,8 @@ impl Respond for Responder {
 }
 
 pub struct FakeGraph {
-    pub server: MockServer,
+    /// Gated endpoint plus wiremock's scripted answers and recorded requests.
+    pub server: FakeServer,
     pub(crate) cloud: Arc<Mutex<Cloud>>,
     /// The drive's notification socket.
     pub(crate) sockets: Arc<FakeSockets>,
@@ -906,7 +912,7 @@ impl FakeGraph {
 
     /// An empty drive: its root, `R`.
     pub async fn start() -> Self {
-        let server = MockServer::start().await;
+        let server = FakeServer::start().await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("a local port for the notification socket");
         let socket_url = format!("http://{}/notifications?token=fake", listener.local_addr().expect("its address"));
         let sockets = Arc::new(FakeSockets::new());
@@ -940,8 +946,21 @@ impl FakeGraph {
         out
     }
 
+    /// The gated loopback endpoint, also used by every URL the fake returns.
+    pub fn uri(&self) -> String {
+        self.server.uri()
+    }
+
+    /// Full transport loss: HTTP connections (including GETs and pooled ones) close
+    /// without an answer, and notification sockets close and refuse reconnection.
+    /// The fake's out-of-band controls still allow another device to change the drive.
+    pub fn set_network_down(&self, down: bool) {
+        self.server.set_down(down);
+        self.sockets.set_network_down(down);
+    }
+
     pub fn client(&self) -> DriveClient {
-        let base = Url::parse(&format!("{}/", self.server.uri())).unwrap();
+        let base = Url::parse(&format!("{}/", self.uri())).unwrap();
         DriveClient::new(base, Arc::new(StaticToken::new("T")))
             .unwrap()
             .with_application_id(APPLICATION.to_owned())

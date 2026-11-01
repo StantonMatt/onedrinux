@@ -478,3 +478,36 @@ async fn the_pool_reaches_its_ceiling_while_there_is_work_beyond_its_slots_and_n
     }
     assert_eq!(pool.size(), START, "nothing ever waited for a slot");
 }
+
+/// A background listing proves Graph is reachable again, even without NetworkManager.
+/// An hour-long offline backoff must not keep local edits waiting after that listing.
+#[test]
+fn a_successful_listing_makes_network_retries_due_without_releasing_other_backoffs() {
+    use konedrive_tree::FailedTries;
+    let task_fixture = TaskFixture::new();
+    let (fixture, task) = (&task_fixture.fixture, &task_fixture.task);
+    let (network, locked) = (fixture.make_own_file("offline.txt", b"final offline save"), fixture.make_own_file("locked.txt", b"still locked"));
+    let now = (task.parts.clock)();
+    for (file, reason) in [(&network, Reason::Network), (&locked, Reason::Locked)] {
+        let (id, stamp) = (file.local_item_id, file.unsent_since);
+        fixture.write_rows(move |store| {
+            for count in 1..=16 {
+                assert_eq!(store.step_memory().remember_failed_try(id, stamp, &reason, Some(now + 3_600))?, konedrive_tree::FailedTryStanding::Counted(count));
+            }
+            Ok(())
+        });
+    }
+    let stop = CancellationToken::new();
+    fixture.runtime().block_on(async {
+        task.apply_wake_causes(&[WakeCause::ListingPageWritten].into(), &stop).await;
+        let before = task.make_plan(task.gather_daemon_facts()).await.unwrap();
+        assert!(before.plan.steps.iter().all(|step| step.local_item_id() != network.local_item_id));
+        task.apply_wake_causes(&[WakeCause::ListingEnded].into(), &stop).await;
+        let after = task.make_plan(task.gather_daemon_facts()).await.unwrap();
+        assert!(after.plan.steps.iter().any(|step| step.local_item_id() == network.local_item_id), "Graph is reachable; the final offline content must be sent now");
+        assert!(after.plan.steps.iter().all(|step| step.local_item_id() != locked.local_item_id), "an unrelated lock's backoff still stands");
+    });
+    let memory = |id| fixture.write_rows(move |store| store.step_memory().find_item_memory(id)).failed_tries;
+    assert_eq!(memory(network.local_item_id), Some(FailedTries { count: 16, next_try_at: None, last_failure: Reason::Network }));
+    assert_eq!(memory(locked.local_item_id), Some(FailedTries { count: 16, next_try_at: Some(now + 3_600), last_failure: Reason::Locked }));
+}

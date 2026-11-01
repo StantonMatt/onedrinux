@@ -260,3 +260,14 @@ fn a_refresh_makes_every_try_due_and_keeps_its_count() {
     assert_eq!(tries.list_next_tries(), BTreeMap::new());
     assert_eq!(tries.remember_failed_try(&download(&planned_from), Reason::Network, Some(240)), 3);
 }
+
+#[test]
+fn a_network_recovery_makes_only_network_download_retries_due() {
+    let network = agreeing(2);
+    let locked = agreeing(3);
+    let mut tries = tries_of_a_download(&network);
+    tries.remember_failed_try(&download(&locked), Reason::Locked, Some(300));
+    assert_eq!(tries.clear_next_tries_for(&Reason::Network), 1);
+    assert_eq!(tries.count_tries(&download(&network)), 2, "recovery does not erase the failure count");
+    assert_eq!(tries.list_next_tries(), [((id(3), TriedStep::TowardsFolder(FolderStepKind::DownloadContent)), NextTry { not_before: 300, reason: Reason::Locked })].into());
+}

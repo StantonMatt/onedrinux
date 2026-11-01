@@ -226,7 +226,27 @@ OneDrive Settings has the free space to keep on this computer's disk. Why a pinn
 space is in the folder's `LastError` and `Trouble`, which the window shows as it shows any other
 ([desktop.md](desktop.md)).
 
-## 8. Known limits
+## 8. Offline editing
+
+A downloaded kept file is read and changed locally while every Graph request fails. Its
+unsent change remains durable across restart and successive saves coalesce into the
+latest content. The mount's `user.konedrive.sync` mark is `pending` between retries;
+network failure alone never makes the change blocked or drops its bytes. Account status
+becomes Offline when a listing cannot reach Graph ([sync.md](sync.md) §5.2).
+
+On reconnect, concurrent remote edits follow [writes.md](writes.md) §5: OneDrive's
+version keeps the name and the local version is renamed and uploaded as a conflict copy.
+Both appear locally. An individual pin follows the original remote binding, not the
+new conflict copy; inside a kept folder both files inherit its pin. The copy stays
+resident even without its own pin.
+
+The VM group `offline_keep` exercises complete transport loss, including GETs and the
+notification socket, without NetworkManager or a real account. It also checks guarded
+creates/removals, an offline restart and unchanged-stat edits. Saves through the running
+mount are recorded even if size and mtime are preserved. A direct backing-file edit
+while the daemon is absent still has the documented [F298](../limitations/F298.md) limit.
+
+## 9. Known limits
 
 - The pins are lost with the store (D36).
 - Pinning a big folder downloads everything in it, with no prompt; the free space kept is the one

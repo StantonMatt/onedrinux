@@ -77,6 +77,7 @@
 // test: a_refresh_reads_the_quota_once_and_a_quota_read_by_another_is_not_read_again
 // test: a_refresh_forgets_what_was_not_allowed_and_another_wake_keeps_it
 // test: a_run_begins_by_making_every_next_try_the_store_keeps_due
+// test: a_successful_listing_makes_network_retries_due_without_releasing_other_backoffs
 // test: the_progress_tick_comes_a_second_on_while_a_step_sends_content_and_at_no_other_time
 // test: the_queues_status_is_published_from_the_rows_the_answers_and_the_running_uploads
 // test: the_status_is_published_after_a_plan_and_after_a_settled_round_and_the_marks_once_the_step_is_ended
@@ -526,7 +527,8 @@ impl SyncPlanTask {
     /// what OneDrive refused as not allowed may be allowed now,
     /// `StepMemory::forget_refusals_for(&Reason::Forbidden)`, then
     /// `StepMemory::clear_next_tries`, and `LocalStepTries::clear_next_tries` of the
-    /// task's own); a listing ended (`SendingHolds::set_listing_ended`, the count of
+    /// task's own); a listing ended (network retries made due, then
+    /// `SendingHolds::set_listing_ended`, the count of
     /// logged events to 0, and the full listings asked for forgotten once the store's
     /// request has begun). And, when sending is not held: the upload sessions left to
     /// cancel and the items uploads left are asked for, off the loop
@@ -562,6 +564,13 @@ impl SyncPlanTask {
             self.make_next_tries_due().await;
         }
         if causes.contains(&WakeCause::ListingEnded) {
+            // A background listing proves Graph is reachable even on machines without
+            // NetworkManager. Do not leave offline edits behind an hour-long retry.
+            // Only the transport failure ends: locks and other failures still wait.
+            if let Err(error) = parts.store.call(|store| store.step_memory().clear_next_tries_for(&Reason::Network)).await {
+                tracing::warn!("cannot make the network retries due: {error}");
+            }
+            crate::panic::lock(&self.local_step_tries).clear_next_tries_for(&Reason::Network);
             parts.sending_holds.set_listing_ended();
             self.note_first_filling(FirstFillingFact::ListingEnded).await;
             self.logged_since_listing_ended.store(0, Ordering::SeqCst);

@@ -34,6 +34,12 @@ impl FakeSockets {
         }
     }
 
+    pub(super) fn set_network_down(&self, down: bool) {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.refuse.store(down, SeqCst);
+        if down { self.drops.send_modify(|n| *n += 1); }
+    }
+
     pub(super) fn changed(&self) {
         self.changes.send_modify(|n| *n += 1);
     }
@@ -48,6 +54,7 @@ impl FakeSockets {
         use futures_util::{SinkExt, StreamExt};
         use std::sync::atomic::Ordering::SeqCst;
         use tokio_tungstenite::tungstenite::Message;
+        if self.refuse.load(SeqCst) { return; }
         let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else { return };
         self.accepted.fetch_add(1, SeqCst);
         if self.refuse.load(SeqCst) {

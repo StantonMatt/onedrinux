@@ -190,7 +190,9 @@ and one is cancelled between requests, never in a page.
 
 `ListingPoller` runs a cycle at once, then 60 s after the last ended (300 s while the notification
 socket is up), after a failure after 5, 15 and 30 s and then every 60 s, and at once on a refresh;
-refreshes given during a cycle are one. While the account's work is stopped no cycle runs, and
+refreshes given during a cycle are one. A successful listing makes timed `network`
+retries due in both the durable sender memory and the task's download retries, preserving
+failure counts and unrelated backoffs. While the account's work is stopped no cycle runs, and
 whoever ends the stop asks for one ([writes.md](writes.md) §6.3).
 
 `listing/live.rs` keeps Graph's notification socket open: events within 2 s give one cycle, a

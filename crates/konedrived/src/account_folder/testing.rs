@@ -64,6 +64,12 @@ pub fn allocated_bytes(service: &SyncService, paths: &[std::path::PathBuf]) -> O
     })
 }
 
+/// The production overall-state decision, exposed to the VM without a session bus.
+pub fn overall(service: &SyncService) -> String {
+    let reason = crate::status::overall::reason(service.account().snapshot().state, &service.state().get(), service.report().transfers.subscribe().borrow().len());
+    format!("{} {}", reason.state().as_str(), reason.as_str())
+}
+
 /// A clock that stands still until the test moves it. Whoever sleeps by it wakes when it
 /// has been moved far enough, however the sleep and the move fall in time.
 pub(crate) struct ManualClock {

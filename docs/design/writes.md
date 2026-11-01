@@ -416,7 +416,10 @@ follows, the one place that counts tries ([sync.md](sync.md) §7).
 
 A refusal for good is kept with the local version that was sent, and the item is not sent again
 until that version changes; the activity log records `upload-failed` once per item and reason.
-Nothing is ever dropped for failing.
+Nothing is ever dropped for failing. A successful listing makes retries whose last
+failure was `network` due immediately, keeping their counts and leaving other backoffs
+alone. Thus a background reconnect can send offline edits without waiting for the
+hour-long upload backoff; it does not require NetworkManager or a manual refresh.
 
 OneDrive takes a file of 250 GiB and refuses one byte more, with `413` on the first fragment
 (`crates/konedrive-graph/src/drive/error.rs`); nothing is checked before the request.

@@ -165,12 +165,15 @@ tests/fuse-probe/run.sh kio_trash                 # by name only
 ```
 
 - **The groups**: `service` (the daemon's service command by command; it prints lines for a
-  person and checks nothing), `mounted_folder`, `file_writes`, `file_reads`, `download_guard` and
-  `daemon_restarts` (scenarios with checks, a file each in `tests/fuse-probe/`), and `cli`
+  person and checks nothing), `mounted_folder`, `file_writes`, `file_reads`, `download_guard`,
+  `daemon_restarts` and `offline_keep` (scenarios with checks, a file each in `tests/fuse-probe/`), and `cli`
   (`konedrivectl`'s tests of a mounted folder, `crates/konedrivectl/tests/sync_cli`).
 - **`kio_trash`** runs by name only: it builds `tests/kio/trash_probe.cpp`, which needs the Qt 6
   and KDE Frameworks 6 development packages on the host, and the guest runs it with the host's
   libraries.
+- **Offline keep**: `tests/fuse-probe/run.sh offline_keep` checks complete transport loss
+  (`network down|up` on the fake), local editing, restart, conflict copies and guarded
+  removals. `outage on|off` remains a write-only HTTP 500 drill, not an offline simulation.
 - **One scenario**: `ONLY` names the scenarios to run, of the groups asked for.
 - **Folder readiness**: `register_folder` waits for the first Graph listing to end. The
   planner may still be placing its items. A scenario that reads a known set of files must

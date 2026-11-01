@@ -170,6 +170,8 @@ async fn main() {
                 let part = service.menu_part(&[path(p)]).await;
                 format!("taken {:?}, free-up refused {:?}", part.taken, part.free_up_refused)
             }
+            ["overall"] => testing::overall(&service),
+            ["live-changes"] => service.state().get().cycle.live_changes.as_str().to_owned(),
             ["status"] => {
                 let s = service.state().get();
                 format!(

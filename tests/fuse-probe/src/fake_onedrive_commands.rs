@@ -13,6 +13,8 @@
 //! `throttle <method> <fragment> <pass> <seconds> <times>`, `lose <method> <fragment> <times>`,
 //! `free <bytes>|unlimited` (the space left), `outage on|off` (every request that is not a
 //! `GET` answered `500`: a failure that passes, not a throttle, which `503` is to the daemon).
+//! `network down|up` closes all HTTP connections without an answer and closes/refuses
+//! notification sockets: a full offline simulation, including reads.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -122,6 +124,10 @@ impl FakeOneDriveCommands {
             }
             ["free", space] => {
                 graph.with(|cloud| cloud.free = space.parse().ok());
+                String::new()
+            }
+            ["network", state @ ("down" | "up")] => {
+                graph.set_network_down(*state == "down");
                 String::new()
             }
             ["outage", "on"] => {

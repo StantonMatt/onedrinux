@@ -86,7 +86,7 @@ know `konedrive-graph`); `konedrive-dbus`; `konedrive-text` (uses `konedrive-rea
 | The development build's tests | `cargo test -p konedrived -p konedrivectl --features konedrived/dev-tools,konedrivectl/dev-tools` | The token export and the signed-out account (`dbus/token_export.rs`, `dbus/dev_tools.rs`, `konedrivectl dev`) |
 | The window | `cmake -S app -B build/app -DBUILD_TESTING=ON && cmake --build build/app && ctest --test-dir build/app --output-on-failure` | `app/tests/` |
 | The Dolphin plugins | `cmake -S dolphin -B build/dolphin -DBUILD_TESTING=ON && cmake --build build/dolphin && ctest --test-dir build/dolphin --output-on-failure` | `dolphin/tests/` |
-| The VM suite | `tests/fuse-probe/run.sh [<group>…]`; `ONLY="<scenario>"` for one scenario | The daemon's service and `konedrivectl` over a sync folder that is mounted for real, on ext4 in a virtme-ng VM, over the fake OneDrive: nothing is mounted on the host. Groups: `service`, `mounted_folder`, `file_writes`, `file_reads`, `download_guard`, `daemon_restarts`, `cli`; by name only, `kio_trash`, `crash_consistency` |
+| The VM suite | `tests/fuse-probe/run.sh [<group>…]`; `ONLY="<scenario>"` for one scenario | The daemon's service and `konedrivectl` over a sync folder that is mounted for real, on ext4 in a virtme-ng VM, over the fake OneDrive: nothing is mounted on the host. Groups: `service`, `mounted_folder`, `file_writes`, `file_reads`, `download_guard`, `daemon_restarts`, `offline_keep`, `cli`; by name only, `kio_trash`, `crash_consistency` |
 | The test account | `konedrive-write-test` (`tests/write-account`) | Writes to OneDrive itself, through the guards; rare, never the user's real account |
 | The structure | `scripts/check-structure.sh` | The files over the advised sizes (listed only), tests outside source files, the daemon's layer order, locks, the tests a module names |
 
@@ -116,11 +116,13 @@ The directories below are in layer order: a directory uses only the directories 
   (built for tests and with `fault-injection` only). Its folders answer as OneDrive
   personal's: no cTag, an eTag only their own rename or move changes, and a recursive
   `DELETE` refused `412` without their current eTag; their children in pages with download
-  URLs that answer a `Range` with `206`, `Content-Range` and the item's eTag.
+  URLs that answer a `Range` with `206`, `Content-Range` and the item's eTag. `[tests]`
 - `tests/fake_onedrive/sockets.rs` — the fake's notification socket.
 - `tests/fake_onedrive/connections.rs` — test-only loopback fault proxy: request-body
   drops, lost accepted responses, response-body drops, and an offline switch; owned
   connection tasks and recorded Range/Content-Range headers.
+- `tests/fake_onedrive/network.rs` — a loopback transport gate that closes all HTTP connections
+  during simulated network loss, including pooled connections; all returned URLs use it.
 
 ### `crates/konedrived/src/config/`
 
@@ -1277,6 +1279,8 @@ suite".
 - `download_guard.sh` — the group `download_guard`: app-download reclamation and its keep/open skip rules, bulk and background refusals, an ordinary app scope reading 100 files without counting, explicit actions,
   initial-placement readiness, missing-name accounting, low-space ranges, already-open handles and mmap.
 - `daemon_restarts.sh` — the group `daemon_restarts`: stops and kills in the middle of work.
+- `offline_keep.sh` — the group `offline_keep`: pinned offline saves, reconnect, conflicts,
+  guarded creates/removals, offline restart and unchanged-stat edit characterization.
 - `crash_consistency.sh` — by-name-only group: two boots on one disk with guest SysRq power loss, edit/rename/missing-copy recovery and a mid-migration cut.
 - `store_durability.py` — focused 10,000-create/1,000-rewrite/delete harness comparing SQLite NORMAL and FULL.
 - `src/bin/store-probe.rs` — offline store assertions and real migration entry for the power-loss guest.
