@@ -11,9 +11,11 @@
 //!
 //! An open session holds its name in OneDrive with an empty file until
 //! it completes or is cancelled, so a session is never simply
-//! dropped: a fragment OneDrive refuses for now (`429`, `503`, a dropped
-//! connection, a timeout) is sent again to the same session
-//! ([`DriveClient::upload_chunk`]), and a session given up is cancelled
+//! dropped: the daemon sends with [`DriveClient::upload_chunk_once`]; a
+//! fragment refused for now (`429`, `503`, a dropped connection, a timeout)
+//! ends that step with the session kept. Its next attempt passes mutation
+//! admission again and asks [`DriveClient::upload_status`] where to resume.
+//! A session given up is cancelled
 //! ([`DriveClient::cancel_upload`]).
 //!
 //! The upload URL is pre-authenticated: it never gets the account's token
@@ -178,7 +180,10 @@ impl DriveClient {
     /// one that is not is refused before anything is sent. A fragment the
     /// session already has (`416`) is answered with where the session stands.
     ///
-    /// A fragment refused for now — `429` or `503`, a dropped connection, a
+    /// Optional in-call retry helper. The daemon uses [`Self::upload_chunk_once`]
+    /// instead, so every retry returns through scope and change-guard admission.
+    ///
+    /// With this helper, a fragment refused for now — `429` or `503`, a dropped connection, a
     /// timeout — goes again to the same session: after
     /// `Retry-After` (or the policy's wait) the session is asked where it
     /// stands, and the fragment is sent again if it still expects it, up to

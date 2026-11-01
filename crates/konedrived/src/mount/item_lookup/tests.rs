@@ -647,6 +647,31 @@ fn the_sync_mark_per_case() {
 }
 
 #[test]
+fn upload_error_marks_follow_permanent_refusal_memory_and_clear_when_it_is_forgotten() {
+    use konedrive_tree::{Refusal, RefusedVersion};
+    let fixture = ItemFixture::new();
+    let file = fixture.make_own_file("a.txt", b"unsent");
+    let (id, stamp) = (file.local_item_id, file.unsent_since);
+    let states = super::super::directory_states::DirectoryStates::build(
+        &fixture.store, fixture.download_states.clone(), fixture.running_steps.clone(), fixture.published_plan.clone(), fixture.inotify_bridge.clone(),
+    ).unwrap();
+    let lookup = Arc::new(Arc::try_unwrap(lookup(&fixture)).ok().expect("a unique lookup").with_directory_states(states));
+    assert_eq!(fixture.write_rows(move |store| store.step_memory().remember_failed_try(id, stamp, &Reason::Network, Some(START_TIME + 600))), konedrive_tree::FailedTryStanding::Counted(1));
+    assert_eq!(find_xattr(&fixture, &lookup, id, XATTR_SYNC).unwrap(), "pending");
+    assert_eq!(find_xattr(&fixture, &lookup, ROOT, XATTR_SYNC).unwrap(), "pending");
+
+    // The cached directory index must observe step-memory changes even when the
+    // last plan did not include the item, or still calls it a transient retry.
+    fixture.published_plan.publish([(id, ItemAnswer::Waiting(WaitReason::Time { until: START_TIME + 600, reason: Reason::Network }))].into());
+    assert_eq!(fixture.write_rows(move |store| store.step_memory().remember_refusal(id, stamp, &Refusal { reason: Reason::Forbidden, version: RefusedVersion::Shown(file.local.unwrap()) })), konedrive_tree::FactStanding::StillSaid);
+    assert_eq!(find_xattr(&fixture, &lookup, id, XATTR_SYNC).unwrap(), "blocked");
+    assert_eq!(find_xattr(&fixture, &lookup, ROOT, XATTR_SYNC).unwrap(), "blocked");
+    fixture.write_rows(|store| store.step_memory().forget_refusals_for(&Reason::Forbidden));
+    assert_eq!(find_xattr(&fixture, &lookup, id, XATTR_SYNC).unwrap(), "pending");
+    assert_eq!(find_xattr(&fixture, &lookup, ROOT, XATTR_SYNC).unwrap(), "pending");
+}
+
+#[test]
 fn directory_and_failed_file_attributes_use_the_incremental_index() {
     let fixture = ItemFixture::new();
     let dir = fixture.show_onedrive_directory("docs");

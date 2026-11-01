@@ -75,6 +75,8 @@
 // test: a_new_file_whose_name_is_taken_is_answered_by_who_holds_it
 // test: a_new_file_made_and_removed_here_before_its_commit_is_removed_in_onedrive
 // test: a_content_the_row_no_longer_has_is_not_sent
+// test: a_large_upload_resumes_after_a_socket_drop_from_the_servers_offset
+// test: an_upload_expired_during_suspend_restarts_cleanly_without_a_second_file
 
 // test: write_scope_refuses_a_resumed_upload_whose_original_target_is_outside
 // test: write_scope_keeps_an_earlier_upload_left_outside_the_allowlist
@@ -612,7 +614,7 @@ impl ContentUpload {
         }
     }
 
-    /// Sends the fragments of `file` from `session.next_offset` on: `upload_chunk`, each of at
+    /// Sends the fragments of `file` from `session.next_offset` on: `upload_chunk_once`, each of at
     /// most `Limits::chunk` bytes, read by `LocalContentFile::read_fragment` off the
     /// runtime, each followed by `StepMemory::advance_upload_session` and the progress
     /// told (`RunningSteps::tell_progress`). The hash sent is that of the bytes read
@@ -633,7 +635,9 @@ impl ContentUpload {
     /// is `StepFailure::AnswerUnreadable`; an answer that takes nothing (OneDrive still
     /// expects the same offset) is `StepRefusal::Transient`, the session kept; a session
     /// answered gone: [`follow_gone_session`](Self::follow_gone_session); any other
-    /// refusal keeps the session for the next try.
+    /// refusal keeps the session for the next try. No transient fragment failure is
+    /// retried in this call: the next step passes mutation admission again and reads
+    /// the session's progress before resuming.
     async fn send_fragments(&self, item: &ItemVersions, target: &ContentTarget, file: &Arc<LocalContentFile>, session: UploadSession) -> Result<SentContent, SendContentError> {
         let id = item.local_item_id;
         let (size, fragment_size) = (file.size(), self.limits.chunk.max(1));

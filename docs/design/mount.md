@@ -704,11 +704,16 @@ One download, in its slot of the transfer pool (§5.6):
    unless it matches; a mismatch starts the download over once, and a second is `EIO`. A file
    OneDrive gives without a hash fails closed with `EIO` ([F34](../limitations/F34.md)).
    A read error or a short stream is a break: the next fetch asks from where the bytes stopped,
-   after 200 ms and then 400 ms; the third break ends the download.
+   after 200 ms and then 400 ms; the third break ends the download with `EIO`. A minutes-long
+   outage is therefore answered promptly, rather than holding the reader indefinitely.
+   A later whole-download request tries anew and resumes the checkpoint if usable; its
+   successful landing clears the failed state on the file and its ancestors (§3.5).
 4. **Checkpointed**: every 16 MiB of a content with a hash, the bytes are synced and
    `user.konedrive.progress` written on the file. An unfinished file is continued only for the same
    cTag, after its bytes are read back into the hash. The file has no name, so nothing of it
-   outlives the daemon.
+   outlives the daemon. After a daemon restart a download starts from zero; interrupted
+   bytes are never exposed as a complete resident copy. Upload session progress, in
+   contrast, is persistent ([writes.md](writes.md) §4.3).
 5. **Given its time and the marks of a whole copy, and synced**, by the downloader with no lock
    held: the landing's job waits for no file to reach the disk.
 6. **Landed** (§5.4), then announced (§9), and its waiters answered.

@@ -209,6 +209,13 @@ alone, because a Secret Service search matches every item whose attributes *incl
 asked for: a search for the version-1 item would otherwise find every account's too. The access
 token stays in the daemon's memory, one per account.
 
+Access tokens are refreshed with less than five minutes left. Freshness requires both
+the monotonic and wall-clock deadlines: Linux's monotonic clock excludes time asleep,
+so wall time expires a token after suspend; the monotonic deadline prevents a backwards
+clock correction from extending its life. Cached cloud bytes use the same check before
+bypassing authentication. A server-side `401` still invalidates the token and retries
+the authenticated request once; upload and download URLs remain pre-authenticated.
+
 ## 5. On the bus
 
 | Object | Interfaces |

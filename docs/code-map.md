@@ -118,6 +118,9 @@ The directories below are in layer order: a directory uses only the directories 
   `DELETE` refused `412` without their current eTag; their children in pages with download
   URLs that answer a `Range` with `206`, `Content-Range` and the item's eTag.
 - `tests/fake_onedrive/sockets.rs` — the fake's notification socket.
+- `tests/fake_onedrive/connections.rs` — test-only loopback fault proxy: request-body
+  drops, lost accepted responses, response-body drops, and an offline switch; owned
+  connection tasks and recorded Range/Content-Range headers.
 
 ### `crates/konedrived/src/config/`
 
@@ -1269,7 +1272,8 @@ suite".
 - `file_reads.sh` — persisted header probes survive a daemon restart without a content
   request and unasked padding still misses; the group `file_reads`: reads, downloads, free-up, desktop scans
   of tiny files whose full reads stay in memory after activation; an interrupted libc
-  pread receives EINTR promptly without an unanswered FUSE reply warning.
+  pread receives EINTR promptly without an unanswered FUSE reply warning; failed-download
+  and recovery IN_ATTRIB notifications agree with file and ancestor state attributes.
 - `download_guard.sh` — the group `download_guard`: app-download reclamation and its keep/open skip rules, bulk and background refusals, an ordinary app scope reading 100 files without counting, explicit actions,
   initial-placement readiness, missing-name accounting, low-space ranges, already-open handles and mmap.
 - `daemon_restarts.sh` — the group `daemon_restarts`: stops and kills in the middle of work.
@@ -1441,4 +1445,7 @@ from schema 31, and atomic saves crossing upload requests, without a mount or ac
 
 - `crates/konedrived/src/change_guard/recovery.rs`: restore receipts, listing retirement and durable retained-cleanup ownership.
 - `crates/konedrived/src/mount/item_mount/guard_restore/tests.rs`: off-thread retained verification and inode revalidation.
+- `crates/konedrived/src/mount/item_downloader/tests/interruptions.rs`: real socket
+  interruption, checkpoint resume after a long outage and expired link, and file/ancestor
+  error-state recovery over fake Graph.
 - `crates/konedrivectl/tests/changes_cli.rs`: account selection rejected for shared guard settings.

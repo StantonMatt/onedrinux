@@ -89,6 +89,74 @@ fn cloud_content(folder: &StepsFolder, path: &str) -> Option<Vec<u8>> {
 }
 
 #[tokio::test]
+async fn a_large_upload_resumes_after_a_socket_drop_from_the_servers_offset() {
+    use crate::fake_onedrive::connections::DropAt;
+    use konedrive_graph::drive::CHUNK_SIZE;
+
+    let content = bytes(5 * CHUNK_SIZE + 73);
+    // An interrupted request leaves no second fragment; a lost answer leaves it
+    // accepted remotely but unrecorded locally. Status, rather than local progress,
+    // must decide which fragment to send next in both cases.
+    for (fault, remote_next) in [(DropAt::Request(1024 * 1024), CHUNK_SIZE), (DropAt::Answer, 2 * CHUNK_SIZE)] {
+        let (mut folder, step) = folder_with_a_new_file(&content).await;
+        folder.steps.content_upload.limits = Limits::default();
+        let proxy = folder.graph.connection_faults().await;
+        proxy.drop_next("PUT", "/upload/", 1, 1, fault);
+        let id = step.item().local_item_id;
+
+        let interrupted = folder.run(step.clone()).await;
+        assert!(matches!(interrupted, StepOutcome::Refused(StepRefusal::Transient { .. })), "{interrupted:?}");
+        assert_eq!(folder.memory(id).upload_session.as_ref().unwrap().next_offset, CHUNK_SIZE);
+        let before = proxy.asked().len();
+        // Simulate an overnight sleep without advancing the monotonic runtime clock.
+        folder.fixture.now.fetch_add(8 * 3600, Ordering::SeqCst);
+        assert!(matches!(folder.run(step).await, StepOutcome::Written { .. }));
+
+        let after = proxy.asked();
+        assert_eq!(after[before].method, "GET", "query session progress before resending");
+        let resumed = after[before..].iter().find(|asked| asked.method == "PUT").unwrap();
+        assert_eq!(resumed.path, after[0].path, "the original session is reused");
+        assert_eq!(resumed.content_range, Some(format!("bytes {remote_next}-{}/{total}", remote_next + CHUNK_SIZE - 1, total = content.len())));
+        assert_eq!(folder.count("POST", "createUploadSession"), 1);
+        assert_eq!(cloud_content(&folder, "a.txt"), Some(content.clone()));
+        let row = folder.fixture.find_item(id).unwrap();
+        assert!(row.unsent_since.is_none());
+        assert_eq!(row.synced_content.as_ref().and_then(|content| match content { ContentVersion::Hashed { hash, .. } => hash.clone(), _ => None }), Some(crate::fake_onedrive::qx(&content)));
+        assert_eq!((folder.memory(id), cancellation_count(&folder), folder.graph.with(|cloud| cloud.open_sessions())), (ItemMemory::default(), 0, 0));
+    }
+}
+
+#[tokio::test]
+async fn an_upload_expired_during_suspend_restarts_cleanly_without_a_second_file() {
+    use crate::fake_onedrive::connections::DropAt;
+    use konedrive_graph::drive::CHUNK_SIZE;
+
+    let content = bytes(5 * CHUNK_SIZE + 73);
+    let (mut folder, step) = folder_with_a_new_file(&content).await;
+    folder.steps.content_upload.limits = Limits::default();
+    let proxy = folder.graph.connection_faults().await;
+    proxy.drop_next("PUT", "/upload/", 1, 1, DropAt::Request(1024 * 1024));
+    assert!(matches!(folder.run(step.clone()).await, StepOutcome::Refused(StepRefusal::Transient { .. })));
+    let id = step.item().local_item_id;
+    let mut session = folder.memory(id).upload_session.unwrap();
+    session.expires_at = Some((folder.fixture.clock())() + 60);
+    let unsent_since = step.item().unsent_since;
+    assert_eq!(folder.fixture.write_rows(move |store| store.step_memory().remember_upload_session(id, unsent_since, &session)), konedrive_tree::UploadSessionStanding::Continued);
+    folder.fixture.now.fetch_add(8 * 3600, Ordering::SeqCst);
+    folder.graph.with(|cloud| cloud.expire_sessions());
+    let sent = proxy.asked().iter().filter(|asked| asked.method == "PUT").count();
+
+    assert_eq!(folder.run(step.clone()).await, StepOutcome::Refused(StepRefusal::UploadSessionGone));
+    assert_eq!(proxy.asked().iter().filter(|asked| asked.method == "PUT").count(), sent, "nothing goes to the expired URL");
+    // A remotely ended session has nothing left to cancel (and no placeholder).
+    assert_eq!((folder.memory(id).upload_session, cancellation_count(&folder), folder.graph.with(|cloud| cloud.placeholders())), (None, 0, vec![]));
+    assert!(matches!(folder.run(step).await, StepOutcome::Written { .. }));
+    assert_eq!((folder.count("POST", "createUploadSession"), folder.cloud_paths()), (2, vec!["a.txt".to_owned()]));
+    assert_eq!(cloud_content(&folder, "a.txt"), Some(content));
+    assert_eq!(folder.graph.with(|cloud| cloud.open_sessions()), 0);
+}
+
+#[tokio::test]
 async fn an_empty_file_is_sent_by_one_request_and_opens_no_session() {
     let (folder, step) = folder_with_a_new_file(b"").await;
     assert!(matches!(folder.run(step).await, StepOutcome::Written { .. }));
@@ -224,6 +292,8 @@ async fn a_file_changed_between_two_fragments_abandons_the_session() {
 
     assert_eq!(running.await.expect("the step's task"), StepOutcome::NotRun(StepObstacle::ContentChanged));
     assert_eq!((folder.memory(item).upload_session, cancellation_count(&folder), folder.count("PUT", "upload/")), (None, 1, 1), "given up: its cancel is left to send");
+    assert_eq!(folder.cancellations.cancel_sessions(10).await.done_count, 1);
+    assert_eq!((cancellation_count(&folder), folder.graph.with(|cloud| (cloud.open_sessions(), cloud.placeholders()))), (0, (0, vec![])), "the abandoned session and its name holder are removed");
 }
 
 #[tokio::test]

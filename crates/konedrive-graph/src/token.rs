@@ -1,9 +1,10 @@
 //! Access tokens for Graph callers: cached, refreshed on demand, one refresh at a time.
 
 // test: cached_content_is_disabled_and_cleared_on_sign_out_and_invalid_grant
+// test: a_token_expires_after_suspend_even_when_the_monotonic_clock_stood_still
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::oauth::{is_read_only, OAuthClient, OAuthError, TokenResponse, SCOPES};
 use crate::secret::{SecretError, SecretStore};
@@ -37,6 +38,9 @@ pub enum AuthError {
 struct Cached {
     token: String,
     expires_at: Instant,
+    /// Linux's monotonic clock excludes suspend. Wall time bounds freshness after
+    /// sleep; the monotonic deadline still bounds it after a clock correction back.
+    expires_wall_at: SystemTime,
     /// What the token is valid for ([`TokenResponse::granted`]).
     scope: String,
     /// What was asked for when it was obtained. A token asked for under another scope than
@@ -50,13 +54,19 @@ impl Cached {
         Self {
             token: response.access_token.clone(),
             expires_at: Instant::now() + Duration::from_secs(response.expires_in),
+            expires_wall_at: SystemTime::now() + Duration::from_secs(response.expires_in),
             scope: response.granted(asked),
             asked,
         }
     }
 
     fn fresh(&self) -> bool {
-        self.expires_at > Instant::now() + REFRESH_MARGIN
+        self.fresh_at(Instant::now(), SystemTime::now())
+    }
+
+    fn fresh_at(&self, now: Instant, wall_now: SystemTime) -> bool {
+        self.expires_at > now + REFRESH_MARGIN
+            && self.expires_wall_at.duration_since(wall_now).is_ok_and(|left| left > REFRESH_MARGIN)
     }
 }
 

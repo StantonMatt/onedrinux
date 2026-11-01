@@ -14,6 +14,8 @@
 //! whenever the drive changes. Never a real network.
 
 mod sockets;
+#[cfg(test)]
+pub(crate) mod connections;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
@@ -893,6 +895,15 @@ pub struct FakeGraph {
 }
 
 impl FakeGraph {
+    /// Send this fake's pre-authenticated transfer URLs through a socket fault proxy.
+    /// Metadata stays on wiremock; neither endpoint can leave the loopback.
+    #[cfg(test)]
+    pub(crate) async fn connection_faults(&self) -> connections::Connections {
+        let proxy = connections::Connections::start(*self.server.address()).await;
+        self.with(|cloud| cloud.base = proxy.url.clone());
+        proxy
+    }
+
     /// An empty drive: its root, `R`.
     pub async fn start() -> Self {
         let server = MockServer::start().await;

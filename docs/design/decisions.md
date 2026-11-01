@@ -722,6 +722,19 @@ answer a user already knows, it is followed.
 - **Trade-off.** No Microsoft 365 or OneDrive for Business accounts. "View Online" opens under
   whichever personal account the browser is signed in to (F295).
 
+### 5.14 Token freshness ends when either clock says it has expired
+
+- **Decision.** The in-memory token's expiry is kept against both monotonic and wall
+  time, with the existing five-minute refresh margin applied to both. This also gates
+  cached cloud content. No logind subscription or real session bus is needed.
+- **Why.** Linux's monotonic clock stops during suspend. A simulated overnight sleep
+  left the old token and cached-content permission fresh until a network request
+  happened to receive `401`. A wall deadline makes the next request refresh first.
+- **Trade-off.** A forward clock correction can cause an early refresh. Keeping the
+  monotonic deadline as well means a backwards correction cannot extend freshness.
+  Transfer sessions still follow the service's status and content hashes rather than
+  being discarded solely because the local clock moved ([writes.md](writes.md) §4.3).
+
 ## 6. The desktop
 
 ### 6.1 Notifications come from the app

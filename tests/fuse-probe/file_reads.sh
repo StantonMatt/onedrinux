@@ -52,10 +52,17 @@ download_cut_off_keeps_what_it_has_and_goes_on_from_there() {
     begin_folder
     seed_random X R big.bin 41943040
     register_folder read-only
+    check_within 10 "the named file is placed" folder_has big.bin
+    $U "$bin/watch-client" "$F" 12 states > "$LOGS/recovery-watch" &
+    local watcher=$!
+    check_within 3 "the recovery watcher is ready" grep -q '^watching$' "$LOGS/recovery-watch"
     # As many as the download tries before it gives up.
     onedrive cut X 20971520 3 > /dev/null
     check_holds "the download fails" "$(daemon hydrate "$F/big.bin")" "refused"
     check "the exhausted download is shown as failed" "$(state_of big.bin)" failed
+    check "its parent reports the failure too" "$(state_of .)" failed
+    check "the daemon's state answer agrees" "$(daemon state "$F/big.bin")" failed
+    check_within 3 "Dolphin is notified of the failure" grep -q '^state: big.bin failed$' "$LOGS/recovery-watch"
     local left
     left=$(daemon staged)
     check_holds "the first half is kept, unfinished" "$left" "[(20971520, Some("
@@ -65,6 +72,10 @@ download_cut_off_keeps_what_it_has_and_goes_on_from_there() {
     check "nothing is left unfinished" "$(daemon staged)" "[]"
     check "the file is whole" "$(is_seed big.bin X && echo equal)" equal
     check_state big.bin hydrated
+    check "the parent no longer reports failure" "$(state_of .)" hydrated
+    check "the daemon's state answer recovered" "$(daemon state "$F/big.bin")" hydrated
+    check_within 3 "Dolphin is notified of recovery" grep -q '^state: big.bin hydrated$' "$LOGS/recovery-watch"
+    wait "$watcher"
 }
 
 # OneDrive changes the file while its first version is still being downloaded: what the

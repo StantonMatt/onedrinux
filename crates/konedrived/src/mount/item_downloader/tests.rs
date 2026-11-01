@@ -14,6 +14,8 @@ use crate::mount::item_fixture::ItemFixture;
 use crate::content_source::source::{Fetched, SourceError};
 use crate::status::transfers::Transfer;
 
+mod interruptions;
+
 /// The wait of an account OneDrive asked nothing of.
 fn no_throttle_wait() -> crate::status::throttle_wait::ThrottleWait {
     crate::status::throttle_wait::ThrottleWait::new(crate::status::snapshot::SyncStateHandle::new(Default::default()))

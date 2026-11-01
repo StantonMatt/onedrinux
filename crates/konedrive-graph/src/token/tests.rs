@@ -60,6 +60,32 @@ fn response(access: &str, expires_in: u64) -> TokenResponse {
     TokenResponse { access_token: access.into(), expires_in, refresh_token: None, scope: None }
 }
 
+#[test]
+fn a_token_expires_after_suspend_even_when_the_monotonic_clock_stood_still() {
+    let cached = Cached::from_response(&response("test", 3600), SCOPES);
+    let (now, wall) = (Instant::now(), SystemTime::now());
+    assert!(cached.fresh_at(now, wall));
+    // Linux CLOCK_MONOTONIC excludes suspend: only the wall clock moves overnight.
+    assert!(!cached.fresh_at(now, wall + Duration::from_secs(8 * 3600)));
+    // A backwards wall-clock correction must not extend the monotonic lifetime.
+    assert!(!cached.fresh_at(now + Duration::from_secs(3600), wall - Duration::from_secs(3600)));
+}
+
+#[tokio::test]
+async fn a_wall_expired_token_disables_cached_content_and_refreshes_before_the_next_request() {
+    let server = MockServer::start().await;
+    mock_refresh(&server, 200, rotated(), 1).await;
+    let (tokens, _) = manager(&server, Arc::new(MemoryStore::with_token("RT0")));
+    tokens.seed(&response("before-sleep", 3600)).await;
+    assert!(tokens.cached_content_allowed());
+    // Inject only the wall deadline: the monotonic lifetime still has an hour.
+    tokens.cached.lock().unwrap().own.as_mut().unwrap().expires_wall_at = SystemTime::now() - Duration::from_secs(1);
+    assert!(!tokens.cached_content_allowed());
+    assert!(tokens.fresh_read_only().is_none(), "the export must not reuse it either");
+    assert_eq!(tokens.access_token().await.unwrap(), "AT1");
+    assert!(tokens.cached_content_allowed());
+}
+
 /// Every refresh asks for the installed client's scope, and what it grants is told to
 /// the hook — the scope the response names, or what was asked when it names none.
 #[tokio::test]
