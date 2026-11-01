@@ -113,7 +113,7 @@ cache eviction can conservatively fall back to the existing metadata path.
 
 ## Landing and remaining limits
 
-The policy in [design/mount.md](design/mount.md) §5.2–5.3 is unchanged: a fresh
+Under [design/mount.md](design/mount.md) §5.2–5.3, a fresh
 argv launch requests a verified whole copy at its first read; other readers
 trigger hydration after 1 MiB of distinct coverage (or the whole smaller file).
 A fully watched video therefore lands on disk, usually well before its end.
@@ -122,11 +122,18 @@ Seeking continues as checked ranges while a whole copy downloads; unverified
 staging is never a source for playback.
 
 Haruna's playlist probes cannot be distinguished from deliberate reads of those
-neighbours by file offset alone. The measured probes do not hydrate them. A
-small neighbour fully read by preload may still qualify under the documented
-coverage rule. Options are to keep that rule, disable the application's playlist
-metadata/preload behavior, or introduce explicit playback intent; the latter
-changes product policy and needs a separate decision.
+neighbours by file offset alone. Launch intent now supplies the distinction for
+thirty seconds: the same desktop identity's reads of other cloud-only audio/video
+files in the launched media file's folder are background peeks, even after the
+target's first read consumed its intent. Stored OneDrive MIME types identify media;
+unknown types follow normal rules. Peeks return ordinary checked ranges without
+counting item or handle landing coverage or triggering a whole download through
+launch intent or coverage, so even a small neighbour read completely stays
+cloud-only under those rules. The mount.md §5.5 version-revalidation exception still
+starts or joins a whole download and lands the asked content before returning its
+range when that content was previously refused. Files named in argv are exempt.
+After the window, playing a neighbour counts fresh coverage normally. The captured Haruna neighbours
+still stay cloud-only; their metadata bandwidth remains application behavior.
 
 The cached-edge optimization applies to listed/version-proven requests. The
 conservative metadata fallback still fetches the full aligned interval. Real

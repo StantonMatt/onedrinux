@@ -431,10 +431,12 @@ A file that is not on disk:
 - `item_range_fetcher.rs` — `ItemRangeFetcher`: a range asked of OneDrive, of the content the
   reader opened; a range answered short fails the read. `[tests]`
 - `launch_intent.rs` — bounded argv paths resolved through the store, process-generation
-  expiry and immediate launch emblems. `launch_intent/tests.rs` checks confinement,
-  bounds and timed/process expiry; kernel request tests exercise first-read landing.
+  expiry, immediate launch emblems and media-neighbour peek classification.
+  `launch_intent/tests.rs` checks confinement, bounds and timed/process expiry;
+  kernel request tests exercise first-read landing.
 - `item_kernel_requests/read_downloads.rs` — scan handle coverage, launch admission and
-  cancellable, deduplicated tiny-file promotion timers.
+  cancellable, deduplicated tiny-file promotion timers; playlist peeks skip both
+  launch- and coverage-triggered whole downloads.
 - `range_read_states.rs` — the delayed hydrating mark for program range fetches, per
   asking rather than cumulative: no mark before 500 ms, then through the read linger;
   pool admission and early refusals do not count. Tests in `range_read_states/tests.rs`
@@ -446,6 +448,10 @@ A file that is not on disk:
 - `item_kernel_requests/tests/app_reads.rs` — captured VLC, Haruna, Okular,
   LibreOffice and KIO thumbnail reads over fake Graph with 300 ms content latency;
   desktop identities, seeking, verified landing and thumbnail-helper refusal.
+- `item_kernel_requests/tests/playlist_peeks.rs` — complete small media peeks,
+  expired-window coverage, argv exemptions and unaffected readers/files; the
+  mount.md §5.5 version-revalidation exception still downloads and lands previously
+  refused content before returning its range.
 - `item_kernel_requests/tests/app_reads/traces.json` — normalized local strace
   handles/ranges and corpus sizes for those replays; no media or account data.
 - `item_kernel_requests/tests/header_cache/lag.rs` — two concurrent Gwenview/KIO readers,

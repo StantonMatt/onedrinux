@@ -1581,3 +1581,4 @@ mod fetch_states;
 mod read_ahead;
 
 mod app_reads;
+mod playlist_peeks;

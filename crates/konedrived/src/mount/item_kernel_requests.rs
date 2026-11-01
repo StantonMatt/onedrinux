@@ -244,6 +244,7 @@ pub(super) struct RangeToFetch {
     pub(super) item: LocalItemId,
     pub(super) source: RangeSource,
     pub(super) scan_file: Option<super::read_ahead::ScanFile>,
+    pub(super) media_folder: Option<LocalItemId>,
     pub(super) fh: Fh,
     pub(super) handle_count: super::item_download_states::ReadCount,
     pub(super) from: u64,
@@ -584,7 +585,11 @@ impl ItemKernelRequests {
                 super::item_lookup::NodeRow::Shown(row) => super::read_ahead::ScanFile::of(row),
                 _ => None,
             };
-            let to_fetch = |from, end| RangeToFetch { item, from, end, fh, handle_count: handle_count.clone(), scan_file: scan_file.clone(), download_at_threshold: ItemToDownload { item, onedrive_item: source.onedrive_item.clone(), content: content.clone() }, source: source.clone() };
+            let media_folder = match &row {
+                super::item_lookup::NodeRow::Shown(row) => super::launch_intent::media_folder(row),
+                _ => None,
+            };
+            let to_fetch = |from, end| RangeToFetch { item, from, end, fh, handle_count: handle_count.clone(), scan_file: scan_file.clone(), media_folder, download_at_threshold: ItemToDownload { item, onedrive_item: source.onedrive_item.clone(), content: content.clone() }, source: source.clone() };
             return match decide_range_origin(content.size(), download, offset, size) {
                 RangeOrigin::Nothing => Ok(ReadAnswer::Bytes(Vec::new())),
                 RangeOrigin::OneDrive { from, end } => Ok(ReadAnswer::Range(to_fetch(from, end))),

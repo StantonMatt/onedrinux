@@ -2,6 +2,7 @@
 //!
 //! Seen process generations are parsed once per mount (up to 1,024 remembered PIDs).
 //! Cloud file intents last 30 seconds; the immediate emblem lasts ten without a read.
+//! Consumed intents retain media-folder facts for playlist peeks until the same expiry.
 //! A single timer per process validates its identity and expires its intents. Neither
 //! lookup nor expiry touches a mounted path or asks the content source.
 // test: launch_intent_absolute_paths_and_file_urls_show_immediately_and_land_during_scans
@@ -13,7 +14,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use konedrive_tree::{ContentPresence, ItemKind};
+use konedrive_tree::{ContentPresence, Item, ItemKind, LocalItemId};
 use tokio::time::Instant;
 
 use super::item_download_states::{DownloadKey, ItemDownloadStates};
@@ -29,6 +30,18 @@ const PROCESSES_KEPT: usize = 1024;
 struct Intent {
     at: Instant,
     emblem: Option<LaunchEmblem>,
+    consumed: bool,
+    media_folder: Option<LocalItemId>,
+}
+
+/// Only stored MIME facts classify media; never inspect the path or file contents.
+pub(super) fn media_folder(row: &Item) -> Option<LocalItemId> {
+    let mime = row.onedrive_mime.as_deref()?;
+    (row.kind == ItemKind::File
+        && row.content_presence == ContentPresence::NotOnDisk
+        && (mime.starts_with("audio/") || mime.starts_with("video/")))
+    .then_some(())?;
+    Some(row.local.as_ref()?.place.as_ref()?.parent_local_item_id)
 }
 
 struct Process {
@@ -117,22 +130,28 @@ impl LaunchIntents {
                     {
                         continue;
                     }
+                    let folder = media_folder(&row);
                     if let Some(content) = row.local.and_then(|local| local.content) {
-                        keys.push(DownloadKey {
-                            item: row.local_item_id,
-                            content,
-                        });
+                        keys.push((
+                            DownloadKey {
+                                item: row.local_item_id,
+                                content,
+                            },
+                            folder,
+                        ));
                     }
                 }
                 Ok(keys)
             })
             .unwrap_or_default();
         let mut intents = HashMap::new();
-        for key in keys {
+        for (key, media_folder) in keys {
             tracing::debug!(item = %key.item, identity = process.caller.identity, "launch intent found");
             intents.entry(key.clone()).or_insert_with(|| Intent {
                 at: Instant::now(),
                 emblem: Some(self.downloads.range_reads.show_launch(key.item)),
+                consumed: false,
+                media_folder,
             });
         }
         let has_intents = !intents.is_empty();
@@ -198,7 +217,11 @@ impl LaunchIntents {
             .processes
             .iter()
             .filter(|(_, process)| {
-                process.identity == current.caller.identity && process.intents.contains_key(key)
+                process.identity == current.caller.identity
+                    && process
+                        .intents
+                        .get(key)
+                        .is_some_and(|intent| !intent.consumed)
             })
             .map(|(owner, process)| (*owner, process.generation))
             .collect();
@@ -221,14 +244,67 @@ impl LaunchIntents {
             else {
                 continue;
             };
-            if let Some(intent) = process.intents.remove(key) {
-                if intent.at.elapsed() < KEEP_FOR {
+            if let Some(intent) = process.intents.get_mut(key) {
+                if !intent.consumed && intent.at.elapsed() < KEEP_FOR {
+                    intent.consumed = true;
                     consumed = true;
-                    emblems.extend(intent.emblem);
+                    emblems.extend(intent.emblem.take());
                 }
             }
         }
         consumed.then_some(emblems)
+    }
+
+    /// A live media launch also identifies neighbouring media reads as background
+    /// peeks, including after take() consumed the target's first-read intent.
+    pub(super) fn is_playlist_peek(
+        &self,
+        pid: u32,
+        key: &DownloadKey,
+        folder: Option<LocalItemId>,
+    ) -> bool {
+        let Some(folder) = folder else { return false };
+        let Some(current) = self.guard.launch_process(pid) else {
+            self.forget(pid);
+            return false;
+        };
+        let candidates: Vec<_> = crate::panic::lock(&self.state)
+            .processes
+            .iter()
+            .filter(|(_, process)| process.identity == current.caller.identity)
+            .map(|(owner, process)| (*owner, process.generation))
+            .collect();
+        let mut neighbour = false;
+        for (owner, generation) in candidates {
+            if self
+                .guard
+                .launch_process(owner)
+                .is_none_or(|p| p.generation != generation)
+            {
+                self.forget(owner);
+                continue;
+            }
+            let state = crate::panic::lock(&self.state);
+            let Some(process) = state
+                .processes
+                .get(&owner)
+                .filter(|p| p.generation == generation)
+            else {
+                continue;
+            };
+            for (launched, intent) in &process.intents {
+                if intent.at.elapsed() >= KEEP_FOR {
+                    continue;
+                }
+                // Every argv file is exempt, even if another argv media file
+                // would otherwise make it a neighbour, or its content changed.
+                if launched.item == key.item {
+                    return false;
+                }
+                neighbour |= intent.media_folder == Some(folder);
+            }
+        }
+        neighbour
     }
 
     fn forget(&self, pid: u32) {

@@ -170,3 +170,52 @@ fn launch_intent_ignores_unknown_resident_directory_and_guarded_arguments() {
         "stop cannot recreate intent"
     );
 }
+
+#[test]
+fn launch_intent_playlist_peeks_revalidate_consumed_owners() {
+    for exited in [false, true] {
+        let fixture = ItemFixture::new();
+        let a = fixture.show_onedrive_file_with_mime("A.mp4", b"a", Some("video/mp4"));
+        let b = fixture.show_onedrive_file_with_mime("B.mp4", b"b", Some("video/mp4"));
+        let a_key = DownloadKey {
+            item: a.local_item_id,
+            content: a.local.as_ref().unwrap().content.clone().unwrap(),
+        };
+        let b_key = DownloadKey {
+            item: b.local_item_id,
+            content: b.local.as_ref().unwrap().content.clone().unwrap(),
+        };
+        let fake = process(&fixture.folder().join("A.mp4"));
+        let mut guard = DownloadGuard::default();
+        guard.set_process_reader(fake.clone());
+        let intents = LaunchIntents::new(
+            fixture.folder(),
+            fixture.read_connections.clone(),
+            Arc::new(guard),
+            fixture.download_states.clone(),
+            fixture.runtime(),
+        );
+        intents.observe(42);
+        assert!(intents.is_playlist_peek(42, &b_key, media_folder(&b)));
+        assert!(intents.take(42, &a_key).is_some());
+        assert!(intents.take(42, &a_key).is_none());
+        assert!(
+            intents.is_playlist_peek(42, &b_key, media_folder(&b)),
+            "consumption retains media evidence"
+        );
+        assert!(
+            !intents.is_playlist_peek(42, &a_key, media_folder(&a)),
+            "consumed argv target stays exempt"
+        );
+        if exited {
+            *fake.0.lock().unwrap() = None;
+        } else {
+            fake.0.lock().unwrap().as_mut().unwrap().start += 1;
+        }
+        assert!(
+            !intents.is_playlist_peek(42, &b_key, media_folder(&b)),
+            "exit or PID reuse loses consumed evidence immediately"
+        );
+        intents.stop();
+    }
+}

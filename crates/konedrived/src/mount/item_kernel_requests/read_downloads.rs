@@ -25,6 +25,11 @@ impl ItemKernelRequests {
             self.download_states.show_launched_download(&key);
         }
         drop(launched);
+        let playlist_peek = pid.is_some_and(|pid| {
+            self.launch_intents
+                .as_ref()
+                .is_some_and(|intents| intents.is_playlist_peek(pid, &key, range.media_folder))
+        });
         let tiny_cancel = if range.source.content.size() <= crate::mount::read_ahead::PEEK_BYTES {
             caller
                 .as_ref()
@@ -43,13 +48,18 @@ impl ItemKernelRequests {
             )
         });
         let in_scan = head.as_ref().is_some_and(|head| head.in_scan);
-        let item_count = (!in_scan).then(|| {
+        let item_count = (!in_scan && !playlist_peek).then(|| {
             self.download_states
                 .begin_read_count(range.item, &range.source.content)
         });
         let bytes = self.fetch_range(&range).await?;
         if let Some(head) = &mut head {
             head.completed = true;
+        }
+        if playlist_peek {
+            // Serve and admit normally, but leave no item or handle coverage
+            // for a later read after the launch window to inherit.
+            return Ok(bytes);
         }
         // Keep the handle's entire successful history, including reads before a
         // scan activates. Outside scans only item coverage decides promotion.

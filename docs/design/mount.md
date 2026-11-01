@@ -666,6 +666,20 @@ The range itself is answered normally. The immediate hydrating emblem expires af
 ten seconds without a read; a download started while it is shown inherits that mark
 until completion (§3.5). Mount stop cancels intent timers and pending tiny promotions.
 
+During that same thirty-second window, reads by the desktop identity of a different
+cloud-only audio/video file in the launched file's folder are playlist peeks. Both
+files must have a stored OneDrive MIME type starting with `audio/` or `video/`;
+unknown types follow normal coverage rules. Consuming the launched file's first-read
+intent keeps its folder/type evidence until expiry. Files named in argv are never
+peeks, including when argv names several files. Peeks use the same checked ranges,
+caches and guard admission, but add neither item nor handle landing coverage and
+never trigger a whole download through launch intent or coverage. The §5.5
+version-revalidation exception still starts or joins a whole download and lands the
+asked content before returning its range when that content was previously refused.
+After expiry, normal coverage starts without those peek bytes, even on the same
+handle. Other identities, folders and non-media files keep their existing rules.
+This also applies with `read_ahead = 0`.
+
 Single-instance activation over D-Bus, Flatpak portal paths and navigation within an
 already-running app supply no new argv intent. They fall back to item/handle coverage;
 small images viewed during a scan can therefore remain cloud-only. Dolphin's open

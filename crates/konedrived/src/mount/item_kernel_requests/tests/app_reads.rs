@@ -45,7 +45,9 @@ fn replay(capture: &Capture, streaming: bool) {
     fixture.show_onedrive_directory("Samples");
     let bytes: Vec<_> = capture.files.iter().enumerate().map(|(n, (_, size))| data(n, *size)).collect();
     let files: Vec<_> = capture.files.iter().zip(&bytes).map(|((name, _), bytes)| {
-        fixture.show_onedrive_file(&format!("Samples/{name}"), bytes).local_item_id
+        let mime = if name.ends_with(".mp4") { Some("video/mp4") }
+            else if name.ends_with(".mkv") { Some("video/x-matroska") } else { None };
+        fixture.show_onedrive_file_with_mime(&format!("Samples/{name}"), bytes, mime).local_item_id
     }).collect();
     // This untouched sibling proves that opening a target does not itself
     // launch a folder scan or hydrate a file that the application never read.

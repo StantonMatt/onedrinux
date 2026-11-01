@@ -721,6 +721,16 @@ impl ItemFixture {
         self.show_listed_item(&listed)
     }
 
+    /// As [`Self::show_onedrive_file`], with the MIME type from OneDrive's listing.
+    pub(crate) fn show_onedrive_file_with_mime(&self, path: &str, content: &[u8], mime: Option<&str>) -> Item {
+        self.write_listing(vec![Change::Upsert(Row {
+            mime: mime.map(str::to_owned),
+            ..self.make_listed_row(path, Kind::File, Some(content))
+        })]);
+        self.serve_onedrive_content(&onedrive_id_of(path), content);
+        self.show_listed_item(&self.find_listed(path))
+    }
+
     /// As [`show_onedrive_file`](Self::show_onedrive_file) for a directory: shown, with
     /// nothing in the backing directory ([`make_directory_on_disk`](Self::make_directory_on_disk)
     /// puts it there).

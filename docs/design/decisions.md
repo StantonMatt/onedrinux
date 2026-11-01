@@ -1179,3 +1179,30 @@ it) and unrelated unexpected requests. Requests bearing our client's User-Agent
 are always recorded, even at `/`, so genuine extra requests still fail budgets.
 The fake cloud and raw connection-fault proxy apply the same rule before logging
 or consuming faults. Shipping builds and network behavior are unchanged.
+
+## Treat launch-associated playlist neighbours as background reads (2026-11-01)
+
+Haruna's captured playlist startup reads 229,376 and 46,754 distinct bytes from
+neighbouring videos. Those 42 MB files stay below the landing threshold, but a
+small neighbour read completely would land even though it was never played.
+The approved rule treats those reads as background peeks for the existing
+thirty-second media launch window.
+
+Retain a consumed intent's folder and media classification until its original
+expiry, under the existing process-generation checks and 1,024-process/64-argument
+bounds. A matching desktop identity's reads of a different cloud-only audio/video
+file in that folder do not count item or handle landing coverage and never trigger
+whole downloads through launch intent or coverage. The mount.md §5.5
+version-revalidation exception still starts or joins a whole download and lands the
+asked content before returning its range when that content was previously refused.
+Both MIME types must be known from the store (`audio/` or `video/`);
+do not infer media from names or inspect mounted paths. Files named in argv are
+always eligible for their ordinary launch/coverage behavior. Range serving,
+read-ahead caches and guard admission are unchanged. This applies independently
+of scan detection, including `read_ahead = 0`.
+
+After expiry, a neighbour can land under the normal threshold using subsequent
+reads; peek bytes supply no credit, including on a handle kept open across expiry.
+Other identities, folders and non-media files retain their previous rules. This
+bounded launch heuristic can also treat deliberate playlist navigation during
+the window as background reading; after the window, normal coverage applies.
