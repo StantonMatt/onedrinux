@@ -310,8 +310,8 @@ security](#5-account-and-security), [the desktop](#6-the-desktop), [testing](#7-
   or insertion, as well as when forgotten or signed out. Reading a few bytes can fetch up to
   one MiB ahead. The guard still counts requested bytes and `download_after` still counts
   distinct returned bytes of the opened content (§2.5); prefetched bytes add no coverage.
-  Whole hydration still fetches and verifies independently; reusing cached bytes for landing
-  would need to preserve its hash, version and durability checks.
+  Whole hydration still asks fresh metadata and verifies independently; matching memory
+  ranges can feed its writer under the full-file hash and durability checks below.
 
 ## 3. The store and the sync
 
@@ -1206,3 +1206,42 @@ reads; peek bytes supply no credit, including on a handle kept open across expir
 Other identities, folders and non-media files retain their previous rules. This
 bounded launch heuristic can also treat deliberate playlist navigation during
 the window as background reading; after the window, normal coverage applies.
+
+## Reuse version-bound playback bytes in verified whole downloads (2026-11-01)
+
+- **Decision.** A whole Graph download gets private reuse state. Fresh metadata
+  selects memory blocks only for the same item, matching opened size, bound
+  metadata eTag and compatible cTag/hash facts. Missing intervals stop at the next
+  held block; cache checks at block boundaries also see concurrent playback. No
+  persistent cache or staging-to-reader path is added. Fresh metadata can add a
+  hash omitted by the listing: cached facts must agree, while the complete copy
+  is always checked against the fresh full-file hash. A rejected assembly clears
+  the item's memory blocks and disables reuse for that download's fresh retry.
+- **Why.** Default-threshold replay over fake Graph fetched 84,543,270 body bytes
+  for a 42,271,635-byte fully watched VLC video when landing was slow, both after
+  an argv launch and an in-app open. Haruna's target fetched 59,048,851 bytes for
+  the same file size. Existing version-bound pieces can avoid that repeated input.
+  The complete assembly still must pass quickXorHash before landing: range proof
+  alone never makes a whole copy, and §2.6's staging isolation remains intact.
+- **Trade-off.** Overlapping requests can still transfer bytes before playback
+  publishes a reusable block, including already buffered response bytes. Cache
+  expiry, eviction or metadata disagreement causes a network miss. Checkpoints,
+  disk-space checks and whole-size guard admission are unchanged; only network
+  bytes consume retry traffic. A corrupt reused block uses the existing single
+  start-over budget; a second hash failure remains EIO.
+
+## Keep reused downloads inside guarded fetches (2026-11-01)
+
+- **Decision.** A reuse assembly yields a typed `FetchNext` boundary before
+  opening another missing network interval. Its sequential or parallel writer
+  continues through the existing fetch path without spending a connection break
+  or backoff, preserving its hash and checkpoint progress. A boundary without
+  written progress still counts as a break, so it cannot retry indefinitely.
+- **Why.** Opening a later Graph request inside the byte stream bypassed the
+  downloader's throttle race and typed refusals. A cached-prefix regression with
+  `429 Retry-After: 300` left its waiting reader blocked past five seconds; the
+  plain download returned EAGAIN promptly. Every network open must retain that
+  same refusal path, including metadata and expired-address refresh requests.
+- **Trade-off.** Each continuation asks fresh metadata, as a normal resumed
+  download does. Ordinary short responses and I/O errors still spend the same
+  three-break budget; cached intervals must not consume it.

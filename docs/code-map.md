@@ -120,7 +120,8 @@ The directories below are in layer order: a directory uses only the directories 
 - `tests/fake_onedrive/sockets.rs` — the fake's notification socket.
 - `tests/fake_onedrive/connections.rs` — test-only loopback fault proxy: request-body
   drops, lost accepted responses, response-body drops, and an offline switch; owned
-  connection tasks and recorded Range/Content-Range headers.
+  connection tasks, recorded Range/Content-Range headers and forwarded response-body
+  byte counts for video replay measurements.
 - `tests/fake_onedrive/network.rs` — a loopback transport gate that closes all HTTP connections
   during simulated network loss, including pooled connections; all returned URLs use it.
 
@@ -266,6 +267,11 @@ Where a download gets its bytes from, and the download of a whole file.
   kept 40 minutes with a 10,000-entry cap; pages release readers as they arrive, and one
   background listing per folder is cancelled on token invalidation or drop. `[tests]`
 - `graph_source/links/tests.rs` — URL expiry pruning, the entry cap and background cancellation.
+- `graph_source/download.rs` — per-download assembly from matching memory blocks and
+  missing network ranges, live playback reuse, network-only retry charging and a fresh
+  retry after rejection.
+- `graph_source/tests/download.rs` — version disagreement, corrupted reuse,
+  bounded/resumed streams, expired-link changes and concurrent playback publication.
 - `graph_source/read_blocks.rs` — aligned 1 MiB pieces and small whole files in one 64 MiB
   memory cache, keyed by item and opened generation; five-minute expiry, oldest-first eviction,
   crossing-range assembly and cached-edge trimming, forget and token invalidation. `[tests]`
@@ -447,11 +453,14 @@ A file that is not on disk:
   in-memory range store; scan reads count on their own cloud-only handle.
 - `item_kernel_requests/tests/app_reads.rs` — captured VLC, Haruna, Okular,
   LibreOffice and KIO thumbnail reads over fake Graph with 300 ms content latency;
-  desktop identities, seeking, verified landing and thumbnail-helper refusal.
+  desktop identities, seeking, verified landing, thumbnail-helper refusal and
+  default-threshold video wire-byte measurements with fast/slow whole downloads.
 - `item_kernel_requests/tests/playlist_peeks.rs` — complete small media peeks,
   expired-window coverage, argv exemptions and unaffected readers/files; the
   mount.md §5.5 version-revalidation exception still downloads and lands previously
   refused content before returning its range.
+- `item_downloader/tests/range_reuse.rs` — fully/partly streamed video landing
+  without fetching cached bytes again.
 - `item_kernel_requests/tests/app_reads/traces.json` — normalized local strace
   handles/ranges and corpus sizes for those replays; no media or account data.
 - `item_kernel_requests/tests/header_cache/lag.rs` — two concurrent Gwenview/KIO readers,

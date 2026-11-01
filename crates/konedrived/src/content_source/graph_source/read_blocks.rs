@@ -56,6 +56,15 @@ impl Piece {
     }
 }
 
+/// Fresh metadata may add facts omitted by a listing. Every cached fact must
+/// agree; the bound metadata eTag and size are checked separately by the caller.
+pub(super) fn matches_fresh(cached: &Option<Version>, fresh: &Option<Version>) -> bool {
+    cached.as_ref().zip(fresh.as_ref()).is_some_and(|(cached, fresh)| {
+        (cached.ctag.is_empty() || cached.ctag == fresh.ctag)
+            && cached.quick_xor.is_none_or(|hash| fresh.quick_xor == Some(hash))
+    })
+}
+
 struct Held {
     item_id: String,
     opened_as: ContentVersion,
@@ -131,6 +140,22 @@ impl ReadBlocks {
             let Some(oldest) = held.pop_front() else { break };
             total -= oldest.piece.bytes.len();
         }
+    }
+
+    /// One reusable piece at `from`, or the start of the next held piece. Fresh
+    /// metadata and the generation's binding have already selected `generations`.
+    pub(super) fn download_piece(&self, item_id: &str, generations: &[ContentVersion], from: u64, end: u64, version: &Option<Version>) -> (Option<Piece>, u64) {
+        let mut held = crate::panic::lock(&self.held);
+        held.retain(|held| held.since.elapsed() < HELD_FOR);
+        let matching = || held.iter().filter(|held| held.item_id == item_id && generations.contains(&held.opened_as)
+            && matches_fresh(&held.piece.version, version) && held.piece.size == Some(held.opened_as.size()));
+        if let Some(held) = matching().find(|held| held.piece.from <= from && from < held.piece.from + held.piece.bytes.len() as u64) {
+            let piece = &held.piece;
+            let stop = end.min(piece.from + piece.bytes.len() as u64);
+            return (Some(Piece { from, size: piece.size, mtime: piece.mtime, version: piece.version.clone(),
+                bytes: piece.bytes[(from - piece.from) as usize..(stop - piece.from) as usize].to_vec() }), stop);
+        }
+        (None, matching().filter(|held| held.piece.from > from).map(|held| held.piece.from).min().unwrap_or(end).min(end))
     }
 
     pub(super) fn clear(&self) { crate::panic::lock(&self.held).clear(); }

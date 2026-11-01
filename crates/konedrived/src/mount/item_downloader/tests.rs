@@ -15,6 +15,7 @@ use crate::content_source::source::{Fetched, SourceError};
 use crate::status::transfers::Transfer;
 
 mod interruptions;
+mod range_reuse;
 
 /// The wait of an account OneDrive asked nothing of.
 fn no_throttle_wait() -> crate::status::throttle_wait::ThrottleWait {

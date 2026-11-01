@@ -217,6 +217,10 @@ impl Replaceable {
 
 #[async_trait]
 impl ContentSource for Replaceable {
+    fn download_source(&self, item_id: &str, received: Arc<dyn Fn(u64) + Send + Sync>) -> Option<Box<dyn ContentSource>> {
+        self.now().download_source(item_id, received)
+    }
+
     async fn fetch(&self, item_id: &str, from: u64, end: Option<u64>) -> Result<Fetched, SourceError> {
         self.now().fetch(item_id, from, end).await
     }

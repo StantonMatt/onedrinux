@@ -37,7 +37,7 @@ use tokio::io::AsyncReadExt;
 use super::download::Downloaded;
 use super::guards::{check_answer, open, resume, same_version, verify, Breaks, End, StartOver, Tuning, BUFFER};
 use super::target::Target;
-use super::{ContentSource, Fetched, Version};
+use super::{ContentSource, Fetched, FetchNext, Version};
 use konedrive_graph::pool::{Class, Size, Slot, TransferPool};
 use konedrive_graph::quickxor::QuickXor;
 
@@ -375,7 +375,7 @@ impl Attempt<'_> {
                     Ok(0) => break,
                     Ok(read) => read,
                     Err(e) => {
-                        broke = Some(e.to_string());
+                        broke = Some(e);
                         break;
                     }
                 };
@@ -394,8 +394,13 @@ impl Attempt<'_> {
                 self.lock().hash.combine(&hasher);
                 return Ok(());
             }
+            // A deliberate assembly boundary is not a broken connection. Keep this
+            // piece's hash and checkpoint progress, and reopen via the guarded fetch.
+            if at > fetched.served_from && broke.as_ref().is_some_and(FetchNext::requested) {
+                continue;
+            }
             // A break, or a short answer: continue the piece from where its bytes stopped.
-            let why = broke.unwrap_or_else(|| "the answer ended early".into());
+            let why = broke.map_or_else(|| "the answer ended early".into(), |error| error.to_string());
             breaks.again(self.item_id, &format!("the piece at byte {start} broke after byte {at}: {why}")).await?;
         }
     }

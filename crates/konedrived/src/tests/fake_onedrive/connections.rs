@@ -31,6 +31,8 @@ pub(crate) struct Asked {
     pub(crate) path: String,
     pub(crate) range: Option<String>,
     pub(crate) content_range: Option<String>,
+    /// Response body bytes successfully forwarded onto the client socket.
+    pub(crate) response_bytes: u64,
 }
 
 #[derive(Default)]
@@ -102,15 +104,17 @@ async fn serve(mut socket: TcpStream, upstream: std::net::SocketAddr, faults: Ar
     let mut words = text.lines().next().unwrap_or_default().split_whitespace();
     let (method, path) = (words.next().unwrap_or_default(), words.next().unwrap_or_default());
     if konedrive_graph::test_server::is_port_probe(method, path, field(&text, "user-agent").as_deref()) { return Ok(()); }
-    let at = {
+    let (at, request_index) = {
         let mut faults = faults.lock().unwrap();
-        faults.asked.push(Asked { method: method.into(), path: path.into(), range: field(&text, "range"), content_range: field(&text, "content-range") });
+        faults.asked.push(Asked { method: method.into(), path: path.into(), range: field(&text, "range"), content_range: field(&text, "content-range"), response_bytes: 0 });
+        let request_index = faults.asked.len() - 1;
         if faults.offline { return Ok(()); }
-        faults.rules.iter_mut().find(|rule| rule.method == method && path.contains(&rule.path) && rule.left > 0)
+        let at = faults.rules.iter_mut().find(|rule| rule.method == method && path.contains(&rule.path) && rule.left > 0)
             .and_then(|rule| {
                 if rule.pass > 0 { rule.pass -= 1; None }
                 else { rule.left -= 1; Some(rule.at) }
-            })
+            });
+        (at, request_index)
     };
     let length = field(&text, "content-length").and_then(|n| n.parse::<u64>().ok()).unwrap_or(0);
     if let Some(DropAt::Request(bytes)) = at {
@@ -127,10 +131,30 @@ async fn serve(mut socket: TcpStream, upstream: std::net::SocketAddr, faults: Ar
         Some(DropAt::Body(bytes)) => {
             let head = headers(&mut backend).await?;
             socket.write_all(&head).await?;
-            tokio::io::copy(&mut backend.take(bytes), &mut socket).await?;
+            forward_body(&mut backend.take(bytes), &mut socket, &faults, request_index).await?;
             socket.shutdown().await?;
         }
-        _ => { tokio::io::copy(&mut backend, &mut socket).await?; }
+        _ => {
+            let head = headers(&mut backend).await?;
+            socket.write_all(&head).await?;
+            forward_body(&mut backend, &mut socket, &faults, request_index).await?;
+        }
     }
     Ok(())
+}
+
+/// Count payload as writes succeed, including a partial response whose reader closes.
+async fn forward_body(reader: &mut (impl tokio::io::AsyncRead + Unpin), socket: &mut TcpStream, faults: &Arc<Mutex<Faults>>, request_index: usize) -> std::io::Result<()> {
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        let n = reader.read(&mut buffer).await?;
+        if n == 0 { return Ok(()); }
+        let mut at = 0;
+        while at < n {
+            let written = socket.write(&buffer[at..n]).await?;
+            if written == 0 { return Err(std::io::ErrorKind::WriteZero.into()); }
+            faults.lock().unwrap().asked[request_index].response_bytes += written as u64;
+            at += written;
+        }
+    }
 }

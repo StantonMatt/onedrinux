@@ -119,7 +119,25 @@ trigger hydration after 1 MiB of distinct coverage (or the whole smaller file).
 A fully watched video therefore lands on disk, usually well before its end.
 Streaming-only playback would be a product-policy change and is not introduced.
 Seeking continues as checked ranges while a whole copy downloads; unverified
-staging is never a source for playback.
+staging is never a source for playback. The whole download now reuses memory
+blocks whose opened-generation binding matches fresh Graph metadata, fetching
+only missing intervals and still checking quickXorHash over the complete file.
+A corrupt assembly clears the memory blocks and retries once entirely from Graph.
+
+A default-threshold fake-Graph replay, counting response payload forwarded by
+its loopback proxy, measured 84,543,270 bytes for VLC's 42,271,635-byte watched
+video with a slow whole-copy response, both with argv intent and with an in-app
+open. Haruna's target cost 59,048,851 bytes for the same size; its neighbour probes
+added 2,425,747 bytes separately. These are deterministic read-order replays,
+with no app rendering or original playback pacing. The final fast-copy checks
+wait for the first triggered whole copy to land before continuing playback; slow-copy checks
+replay immediately against delayed whole-copy responses. Fast runs vary with overlap;
+requests that are already in flight can still duplicate bytes after reuse.
+With reuse, the slow runs fetched about 42.34–42.47 MB for either target
+(under 0.5% excess); a fast response can still transfer overlapping bytes before
+playback publishes its blocks. Missing-range latency is charged per request in
+this harness, so fragmented Haruna downloads take two 10-second delays rather
+than one. These are content payload counts, excluding metadata JSON, HTTP headers and TLS.
 
 Haruna's playlist probes cannot be distinguished from deliberate reads of those
 neighbours by file offset alone. Launch intent now supplies the distinction for

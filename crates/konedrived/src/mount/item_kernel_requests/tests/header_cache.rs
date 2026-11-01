@@ -169,8 +169,8 @@ fn header_cache_hits_promote_tiny_files_outside_a_scan_and_charge_the_guard() {
             });
             assert_eq!(
                 cached.content_requests(),
-                1,
-                "only the threshold's whole download, no range fetch"
+                0,
+                "the verified whole copy reuses the restored bytes without fetching content"
             );
             let counted: Vec<_> = cached
                 .requests

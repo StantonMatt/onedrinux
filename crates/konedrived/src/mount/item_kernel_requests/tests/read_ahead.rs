@@ -673,8 +673,8 @@ fn read_ahead_zero_keeps_tiny_reads_as_before() {
     });
     assert_eq!(
         scan.content_requests().len(),
-        8,
-        "one range and one whole download each"
+        4,
+        "one range each; the verified whole download reuses it"
     );
 }
 
@@ -868,7 +868,8 @@ fn read_ahead_trace_decode_lands_only_the_handle_that_reads_the_image_through() 
             .iter()
             .filter(|route| route.ends_with("!03.png"))
             .count(),
-        2
+        1,
+        "the viewed file lands from its cached range"
     );
 }
 
@@ -942,7 +943,7 @@ fn read_ahead_tiny_desktop_download_waits_but_guarded_reads_start_immediately() 
                 .content_presence
                 == ContentPresence::OnDisk
         });
-        assert_eq!(scan.content_requests().len(), 2);
+        assert_eq!(scan.content_requests().len(), 1, "landing reuses the checked range");
     }
 }
 
@@ -1265,5 +1266,5 @@ fn read_ahead_tiny_promotion_survives_reader_exit_without_charging_a_new_pid() {
             .content_presence
             == ContentPresence::OnDisk
     });
-    assert_eq!(scan.content_requests().len(), 2);
+    assert_eq!(scan.content_requests().len(), 1, "landing reuses the checked range");
 }

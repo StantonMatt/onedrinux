@@ -29,6 +29,19 @@ pub(crate) enum SourceError {
     Throttled { detail: String, retry_after: Option<std::time::Duration> },
 }
 
+/// An assembled stream needs its next network interval opened through `fetch`.
+/// Carried by an `io::Error`, distinct from a short response or broken connection.
+/// Download writers continue without spending a break only after making progress.
+#[derive(Debug, thiserror::Error)]
+#[error("open the next download interval")]
+pub(crate) struct FetchNext;
+
+impl FetchNext {
+    pub(crate) fn requested(error: &std::io::Error) -> bool {
+        error.get_ref().is_some_and(|inner| inner.is::<Self>())
+    }
+}
+
 pub(crate) struct Fetched {
     /// The offset this stream actually starts at.
     ///
@@ -52,6 +65,8 @@ pub(crate) struct Fetched {
     /// `None` from a source that cannot say (`LocalDir`): nothing is then
     /// verified or checkpointed.
     pub(crate) version: Option<Version>,
+    /// A whole-download assembly can yield [`FetchNext`] inside an I/O error after
+    /// its current bytes, so the next interval retains `fetch`'s refusal handling.
     pub(crate) stream: Box<dyn AsyncRead + Send + Unpin>,
 }
 
@@ -81,6 +96,12 @@ pub(crate) struct ListedContent {
 
 #[async_trait]
 pub(crate) trait ContentSource: Send + Sync {
+    /// A private whole-download source, when this source can assemble checked range
+    /// bytes with network input. `received` charges only newly fetched network bytes;
+    /// the caller still reserves the complete size and checks space for every write.
+    /// Rejection must disable reuse for this download's subsequent fresh retry.
+    fn download_source(&self, _item_id: &str, _received: std::sync::Arc<dyn Fn(u64) + Send + Sync>) -> Option<Box<dyn ContentSource>> { None }
+
     /// Bytes of `item_id` starting at `from`, plus the item's current size and mtime.
     ///
     /// `end` is where the bytes wanted stop — the offset of the first byte not

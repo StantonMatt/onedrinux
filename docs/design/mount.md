@@ -635,8 +635,9 @@ outside scans; item coverage remains the decision rule there. During a desktop
 scan only that handle's full coverage counts, including bytes returned before
 activation, and
 only files larger than 16 KiB qualify (§5.1.1), even with `download_after = 0`.
-The whole download fetches afresh and checks quickXorHash; cached ranges and unfinished
-staging are never a verified landing source.
+The whole download asks fresh metadata, reuses matching version-bound memory ranges,
+and fetches missing bytes. Only its complete quickXorHash-checked assembly can land;
+unfinished staging is never served to readers (§5.3).
 
 Outside scans a record is chosen before fetching, so a late fetch updates only its
 original content's coverage. A changed opened `ContentVersion` replaces that item's
@@ -709,7 +710,21 @@ One download, in its slot of the transfer pool (§5.6):
    and content, which the download states keep for the latest 16 that failed. Each fetch asks Graph
    for the item afresh — size, cTag, quickXorHash and a download address — and streams from that
    address with a `Range` from where the bytes stop (`content_source/graph_source.rs`,
-   `konedrive-graph/src/drive/mod.rs`). A `200` to a `Range` request has its first bytes skipped,
+   `konedrive-graph/src/drive/mod.rs`). Its private download source can instead feed an
+   existing memory block into that same writer when the item's opened generation,
+   bound metadata eTag, known cTag/hash facts and size match the fresh metadata.
+   The fresh metadata may supply a hash omitted by the listing; the assembled
+   copy must still match that complete-file hash. Missing
+   intervals fetch only up to the next cached block; a running response is stopped
+   at a block boundary if playback has meanwhile filled that block. The original
+   single response is retained when there is no matching cache. Authentication,
+   five-minute expiry and the shared 64 MiB bound still apply; there is no new store.
+   Before another missing interval needs the network, the assembly yields a typed
+   continuation to its writer. Both sequential and parallel writers reopen through
+   the existing fetch path, retaining the throttle refusal race and typed source
+   errors for every request. This boundary spends no connection break or backoff;
+   the written prefix, running hash and checkpoint cadence continue unchanged.
+   A `200` to a `Range` request has its first bytes skipped,
    so the stream starts where it says; a `416` is an empty stream; a `401`, `403`, `404` or `410`
    from the address is an expired one, replaced once.
 2. **Held against the asked content.** Every answer — the first, one after a break, each piece of
@@ -719,7 +734,8 @@ One download, in its slot of the transfer pool (§5.6):
    another content.
 3. **Checked** (`content_source/source/download.rs`, `guards.rs`). The quickXorHash is computed
    over the bytes as they are written, and a content OneDrive gives a hash for is never landed
-   unless it matches; a mismatch starts the download over once, and a second is `EIO`. A file
+   unless it matches; a mismatch drops the item's cached memory blocks and starts
+   this download over once with reuse disabled, and a second is `EIO`. A file
    OneDrive gives without a hash fails closed with `EIO` ([F34](../limitations/F34.md)).
    A read error or a short stream is a break: the next fetch asks from where the bytes stopped,
    after 200 ms and then 400 ms; the third break ends the download with `EIO`. A minutes-long
@@ -735,6 +751,13 @@ One download, in its slot of the transfer pool (§5.6):
 5. **Given its time and the marks of a whole copy, and synced**, by the downloader with no lock
    held: the landing's job waits for no file to reach the disk.
 6. **Landed** (§5.4), then announced (§9), and its waiters answered.
+
+Reused blocks are input to the whole download only: no reader sees unfinished
+staging. All assembled bytes still undergo the ordinary per-buffer space check,
+ordered writes, progress tracking, checkpoints, cancellation and final hash check.
+Guard admission still reserves the whole file; only newly consumed network bytes
+add retry traffic beyond that reservation. Cached bytes are never charged again
+as retry network traffic.
 
 **A large file in parallel parts.** A download that nothing waits to open (a pinned file) of
 100 MiB and up goes in pieces of 256 MiB (`content_source/source/parts.rs`). Its first stream runs

@@ -614,8 +614,13 @@ impl ItemDownloader {
         // raised by the source alone, and only for answers of the asked content. The
         // source also tells the states of the first such answer.
         let written_up_to = self.download_states.begin_writing(run, Arc::clone(&staged));
+        let network_charge = charge.clone();
+        let download_source = self.source.download_source(file.onedrive_item.item_id.as_str(), Arc::new(move |bytes| {
+            if let Some(charge) = &network_charge { charge.received(bytes); }
+        }));
         let checked = space_checked::SpaceChecked {
-            charge, inner: self.source.as_ref(), backing: Arc::clone(&self.backing_directory),
+            charge: if download_source.is_some() { None } else { charge },
+            inner: download_source.as_deref().unwrap_or(self.source.as_ref()), backing: Arc::clone(&self.backing_directory),
             reserve: if !matches!(asker, DownloadAsker::FilesInterface) { self.read_reserve.as_ref().map(|(_, reserve)| Arc::clone(reserve)) } else { None },
         };
         let source = DownloadSource::new(&checked, file.content.clone(), written_up_to, &self.download_states, run, self.report.throttle_wait.clone());

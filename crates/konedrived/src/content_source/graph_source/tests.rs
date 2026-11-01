@@ -466,6 +466,7 @@ async fn a_refused_listed_binding_sends_no_request() {
 }
 
 mod blocks;
+mod download;
 
 mod read_ahead;
 

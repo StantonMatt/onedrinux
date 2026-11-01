@@ -431,8 +431,8 @@ PYCODE
     rmdir "$app_group"
     umount /mnt/tiny-scan-cgroups
     check_state opened.png hydrated
-    check "the decoded image has one range and one whole download" "$(onedrive count GET dl/O)" 2
-    check "eleven range fetches and only one whole download" "$(onedrive count GET dl/)" 12
+    check "the decoded image lands from its one cached range" "$(onedrive count GET dl/O)" 1
+    check "eleven range fetches also feed the one verified landing" "$(onedrive count GET dl/)" 11
     for n in $(seq -w 00 09); do
         check "peeked file $n has no whole download" "$(onedrive count GET dl/T$n)" 1
         check "peeked file $n stays cloud-only" "$(state_of "$n.png")" online-only
@@ -475,7 +475,9 @@ PYCODE
     rmdir "$app_group"
     umount /mnt/launch-cgroups
     check_state "opened.png" hydrated
-    check "a launch read starts one whole download" "$(onedrive count GET dl/O)" 2
+    local launch_requests
+    launch_requests=$(onedrive count GET dl/O)
+    check "the launch copy reuses cached bytes or overlaps the initial range" "$((launch_requests >= 1 && launch_requests <= 2))" 1
     check_state a.png online-only
     check_state b.png online-only
 }

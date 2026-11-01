@@ -57,6 +57,7 @@
 
 mod links;
 mod read_blocks;
+mod download;
 mod headers;
 
 use std::time::{Duration, SystemTime};
@@ -350,6 +351,11 @@ impl GraphSource {
 
 #[async_trait]
 impl ContentSource for GraphSource {
+    fn download_source(&self, item_id: &str, received: Arc<dyn Fn(u64) + Send + Sync>) -> Option<Box<dyn ContentSource>> {
+        Some(Box::new(download::Download { source: self.clone(), item_id: item_id.to_owned(), received,
+            fresh: std::sync::atomic::AtomicBool::new(false) }))
+    }
+
     async fn read_range(&self, item_id: &str, opened_as: &ContentVersion, listed: Option<&ListedContent>, from: u64, end: u64) -> Result<Fetched, SourceError> {
         let epoch = self.headers.as_ref().map(|headers| headers.epoch());
         if let Some(answer) = self.reader_memory(item_id, opened_as, from, end, epoch) { return Ok(answer); }

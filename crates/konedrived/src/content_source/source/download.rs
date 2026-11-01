@@ -26,7 +26,7 @@ use tokio::io::AsyncReadExt;
 
 use super::guards::{check_answer, errno_of, open, resume, same_version, verify, Breaks, End, StartOver, Tuning, BUFFER};
 use super::target::Target;
-use super::{ContentSource, Split, Version};
+use super::{ContentSource, FetchNext, Split, Version};
 use super::guards::{drop_checkpoint, usable_checkpoint};
 
 /// What a download produced, before any of it is committed: how many bytes, and the version
@@ -127,7 +127,7 @@ async fn attempt(
             let read = match stream.read(&mut buffer).await {
                 Ok(0) => break None,
                 Ok(read) => read,
-                Err(e) => break Some(e.to_string()),
+                Err(e) => break Some(e),
             };
             hasher.update(&buffer[..read]);
             let at = written;
@@ -167,6 +167,9 @@ async fn attempt(
                 }
                 return Ok(Downloaded { size, version });
             }
+            // An assembly boundary reopens through fetch, preserving its typed
+            // refusals and throttle race without spending the connection-break budget.
+            Some(error) if FetchNext::requested(&error) && written > fetched.served_from => {}
             // A break, or a short stream: continue from where the bytes stopped.
             None => breaks.again(item_id, &format!("the stream ended after {written} bytes")).await?,
             Some(why) => breaks.again(item_id, &format!("the download broke after {written} bytes: {why}")).await?,
