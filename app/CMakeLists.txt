@@ -94,6 +94,7 @@ add_library(konedrive_core STATIC
     downloadguardcontroller.cpp
     changeguardcontroller.cpp
     heldchanges.cpp
+    heldrowsmodel.cpp
     accountcontroller.cpp
     synccontroller.cpp
     accountsmodel.cpp

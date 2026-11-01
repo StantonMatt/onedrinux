@@ -327,6 +327,8 @@ mount.
   folder never takes (links, special files, set attributes). `[tests]`
 - `kernel_requests/pending_reply.rs` — replies moved to tasks and write jobs explicitly
   answer EIO on drop instead of dropping a raw fuser reply. `[tests]`
+- `item_kernel_requests/write_reply_attributes.rs` — the attributes assembled through the
+  writer for replies to make, truncate and time operations.
 - `item_kernel_requests.rs` — `ItemKernelRequests`: what each request of the kernel does,
   request by request; `ATTRIBUTE_LIFETIME`. `[tests]`
 - `fuse_connection.rs` — the connection of a mount to the kernel, as the kernel numbers it, and
@@ -511,6 +513,7 @@ The runner of the plan's steps towards OneDrive.
 
 - `mod.rs` — `OneDriveSteps`: one function per case of `OneDriveStep`, each one request to
   Graph, the answer turned into what its commit takes, and the commit. `[tests]`
+- `removals.rs` — the guarded file and directory removals and their request answers.
 - `content_upload.rs` — exact sent-byte and final local-generation checks, metadata fallback and holds for hashless completions; a file's content sent: an empty file by one request, any other through
   an upload session, in fragments, gone on with after a stop or a crash. `[tests]`
 - `confirmed_item.rs` — Graph's answer to a step as the commit takes it, and what a request is
@@ -567,6 +570,7 @@ The task of a folder's sync plan: one per folder, in either access mode.
 
 - `mod.rs` — `SyncPlanTask`: the loop that reads what differs, makes the plan, runs its steps
   and settles what came of each; what wakes it, what bounds the plans, its stop. `[tests]`
+- `publication.rs` — publication of plan answers, queue progress, settled activity and marks.
 - `plan_input.rs` — what a plan is made from: read from the store by its bounded readers,
   closed, planned, and widened by every item the plan answers it was not given; the window
   of a reading (`decide_window`) and the count of what will not be sent by itself. `[tests]`
@@ -1084,6 +1088,8 @@ Each has its file in `crates/konedrived/src/dbus/`.
 - `heldchanges.h`, `heldchanges.cpp` — what the change guard holds of one account, with the token
   it was listed with: by kind in the page's words, the open group's rows, Allow and Restore and
   what they did.
+- `heldrowsmodel.cpp` — the open group's rows, path sorting, display roles and failure text;
+  `HeldRowsModel` is declared in `heldchanges.h`.
 - `changeguardtypes.h` — the structured types of `org.konedrive.ChangeGuard`.
 - `accountsmodel.h`, `accountsmodel.cpp` — the accounts, each with its controllers and what is
   held of it; Sign In and its link, and Sign In Read-Only Instead.
