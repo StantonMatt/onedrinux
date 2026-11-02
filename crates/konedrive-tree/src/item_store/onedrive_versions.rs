@@ -207,7 +207,7 @@ fn item_kind_of(kind: Kind) -> ItemKind {
 fn listed_item_of(row: &Row) -> ListedItem {
     let kind = item_kind_of(row.kind);
     let content = (kind == ItemKind::File).then(|| ContentVersion::Hashed { size: row.size, mtime: row.mtime, mtime_nsec: 0, hash: row.quickxor.clone(), ctag: row.ctag.clone() });
-    ListedItem { item_id: row.id.clone(), parent_id: row.parent_id.clone().unwrap_or_default(), kind, name: OsString::from(&row.name), content, etag: row.etag.clone(), mime: row.mime.clone().filter(|_| kind == ItemKind::File), placement: row.placement }
+    ListedItem { item_id: row.id.clone(), parent_id: row.parent_id.clone().unwrap_or_default(), kind, name: OsString::from(&row.name), content, etag: row.etag.clone(), mime: row.mime.clone().filter(|_| kind == ItemKind::File), media: row.media.clone().filter(|_| kind == ItemKind::File), placement: row.placement }
 }
 
 /// The row of `item` says OneDrive has what `listed` says: a change that was decided to be
@@ -243,7 +243,8 @@ fn write_listed_item(tx: &Transaction<'_>, listed: &ListedItem, row: Option<&Ite
     };
     forget_mismatched_item_listed_changed(tx, &reference(&listed.item_id), ctag, listed.etag.as_deref())?;
     let onedrive = ItemVersion { place: Some(place), content: listed.content.clone() };
-    set_onedrive_version(tx, item, &onedrive, listed.etag.as_deref(), listed.mime.as_deref(), listed.placement, seen_in_full_listing)
+    set_onedrive_version(tx, item, &onedrive, listed.etag.as_deref(), listed.mime.as_deref(), listed.placement, seen_in_full_listing)?;
+    super::media_facts::write(tx, item, &reference(&listed.item_id), listed.etag.as_deref(), listed.content.as_ref(), listed.media.as_ref())
 }
 
 /// [`ItemStore::write_listed_changes`], inside the caller's transaction, which is dropped

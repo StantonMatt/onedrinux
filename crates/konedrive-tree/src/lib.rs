@@ -27,6 +27,8 @@ mod item_changes;
 pub use item_changes::ItemChanges;
 mod meta;
 mod model;
+mod media;
+pub use media::{MediaFacts, MediaKind};
 mod path_column;
 mod pins;
 mod read;

@@ -33,7 +33,8 @@ version="$cargo_version+git$(date -u -d "@$commit_time" +%Y%m%d%H%M%S).$short_co
 for artifact in "$rust_build/konedrived" "$rust_build/konedrivectl" \
     "$app_build/bin/konedrive" \
     "$dolphin_build/bin/kf6/overlayicon/konedriveoverlay.so" \
-    "$dolphin_build/bin/kf6/kfileitemaction/konedriveactions.so"; do
+    "$dolphin_build/bin/kf6/kfileitemaction/konedriveactions.so" \
+    "$dolphin_build/bin/kf6/kfilemetadata/konedrive_mediaextractor.so"; do
     test -f "$artifact" || { echo "Missing build artifact: $artifact" >&2; exit 1; }
 done
 # Match packaging/rpm/konedrive.spec: release packages never export tokens.
@@ -64,6 +65,7 @@ done
 # CMake's cached layout must agree with Debian's multiarch Qt directory.
 test -f "$kde/$plugin_dir/kf6/overlayicon/konedriveoverlay.so"
 test -f "$kde/$plugin_dir/kf6/kfileitemaction/konedriveactions.so"
+test -f "$kde/$plugin_dir/kf6/kfilemetadata/konedrive_mediaextractor.so"
 # The overlay plugin's emblems, from the same build: the 8 px set is hicolor's scalable one.
 test -f "$kde/usr/share/icons/hicolor/scalable/emblems/konedrive-online-only.svg"
 test -f "$kde/usr/share/icons/hicolor/16x16/emblems/konedrive-online-only.svg"
@@ -123,7 +125,8 @@ shlibs() {
 core_shlibs=$(shlibs -e"$core/usr/bin/konedrived" -e"$core/usr/bin/konedrivectl")
 kde_shlibs=$(shlibs -e"$kde/usr/bin/konedrive" \
     -e"$kde/$plugin_dir/kf6/overlayicon/konedriveoverlay.so" \
-    -e"$kde/$plugin_dir/kf6/kfileitemaction/konedriveactions.so")
+    -e"$kde/$plugin_dir/kf6/kfileitemaction/konedriveactions.so" \
+    -e"$kde/$plugin_dir/kf6/kfilemetadata/konedrive_mediaextractor.so")
 test -n "$core_shlibs"
 test -n "$kde_shlibs"
 
@@ -153,7 +156,7 @@ control konedrive "$core_shlibs, fuse3, init-system-helpers (>= 1.69)" \
 # Keep the wire protocol split in lockstep, as the RPM does.
 control konedrive-kde "konedrive (= $version), $kde_shlibs, libkf6kiocore6 (>= 6.21), dolphin, breeze-icon-theme, $qml_deps" \
     'KOneDrive window, tray icon and Dolphin plugins' \
-    'Kirigami account window, file state overlays and context actions for Dolphin.'
+    'Kirigami account window, file state overlays, context actions and cloud media details for Dolphin.'
 
 for package in konedrive konedrive-kde; do
     (cd "$stage/$package" && find usr -type f -print0 | sort -z | xargs -0 md5sum) \

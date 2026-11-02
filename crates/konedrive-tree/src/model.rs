@@ -137,6 +137,8 @@ pub struct Row {
     /// `file.hashes.quickXorHash`, base64.
     pub quickxor: Option<String>,
     pub mime: Option<String>,
+    /// Allowed media facets delivered with this listed content.
+    pub media: Option<crate::MediaFacts>,
     /// The item's own placement; an item inside a skipped folder is not placed
     /// either.
     pub placement: Placement,

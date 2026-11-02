@@ -269,13 +269,13 @@ impl ItemFixture {
         if is_from_schema_31 {
             drop(TreeStore::open(&store_path).expect("the store"));
             let conn = rusqlite::Connection::open(&store_path).expect("the store, as schema 31");
-            conn.execute_batch("ALTER TABLE items DROP COLUMN onedrive_folder_ctag; UPDATE meta SET value = '31' WHERE key = 'schema_version';").expect("the store at schema 31");
+            conn.execute_batch("DROP TRIGGER media_facts_item_gone; DROP TRIGGER media_facts_binding_gone; DROP TABLE media_facts; ALTER TABLE items DROP COLUMN onedrive_folder_ctag; UPDATE meta SET value = '31' WHERE key = 'schema_version';").expect("the store at schema 31");
         }
         let mut tree_store = TreeStore::open(&store_path).expect("the store");
         assert_eq!(store_path.with_file_name("tree.db.pre-31").exists(), is_from_schema_31, "the store at schema 31 was migrated, and no other");
         tree_store.set_drive_id(DRIVE_ID).expect("the drive");
         let listing = tree_store.item_store().begin_full_listing().expect("a full listing");
-        let root = Change::Root(Row { id: ROOT_ONEDRIVE_ID.into(), parent_id: None, name: String::new(), kind: Kind::Folder, size: 0, mtime: 0, etag: Some("e-R".into()), ctag: None, quickxor: None, mime: None, placement: Placement::Placed });
+        let root = Change::Root(Row { media: None, id: ROOT_ONEDRIVE_ID.into(), parent_id: None, name: String::new(), kind: Kind::Folder, size: 0, mtime: 0, etag: Some("e-R".into()), ctag: None, quickxor: None, mime: None, placement: Placement::Placed });
         let listed = tree_store.item_store().write_listed_changes(listing.id, &[root], listing.began_at_count, &ListingLink::DeltaLink("link-0".into())).expect("the root is listed");
         assert!(listed.is_link_written(), "the first listing ended");
         let store = Store::new(tree_store);
@@ -638,7 +638,7 @@ impl ItemFixture {
         let (parent, name) = split_path(path);
         let version = self.listed_version_count.fetch_add(1, Ordering::SeqCst) + 1;
         let hash = content.map(qx);
-        Row {
+        Row { media: None,
             id: onedrive_id_of(path),
             parent_id: Some(onedrive_id_of(parent)),
             name: name.to_owned(),

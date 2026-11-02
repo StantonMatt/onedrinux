@@ -293,7 +293,7 @@ fn a_landing_for_the_plan_asks_every_version_and_one_for_a_read_the_content_alon
         store
             .call_blocking(move |store| {
                 let began = store.item_store().begin_delta_listing()?;
-                let row = konedrive_tree::Row { id: reference.item_id.as_str().into(), parent_id: Some(crate::mount::item_fixture::ROOT_ONEDRIVE_ID.into()), name: "crossed.txt".into(), kind: konedrive_tree::Kind::File, size: 7, mtime: ONEDRIVE_MTIME, etag: Some("e-crossed-later".into()), ctag: Some("c-later".into()), quickxor: None, mime: None, placement: konedrive_tree::Placement::Placed };
+                let row = konedrive_tree::Row { media: None, id: reference.item_id.as_str().into(), parent_id: Some(crate::mount::item_fixture::ROOT_ONEDRIVE_ID.into()), name: "crossed.txt".into(), kind: konedrive_tree::Kind::File, size: 7, mtime: ONEDRIVE_MTIME, etag: Some("e-crossed-later".into()), ctag: Some("c-later".into()), quickxor: None, mime: None, placement: konedrive_tree::Placement::Placed };
                 store.item_store().write_listed_changes(began.id, &[konedrive_tree::Change::Upsert(row)], began.began_at_count, &konedrive_tree::ListingLink::DeltaLink("link-crossed".into()))
             })
             .expect("the page is written");

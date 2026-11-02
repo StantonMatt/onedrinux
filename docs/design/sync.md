@@ -115,7 +115,7 @@ whose row is gone, or that the folder does not show, is answered `ESTALE` ([moun
 `$XDG_STATE_HOME/konedrive/accounts/<account id>/fuse.sqlite`, in WAL mode. One thread owns the
 writing connection (`Store`); readers use `ItemReader`, one read transaction per closure, and never
 wait for the writer. Beside `items`: the step memory (§7.5), the records of place changes
-([mount.md](mount.md) §3), the pins, the thumbnail marks, the activity log, the conflicts, and in
+([mount.md](mount.md) §3), the pins, the thumbnail marks, the version-bound media facts, the activity log, the conflicts, and in
 `meta` the delta link and the listing under way. Supported older layouts migrate sequentially
 with a durable WAL-inclusive snapshot. Unsupported/damaged stores are quarantined; readable
 pins return and pending namespace changes are exported without replay. Newer layouts refuse
@@ -128,7 +128,7 @@ Everything in a row is written through `ItemStore`, each change one transaction.
 | What | Written by |
 |---|---|
 | local version | the mount's write operations (`ItemStore::apply`), when a program makes, renames, removes, opens for writing, truncates or closes ([mount.md](mount.md) §4); the start-up check ([mount.md](mount.md) §7); a step towards the folder's commit |
-| OneDrive version, eTag, MIME type, `placement` | the listing (`write_listed_changes`, §5) |
+| OneDrive version, eTag, MIME type, media facts, `placement` | the listing (`write_listed_changes`, §5) |
 | OneDrive version, eTag, synced place or content, `confirmed_at_count` | a step towards OneDrive's commit, when OneDrive confirmed (§7.2) |
 | synced place or content | the commits of steps towards the folder and of the rows |
 | `content_presence` | a download's landing, a free-up, the write operation that makes a file, the start-up check ([mount.md](mount.md) §5, §6) |
@@ -217,10 +217,16 @@ confirmed; otherwise the row is left and the item answered, to be read again.
 A full listing is begun for the first listing, after OneDrive answers 410, when OneDrive refuses the
 kept link of a stopped full listing, when the start-up check bound entries by their marks
 ([mount.md](mount.md) §7), and when the plan finds rows no listing will mend
-(`PlanFault::FullListingNeeded`). A request for one is kept in the store across a stop. Its pages
+(`PlanFault::FullListingNeeded`), and once on upgrading schema 32 to 33 to backfill media facts. A request for one is kept in the store across a stop. Its pages
 mark each row they write with the listing's id; at its end every row OneDrive had without the mark
 is taken as gone, bounded by the count the listing began at. A refused link begins a full listing
 once in a cycle; a second fails the cycle.
+
+The media-facts backfill uses this same path: accepted unchanged items still replace
+or clear the side-table facts, bound to their listed content and eTag. Re-listing an
+unchanged tree leaves its versions, local edits, kept bytes and pins unchanged; it
+fetches metadata only (about 12 pages for 11,000 items), without re-downloading files.
+The next start uses the new delta link; the upgrade request is not repeated.
 
 ### 5.5 The delta link
 

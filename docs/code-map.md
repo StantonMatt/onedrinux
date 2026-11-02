@@ -47,7 +47,7 @@ A change that adds, moves or removes a file changes its line here.
 | `crates/konedrive-text` | What the codes mean, in words: the one catalogue of sentences, and the C++ generated from it |
 | `dbus/` | The D-Bus interfaces as XML: the contract between the daemon and its clients |
 | `app/` | The window and the tray icon (Qt 6, Kirigami) |
-| `dolphin/` | The Dolphin plugins: overlay emblems and the context menu |
+| `dolphin/` | The Dolphin plugins: overlay emblems, the context menu and cloud-only media details |
 | `vendor/fuser` | The `fuser` crate with one change (`vendor/fuser/README.konedrive.md`); not mapped here |
 | `tests/fuse-probe` | The VM suite: a sync folder mounted for real, in a virtme-ng VM |
 | `tests/write-account` | The guarded harness for the test account |
@@ -827,6 +827,7 @@ Integration tests: the compiled binary against a daemon on a private bus.
 - `drive/account.rs` — the two calls the account page needs: the profile and the drive.
   `[tests]`
 - `drive/item.rs` — a `driveItem`. `[tests]`
+- `drive/item/media.rs` — tolerant typed image/photo/video facets; unknown fields discarded.
 - `drive/write.rs` — the drive API, writing: a new folder, a move, a delete. `[tests]`
 - `drive/upload.rs` — upload sessions. `[tests]`
 - `drive/socket.rs` — change notifications over Socket.IO. `[tests]`
@@ -850,6 +851,7 @@ per item), `step_memory` and the tables beside it, `place_change_records`, `pins
   (`ItemPlace`, `ContentVersion`), `ContentPresence`; `LocalVersionChange`; the sync state a
   row gives a file (`FileSyncState`); `Placement` and `SkipReason`; `DriveId`; and a listed
   item as Graph's words give it (`Row`, `Change`). `[tests]`
+- `media.rs` — allowed unconverted media facts and the version-1 JSON shape.
 - `schema.rs` — the schema's version, what a new store is created with, and when a store is
   admitted, migrated or quarantined. `[tests]`
 - `schema/old_store.rs` — store admission, sequential migrations, snapshots and newer-schema refusal. `[tests]`
@@ -918,6 +920,8 @@ The rows:
   list changed. `[tests]`
 - `item_store/item_pins.rs` — the pins asked and set by item. `[tests]`
 - `item_store/pinned_items.rs` — the files a pin holds for, by local item id. `[tests]`
+- `item_store/media_facts.rs` — listing-owned compact JSON, content/binding fences, deletion
+  triggers, transactional binding transfers and one indexed read for the media xattr. `[tests]`
 - `item_store/thumbnail_marks.rs` — which content version a thumbnail was last made for.
   `[tests]`
 - `item_store/own_upload_content.rs` — the content an upload of this folder left in OneDrive
@@ -1252,6 +1256,9 @@ Each has its file in `crates/konedrived/src/dbus/`.
 - `actionplugin.cpp` — the context menu plugin: the OneDrive section, handed over waiting and
   set from the daemon's answer (`Files.Menu`) when it comes.
 - `konedriveactions.json` — its description.
+- `mediaextractor.cpp` — KFileMetaData photo/video properties from `user.konedrive.media`,
+  without opening content or consulting the visual sync state.
+- `konedrive_mediaextractor.json` — its MIME registrations (exiv2 + ffmpeg, including BMFF).
 - `filestate.h`, `filestate.cpp` — what a file in the folder is, from its extended attributes
   alone: what the emblems show, and whether a selection is in a sync folder at all.
 - `syncclient.h`, `syncclient.cpp` — the calls to the daemon, none of them waited for: the
@@ -1274,7 +1281,9 @@ Each has its file in `crates/konedrived/src/dbus/`.
 - `emblemframestest.py` — checks regenerated SVGs, frame rotations and unchanged plates and glyphs.
 - `overlayplugintest.cpp` — the overlay plugin as Dolphin loads it.
 - `actionplugintest.cpp` — the context menu plugin as `KFileItemActions` loads it.
-- `noopentest.cpp` — the plugins never open a file inside the folder.
+- `noopentest.cpp` — the overlay and action plugins never open a file inside the folder.
+- `mediaextractortest.cpp` — the loaded media extractor: mapping, local camera clock, missing
+  or invalid attributes, MIME registrations and readable canaries watched for opens.
 - `refusaltextstest.cpp`, `refusaltexts.expected` — every operation and refusal reads as it did
   before its sentence was generated: the strings of the hand-written table, a line each.
 
@@ -1404,6 +1413,7 @@ What `docs/kio-behavior.md` was measured with.
 ## Documents
 
 - `README.md` — what KOneDrive is and does, in short, and where to read more.
+- `docs/design/media-details.md` — the media attribute wire contract and KDE property mapping.
 - `docs/user-guide.md` — installing and using it: the sync folder, the window, the tray, Dolphin.
 - `docs/command-line.md` — the same from a terminal, with `konedrivectl`.
 - `docs/developing.md` — building, the development install, what it needs to run, the tests.

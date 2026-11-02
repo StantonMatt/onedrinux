@@ -23,11 +23,16 @@ foreach(opener xdg-open kde-open kde-open5 kioclient kioclient5 firefox gio drko
 endforeach()
 
 set(test_home ${CMAKE_CURRENT_BINARY_DIR}/home)
+file(MAKE_DIRECTORY ${test_home}/runtime)
+file(CHMOD ${test_home}/runtime PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE)
 # The last two make glibc fill every freed block with a pattern and skip its
 # per-thread cache, so a read of freed memory crashes instead of seeing the
 # old bytes by luck (an eviction once read a map key it had just erased, and
 # passed under glibc's defaults).
 set(test_environment
+    HOME=${test_home}
+    DBUS_SYSTEM_BUS_ADDRESS=unix:path=${test_home}/no-system-bus
+    XDG_RUNTIME_DIR=${test_home}/runtime
     QT_QPA_PLATFORM=offscreen
     BROWSER=true
     PATH=${test_openers}:$ENV{PATH}
@@ -57,6 +62,12 @@ konedrive_dolphin_test(overlayenginetest)
 konedrive_dolphin_test(overlayplugintest)
 konedrive_dolphin_test(actionplugintest)
 konedrive_dolphin_test(noopentest)
+konedrive_dolphin_test(mediaextractortest)
+target_link_libraries(mediaextractortest PRIVATE KF6::FileMetaData)
+target_compile_definitions(mediaextractortest PRIVATE
+    KONEDRIVE_MEDIA_PLUGIN="$<TARGET_FILE:konedrive_mediaextractor>")
+add_dependencies(mediaextractortest konedrive_mediaextractor)
+set_tests_properties(mediaextractortest PROPERTIES ENVIRONMENT "${test_environment};TZ=America/Santiago")
 # The plugin's words as they were before they were generated from the catalogue.
 konedrive_dolphin_test(refusaltextstest)
 target_compile_definitions(refusaltextstest PRIVATE KONEDRIVE_EXPECTED_TEXTS="${CMAKE_CURRENT_SOURCE_DIR}/refusaltexts.expected")

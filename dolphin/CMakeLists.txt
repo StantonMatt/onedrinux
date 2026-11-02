@@ -3,7 +3,8 @@ cmake_minimum_required(VERSION 3.24)
 project(konedrive-dolphin VERSION 0.1.0 LANGUAGES CXX)
 
 # Dolphin integration: an overlay emblem for each file's and folder's state and pin, and
-# "Always keep on this device" / "Free up space" / "View online" in the context menu. Neither
+# "Always keep on this device" / "Free up space" / "View online" in the context menu,
+# and photo/video details from the mount's media attribute. No
 # plugin ever opens a file in the sync folder -- reading one that is not on
 # this computer downloads it.
 
@@ -20,11 +21,11 @@ include(KDECMakeSettings)
 include(KDECompilerSettings NO_POLICY_SCOPE)
 
 find_package(Qt6 ${QT_MIN_VERSION} REQUIRED COMPONENTS Core Gui Widgets DBus)
-find_package(KF6 ${KF_MIN_VERSION} REQUIRED COMPONENTS KIO CoreAddons I18n)
+find_package(KF6 ${KF_MIN_VERSION} REQUIRED COMPONENTS KIO CoreAddons I18n FileMetaData)
 
 add_definitions(-DTRANSLATION_DOMAIN=\"konedrive_dolphin\")
 
-# Everything the two plugins decide, in one library the tests link directly.
+# Shared overlay and context-menu logic, in one library the tests link directly.
 add_library(konedrive_dolphin_core STATIC
     src/filestate.cpp
     src/generated/refusaltexts.cpp
@@ -40,6 +41,9 @@ target_link_libraries(konedriveoverlay PRIVATE konedrive_dolphin_core KF6::KIOCo
 
 kcoreaddons_add_plugin(konedriveactions SOURCES src/actionplugin.cpp INSTALL_NAMESPACE "kf6/kfileitemaction")
 target_link_libraries(konedriveactions PRIVATE konedrive_dolphin_core KF6::KIOWidgets KF6::CoreAddons KF6::I18n Qt6::Widgets)
+
+kcoreaddons_add_plugin(konedrive_mediaextractor SOURCES src/mediaextractor.cpp INSTALL_NAMESPACE "kf6/kfilemetadata")
+target_link_libraries(konedrive_mediaextractor PRIVATE KF6::FileMetaData)
 
 # The emblems, including all syncing frames (emblems/generate.py), in hicolor,
 # which every icon theme falls back on. Each size installs the same icon names.

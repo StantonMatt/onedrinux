@@ -707,3 +707,115 @@ fn a_resident_remote_update_is_shown_pending_until_the_replacement_commits() {
     assert_eq!(decide_sync_mark(&same_content, false, false, None, false), None, "mtime precision alone is no pending content replacement");
 
 }
+
+/// Re-list exactly the fixture's remote version with contract facts, then query through
+/// the actual lookup and read connection (not only the pure presence predicate).
+fn list_media(fixture: &ItemFixture, file: &Item, facets: serde_json::Value) {
+    let remote = file.onedrive.as_ref().unwrap();
+    let place = remote.place.as_ref().unwrap();
+    let parent = fixture.read_rows({let id = place.parent_local_item_id; move |reader| reader.find_item(id)}).unwrap();
+    let (size, mtime, hash, ctag) = match remote.content.as_ref() {
+        Some(ContentVersion::Hashed { size, mtime, hash, ctag, .. }) => (*size, *mtime, hash.clone(), ctag.clone()),
+        _ => (0, 0, None, None),
+    };
+    let mut value = serde_json::json!({"id":file.onedrive_item.as_ref().unwrap().item_id.as_str(),
+        "name":place.name.to_str().unwrap(),"size":size,"eTag":file.onedrive_etag,"cTag":ctag,
+        "parentReference":{"id":parent.onedrive_item.unwrap().item_id.as_str()},
+        "file":{"hashes":{"quickXorHash":hash}},"fileSystemInfo":{"lastModifiedDateTime":konedrive_graph::drive::item::format_graph_time(mtime)}});
+    value.as_object_mut().unwrap().extend(facets.as_object().unwrap().clone());
+    if file.kind == ItemKind::Directory { value["folder"] = serde_json::json!({}); }
+    let item = serde_json::from_value(value).unwrap();
+    fixture.write_listing(vec![crate::listing::classify::classify(&item)]);
+}
+
+#[test]
+fn media_xattr_contract_values_are_stored_only_and_never_listed() {
+    use serde_json::json;
+    let fixture = ItemFixture::new();
+    let lookup = lookup(&fixture);
+    for (name, facets, expected) in [
+        ("photo.jpg",json!({"image":{"width":3200,"height":2400},"photo":{"cameraMake":"Example","cameraModel":"Model","takenDateTime":"2024-02-03T04:05:06.12Z","orientation":1,"fNumber":2.8,"exposureNumerator":1.0,"exposureDenominator":125.0,"focalLength":7.5,"iso":200},"location":{"latitude":1}}),json!({"v":1,"kind":"photo","width":3200,"height":2400,"cameraMake":"Example","cameraModel":"Model","takenDateTime":"2024-02-03T04:05:06.12Z","orientation":1,"fNumber":2.8,"exposureNumerator":1.0,"exposureDenominator":125.0,"focalLength":7.5,"iso":200})),
+        ("portrait.jpg",json!({"image":{"width":2400,"height":3200},"photo":{"orientation":6}}),json!({"v":1,"kind":"photo","width":2400,"height":3200,"orientation":6})),
+        ("movie.mp4",json!({"video":{"width":1080,"height":1920,"duration":12345,"frameRate":30.0,"bitrate":999},"photo":{"cameraMake":"Ignore","takenDateTime":"2024-02-03T04:05:06Z"}}),json!({"v":1,"kind":"video","width":1080,"height":1920,"durationMs":12345,"frameRate":30.0})),
+        ("screen.png",json!({"image":{"width":800,"height":600}}),json!({"v":1,"kind":"photo","width":800,"height":600})),
+    ] {
+        let file = fixture.show_onedrive_file(name, b"bytes");
+        let node = file.local_item_id;
+        list_media(&fixture, &file, facets);
+        let value = find_xattr(&fixture, &lookup, node, XATTR_MEDIA).unwrap();
+        assert!(!value.contains("\n"));
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&value).unwrap(), expected);
+        assert!(ask(&fixture, &lookup, move |lookup| lookup.list_xattr_names(node)).unwrap().is_empty());
+    }
+    let plain = fixture.show_onedrive_file("plain", b"plain");
+    let folder = fixture.show_onedrive_directory("folder");
+    list_media(&fixture, &folder, json!({"photo":{"cameraMake":"Not a file"}}));
+    for node in [plain.local_item_id, folder.local_item_id, ROOT] {
+        assert_eq!(errno_of(find_xattr(&fixture, &lookup, node, XATTR_MEDIA)), Some(Errno::ENODATA));
+    }
+    let file = fixture.show_onedrive_file("stale.jpg", b"old");
+    list_media(&fixture, &file, json!({"image":{"width":1}}));
+    let id = file.local_item_id;
+    // A delta can carry fresh facts for a newer remote version before the plan applies it.
+    let mut newer = file.clone();
+    newer.onedrive.as_mut().unwrap().content = Some(ContentVersion::Hashed {size:3,mtime:1,mtime_nsec:0,hash:None,ctag:Some("new-listing".into())});
+    newer.onedrive_etag = Some("new-listing".into());
+    list_media(&fixture, &newer, json!({"image":{"width":2}}));
+    assert_eq!(errno_of(find_xattr(&fixture, &lookup, id, XATTR_MEDIA)), Some(Errno::ENODATA), "newer listing facts are not for the shown content");
+    // A remote version confirmed by a step, with no new listing facts yet.
+    fixture.write_rows(move |store| {
+        use konedrive_tree::ConfirmedOneDriveVersion;
+        let mut version = store.item_store().find_item(id)?.unwrap().onedrive.unwrap();
+        version.content = Some(ContentVersion::Hashed {size:3,mtime:1,mtime_nsec:0,hash:None,ctag:Some("new".into())});
+        store.item_store().confirm_onedrive_version(id, &ConfirmedOneDriveVersion::Present { version, etag:"new".into() })
+    });
+    assert_eq!(errno_of(find_xattr(&fixture, &lookup, id, XATTR_MEDIA)), Some(Errno::ENODATA));
+}
+
+#[test]
+fn media_xattr_survives_timestamp_only_listing_changes() {
+    let fixture = ItemFixture::new();
+    let lookup = lookup(&fixture);
+    let mut file = fixture.show_onedrive_file("time-only.jpg", b"bytes");
+    let id = file.local_item_id;
+    let shown = file.local.clone();
+    if let Some(ContentVersion::Hashed { mtime, .. }) = file.onedrive.as_mut().unwrap().content.as_mut() {
+        *mtime += 10;
+    }
+    list_media(&fixture, &file, serde_json::json!({"image":{"width":800}}));
+    assert_eq!(fixture.read_rows(move |reader| reader.find_item(id)).unwrap().local, shown, "the plan leaves a time-only difference alone");
+    let value = find_xattr(&fixture, &lookup, id, XATTR_MEDIA).unwrap();
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&value).unwrap()["width"], 800);
+    // Subsecond precision alone likewise does not identify different bytes.
+    fixture.write_rows(move |store| {
+        let row = store.item_store().find_item(id)?.unwrap();
+        let time = row.onedrive.unwrap().content.unwrap().mtime().0;
+        store.item_store().set_local_modified_time(id, time, 123)
+    });
+    assert!(find_xattr(&fixture, &lookup, id, XATTR_MEDIA).is_ok());
+}
+
+#[test]
+fn media_xattr_uses_content_presence_even_while_visual_state_is_hydrating() {
+    let fixture = ItemFixture::new();
+    let lookup = lookup(&fixture);
+    let file = fixture.show_onedrive_file("photo.jpg", b"hello");
+    let node = file.local_item_id;
+    list_media(&fixture, &file, serde_json::json!({"image":{"width":800,"height":600}}));
+    assert!(find_xattr(&fixture, &lookup, node, XATTR_MEDIA).is_ok(), "remote-only");
+    let key = DownloadKey { item:node, content:file.local.unwrap().content.unwrap() };
+    let super::super::item_download_states::ItemDownloadStart::Started { run, .. } = fixture.download_states.start_or_join(&key, &DownloadAsker::Read, None) else { panic!() };
+    fixture.download_states.show_download(&run);
+    assert_eq!(find_xattr(&fixture, &lookup, node, XATTR_STATE).unwrap(), "hydrating");
+    assert!(find_xattr(&fixture, &lookup, node, XATTR_MEDIA).is_ok(), "whole download still running, not landed");
+    fixture.land_copy(node, b"hello");
+    assert_eq!(find_xattr(&fixture, &lookup, node, XATTR_STATE).unwrap(), "hydrating");
+    assert_eq!(errno_of(find_xattr(&fixture, &lookup, node, XATTR_MEDIA)), Some(Errno::ENODATA), "landed/on disk despite hydrating");
+    fixture.download_states.finish(&run, Ok(()));
+    assert_eq!(errno_of(find_xattr(&fixture, &lookup, node, XATTR_MEDIA)), Some(Errno::ENODATA), "synced on disk");
+    fixture.write_rows(|store| store.set_pin(ItemFixture::onedrive_reference_of("photo.jpg").item_id.as_str(), true));
+    assert_eq!(find_xattr(&fixture, &lookup, node, XATTR_PIN).unwrap(), "1");
+    assert_eq!(errno_of(find_xattr(&fixture, &lookup, node, XATTR_MEDIA)), Some(Errno::ENODATA), "kept on disk");
+    fixture.change_file_here(node, b"changed here");
+    assert_eq!(errno_of(find_xattr(&fixture, &lookup, node, XATTR_MEDIA)), Some(Errno::ENODATA), "modified here");
+}

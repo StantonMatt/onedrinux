@@ -28,6 +28,7 @@
 use rusqlite::{params, Connection, Transaction};
 
 use super::item_row::{delete_item, find_bound_item, find_item, find_seen_in_full_listing, insert_item, set_binding, set_seen_in_full_listing, write_item};
+use super::media_facts::BindingFacts;
 use super::{check_empty, refuse, ItemStore};
 use crate::model::{ContentPresence, DriveId, Item, ItemKind, LocalItemId, OneDriveItemId, OneDriveItemReference, Placement};
 use crate::{meta, TreeError};
@@ -105,6 +106,7 @@ fn hand_over(conn: &Connection, mut from: Item, mut to: Item) -> Result<(), Tree
         return Err(refuse(format!("item {} and item {} are not of one kind: an item of OneDrive never changes its kind", from.local_item_id, to.local_item_id)));
     }
     check_empty(conn, from.local_item_id)?;
+    let media = BindingFacts::read(conn, from.local_item_id)?;
     move_children_of_binding(conn, from.local_item_id, to.local_item_id)?;
     let seen_in_full_listing = find_seen_in_full_listing(conn, from.local_item_id)?;
     crate::step_memory::follow_binding(conn, from.local_item_id, to.local_item_id)?;
@@ -114,6 +116,7 @@ fn hand_over(conn: &Connection, mut from: Item, mut to: Item) -> Result<(), Tree
     to.synced_place = from.synced_place;
     to.synced_content = from.synced_content;
     write_item(conn, &to)?;
+    if let Some(media) = media { media.write_to(conn, to.local_item_id)?; }
     set_seen_in_full_listing(conn, to.local_item_id, seen_in_full_listing)
 }
 
@@ -159,6 +162,7 @@ pub(crate) fn exchange_bindings(tx: &Transaction<'_>, replacing: LocalItemId, re
         return Err(refuse("the replacing file must be downloaded before exchanging cloud bindings".to_owned()));
     }
     let seen = (find_seen_in_full_listing(tx, replacing)?, find_seen_in_full_listing(tx, replaced)?);
+    let media = (BindingFacts::read(tx, replacing)?, BindingFacts::read(tx, replaced)?);
     // Old sessions must never resume into a newly acquired binding. In-flight commits
     // resolve their original target by binding and therefore follow it to the other row.
     crate::step_memory::exchange_file_bindings(tx, replacing, replaced)?;
@@ -174,6 +178,8 @@ pub(crate) fn exchange_bindings(tx: &Transaction<'_>, replacing: LocalItemId, re
     std::mem::swap(&mut taker.confirmed_at_count, &mut giver.confirmed_at_count);
     write_item(tx, &taker)?;
     write_item(tx, &giver)?;
+    if let Some(media) = media.0 { media.write_to(tx, replaced)?; }
+    if let Some(media) = media.1 { media.write_to(tx, replacing)?; }
     set_seen_in_full_listing(tx, replacing, seen.1)?;
     set_seen_in_full_listing(tx, replaced, seen.0)
 }
@@ -189,6 +195,7 @@ pub(crate) fn give_up_binding(tx: &Transaction<'_>, item: LocalItemId, is_name_i
         return Err(refuse(format!("item {item} has no binding to give up")));
     };
     let seen_in_full_listing = find_seen_in_full_listing(tx, item)?;
+    let media = BindingFacts::read(tx, item)?;
     // What is OneDrive's of the giver, for the row that takes the binding.
     let mut given = giver.clone();
     move_onedrive_side(&mut giver, &mut given);
@@ -202,6 +209,7 @@ pub(crate) fn give_up_binding(tx: &Transaction<'_>, item: LocalItemId, is_name_i
     let mut taker_row = find_item(tx, taker)?.ok_or_else(|| refuse(format!("item {taker} has no row")))?;
     move_onedrive_side(&mut given, &mut taker_row);
     write_item(tx, &taker_row)?;
+    if let Some(media) = media { media.write_to(tx, taker)?; }
     set_seen_in_full_listing(tx, taker, seen_in_full_listing)?;
     move_children_of_binding(tx, item, taker)?;
     crate::step_memory::follow_binding(tx, item, taker)?;

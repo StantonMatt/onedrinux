@@ -82,7 +82,8 @@ fn a_store_of_the_version_before_is_migrated_in_place_and_keeps_what_it_held() {
     Connection::open(&path)
         .unwrap()
         .execute_batch(
-            "DROP INDEX items_thumbnail_type;
+            "DROP TRIGGER media_facts_item_gone; DROP TRIGGER media_facts_binding_gone; DROP TABLE media_facts;
+             DROP INDEX items_thumbnail_type;
              CREATE INDEX items_image_or_video ON items(local_item_id) WHERE (onedrive_mime LIKE 'image/%' OR onedrive_mime LIKE 'video/%');
              ALTER TABLE thumbnail_marks DROP COLUMN is_written;
              ALTER TABLE items DROP COLUMN onedrive_folder_ctag;",
@@ -91,7 +92,7 @@ fn a_store_of_the_version_before_is_migrated_in_place_and_keeps_what_it_held() {
     set_stored_version(&path, "30");
 
     let (mut store, origin) = TreeStore::open_with_origin(&path).unwrap();
-    assert_eq!(origin, StoreOrigin::Kept, "nothing is rebuilt: no full listing follows");
+    assert_eq!(origin, StoreOrigin::Kept, "nothing is rebuilt; a metadata backfill listing follows");
     assert_eq!(store.meta("schema_version").unwrap().as_deref(), Some(SCHEMA_VERSION));
     assert_eq!(store.item_store().find_item(file).unwrap(), row, "the row is as it was");
     assert_eq!(store.delta_link().unwrap().as_deref(), Some("link"), "the listing goes on from where it was");
@@ -324,3 +325,75 @@ fn no_upload_session_is_listed_where_none_is_to_cancel() {
 }
 
 mod safety;
+
+#[test]
+fn schema_32_media_backfill_keeps_rows_and_requests_one_full_listing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = store_path(&dir);
+    let mut store = store_in_file_with_listed_root(&path);
+    let file = show_listed_file(&mut store, "F", "R", "f", "h1");
+    store.set_pin("F", true).unwrap();
+    let before = store.item_store().find_item(file).unwrap();
+    drop(store);
+    Connection::open(&path).unwrap().execute_batch(
+        "DROP TRIGGER IF EXISTS media_facts_item_gone;
+         DROP TRIGGER IF EXISTS media_facts_binding_gone;
+         DROP TABLE IF EXISTS media_facts;"
+    ).unwrap();
+    set_stored_version(&path, "32");
+    let (mut store, origin) = TreeStore::open_with_origin(&path).unwrap();
+    assert_eq!(origin, StoreOrigin::Kept);
+    assert_eq!(store.meta("schema_version").unwrap().as_deref(), Some("33"));
+    assert_eq!(store.item_store().find_item(file).unwrap(), before);
+    assert_eq!(store.pins().unwrap(), ["F"]);
+    assert_eq!(store.delta_link().unwrap().as_deref(), Some("link"));
+    assert!(store.meta(meta::FULL_LISTING_REQUESTED).unwrap().is_some());
+    assert_eq!(stored_version(&path.with_extension("sqlite.pre-32")), StoredVersion::Version("32".into()));
+    store.item_store().begin_full_listing().unwrap();
+    assert_eq!(store.meta(meta::FULL_LISTING_REQUESTED).unwrap(), None);
+    drop(store);
+    let (mut store, origin) = TreeStore::open_with_origin(&path).unwrap();
+    assert_eq!(origin, StoreOrigin::Kept);
+    assert_eq!(store.meta(meta::FULL_LISTING_REQUESTED).unwrap(), None);
+    assert_eq!(store.item_store().find_item(file).unwrap(), before);
+}
+
+#[test]
+fn schema_32_media_migration_rolls_back_its_table_request_and_version_together() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = store_path(&dir);
+    drop(store_in_file_with_listed_root(&path));
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch("DROP TRIGGER media_facts_item_gone; DROP TRIGGER media_facts_binding_gone; DROP TABLE media_facts;
+        UPDATE meta SET value='32' WHERE key='schema_version';
+        CREATE TRIGGER fail_media_version BEFORE INSERT ON meta WHEN NEW.key='schema_version' AND NEW.value='33'
+        BEGIN SELECT RAISE(ABORT, 'test migration failure'); END;").unwrap();
+    drop(conn);
+    assert!(TreeStore::open(&path).is_err());
+    let conn = Connection::open(&path).unwrap();
+    assert_eq!(read_stored_version(&conn).unwrap(), StoredVersion::Version("32".into()));
+    assert_eq!(meta::get(&conn, meta::FULL_LISTING_REQUESTED).unwrap(), None);
+    assert!(!has_table(&conn, "media_facts").unwrap());
+    assert!(path.with_extension("sqlite.pre-32").exists());
+    conn.execute_batch("DROP TRIGGER fail_media_version;").unwrap();
+    drop(conn);
+    let store = TreeStore::open(&path).unwrap();
+    assert_eq!(store.meta("schema_version").unwrap().as_deref(), Some("33"));
+    assert!(store.meta(meta::FULL_LISTING_REQUESTED).unwrap().is_some());
+}
+
+#[test]
+fn schema_32_media_migration_preserves_an_existing_full_listing_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = store_path(&dir);
+    let mut store = store_in_file_with_listed_root(&path);
+    store.item_store().request_full_listing(crate::FullListingCause::BoundByMarkAtStart).unwrap();
+    let request = store.meta(meta::FULL_LISTING_REQUESTED).unwrap();
+    drop(store);
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch("DROP TRIGGER media_facts_item_gone; DROP TRIGGER media_facts_binding_gone; DROP TABLE media_facts;
+        UPDATE meta SET value='32' WHERE key='schema_version';").unwrap();
+    drop(conn);
+    let store = TreeStore::open(&path).unwrap();
+    assert_eq!(store.meta(meta::FULL_LISTING_REQUESTED).unwrap(), request);
+}

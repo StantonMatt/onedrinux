@@ -111,6 +111,7 @@ pub(crate) fn logged_route(request: &Request) -> String {
 
 #[derive(Default)]
 pub struct Cloud {
+    media_facets: HashMap<String, Value>,
     pub(crate) items: BTreeMap<String, FakeItem>,
     /// OneDrive's recycle bin.
     pub bin: BTreeMap<String, FakeItem>,
@@ -223,6 +224,14 @@ impl Cloud {
 
     pub fn item(&self, id: &str) -> Option<&FakeItem> {
         self.items.get(id)
+    }
+
+    /// Set synthetic Graph media facets, including malformed fields for parser tests.
+    /// An unchanged eTag deliberately exercises listings which enrich unchanged items.
+    pub fn set_media_facets(&mut self, id: &str, facets: Value) {
+        assert!(self.items.contains_key(id));
+        self.media_facets.insert(id.into(), facets);
+        self.changes.push(id.into());
     }
 
     /// Where item `id` is, `a/b/c` below the root.
@@ -463,6 +472,11 @@ impl Cloud {
         } else {
             value["file"] = json!({ "mimeType": "application/octet-stream", "hashes": { "quickXorHash": item.hash } });
             value["@microsoft.graph.downloadUrl"] = json!(format!("{}/dl/{}", self.base, item.id));
+        }
+        if let Some(facets) = self.media_facets.get(&item.id) {
+            for key in ["image", "photo", "video", "location"] {
+                if let Some(facet) = facets.get(key) { value[key] = facet.clone(); }
+            }
         }
         value
     }

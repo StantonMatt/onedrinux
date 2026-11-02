@@ -41,6 +41,7 @@
 // test: the_sync_mark_per_case
 // test: the_state_attribute_per_case
 // test: no_attribute_is_named_in_a_list_though_each_is_read_by_its_name
+// test: media_xattr_survives_timestamp_only_listing_changes
 
 use std::ffi::OsStr;
 use std::fs::File;
@@ -50,7 +51,7 @@ use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use fuser::{Errno, FileAttr};
-use konedrive_fs::placeholder::{State, XATTR_DRIVE, XATTR_ITEM_ID, XATTR_PIN, XATTR_ROOT, XATTR_STATE, XATTR_SYNC};
+use konedrive_fs::placeholder::{State, XATTR_DRIVE, XATTR_ITEM_ID, XATTR_MEDIA, XATTR_PIN, XATTR_ROOT, XATTR_STATE, XATTR_SYNC};
 use konedrive_tree::{ContentPresence, FileSyncState, Item, ItemKind, LocalItemId, TreeError};
 
 use super::access_mode_switch::AccessModeSwitch;
@@ -145,7 +146,7 @@ pub(super) struct XattrFacts {
 
 /// The names of the attributes an item may have: each is read by its name, and `listxattr`
 /// names none of them ([`ItemLookup::list_xattr_names`]).
-const ITEM_XATTR_NAMES: [&str; 4] = [XATTR_ITEM_ID, XATTR_STATE, XATTR_PIN, XATTR_SYNC];
+const ITEM_XATTR_NAMES: [&str; 5] = [XATTR_MEDIA, XATTR_ITEM_ID, XATTR_STATE, XATTR_PIN, XATTR_SYNC];
 /// The names of the folder's own attributes: on the root alone, read from the backing
 /// directory, where the folder's registration wrote them.
 const FOLDER_XATTR_NAMES: [&str; 2] = [XATTR_ROOT, XATTR_DRIVE];
@@ -166,6 +167,16 @@ pub(super) fn decide_xattr_value(name: &str, item: &Item, facts: &XattrFacts) ->
         _ => return None,
     };
     Some(value.as_bytes().to_vec())
+}
+
+/// Same content-presence decision as a reader's open. Visual hydrating state may also
+/// describe a file already on disk; consulting it would duplicate built-in extraction.
+fn media_is_needed(item: &Item) -> bool {
+    item.kind == ItemKind::File && item.content_presence == ContentPresence::NotOnDisk
+        // A delta may already describe newer remote content before the plan changes
+        // what the folder shows. Its details cannot describe the older shown file.
+        && item.local.as_ref().and_then(|version| version.content.as_ref()).is_some()
+        && konedrive_tree::is_same_content_but_for_time(item.local.as_ref().and_then(|version| version.content.as_ref()), item.onedrive.as_ref().and_then(|version| version.content.as_ref()))
 }
 
 /// What `user.konedrive.state` says of an item whose row says `sync_state`
@@ -476,6 +487,15 @@ impl ItemLookup {
         }
         if !ITEM_XATTR_NAMES.contains(&name) {
             return Err(Errno::ENODATA);
+        }
+        if name == XATTR_MEDIA {
+            return self.read_connections.read(|reader| {
+                match to_node_row(reader.find_item(node)?) {
+                    NodeRow::Shown(item) if media_is_needed(&item) => Ok(reader.find_media_facts(node)?.map(String::into_bytes).ok_or(Errno::ENODATA)),
+                    NodeRow::Shown(_) => Ok(Err(Errno::ENODATA)),
+                    row => Ok(Err(decide_node_errno(&row).unwrap_or(Errno::ESTALE))),
+                }
+            }).map_err(to_store_errno)?;
         }
         let (item, facts) = self.read_xattr_facts(node, Some(name))?;
         if let Some(states) = &self.directory_states {

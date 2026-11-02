@@ -1245,3 +1245,28 @@ the window as background reading; after the window, normal coverage applies.
 - **Trade-off.** Each continuation asks fresh metadata, as a normal resumed
   download does. Ordinary short responses and I/O errors still spend the same
   three-break budget; cached intervals must not consume it.
+
+## Cloud-only photo/video details from OneDrive facets (2026-11-02)
+
+- **Decision.** Parse only the allowed image/photo/video facts from delta listings,
+  tolerate malformed optional fields, and keep compact v1 JSON in `media_facts`, bound
+  to the delivering content and eTag. Videos ignore their photo facet. No location,
+  bitrate, codec or audio values are stored.
+- **Desktop boundary.** `user.konedrive.media` serves these unconverted values only
+  while the mount's own content-presence decision says the file is not on disk.
+  On-disk files return `ENODATA`, even during visual hydrating/linger, so Dolphin's
+  built-in extractors answer without duplicate properties. No file read, network,
+  guard check or bus call is needed. The attribute is read by name and never listed.
+- **Version continuity.** Time-only differences between shown and listed content do not
+  suppress details. Facts follow an unchanged remote binding through conflicts, merges
+  and atomic saves, keeping their original content/eTag fences in the same transaction.
+  KDE duration values are integer whole seconds, truncated as its ffmpeg extractor does;
+  non-finite exposure quotients are omitted.
+- **Backfill.** Schema 33 adds the table and requests one full metadata listing, because
+  delta updates alone cannot fill unchanged existing files. This costs about 12 pages
+  for 11,000 items, with no content download and no changes to local edits, kept files
+  or pins in an unchanged tree. Later starts resume delta listing normally.
+- **Shipped although Dolphin does not ask yet.** KDE treats the mount as slow and Baloo
+  Widgets extracts nothing there (K35). The attribute and the extractor cost one
+  `lgetxattr` when asked and answer on every native surface once KDE extracts single files
+  on slow mounts (draft Baloo Widgets MR 82).

@@ -11,7 +11,7 @@ sudo dnf install rust cargo cmake extra-cmake-modules gcc-c++ qt6-qtbase-devel \
   qt6-qtdeclarative-devel kf6-kirigami-devel kf6-kirigami-addons-devel kf6-ki18n-devel \
   kf6-kcoreaddons-devel kf6-kconfig-devel kf6-knotifications-devel \
   kf6-kstatusnotifieritem-devel kf6-kdbusaddons-devel kf6-kio-devel kf6-kwindowsystem-devel \
-  kf6-kjobwidgets-devel dbus-daemon desktop-file-utils
+  kf6-kjobwidgets-devel kf6-kfilemetadata-devel dbus-daemon desktop-file-utils
 ```
 
 These are what `app/CMakeLists.txt` and `dolphin/CMakeLists.txt` look for.
@@ -88,7 +88,7 @@ window was running, quit it from its tray icon and start it again from the launc
 
 ## The Dolphin plugins
 
-`dolphin/` holds the two Dolphin plugins of the `konedrive-kde` package; what they do is in
+`dolphin/` holds the three Dolphin plugins of the `konedrive-kde` package; what they do is in
 [user-guide.md](user-guide.md), "Dolphin".
 
 Build and test (the tests run on private D-Bus buses, and one of them takes 30
@@ -98,7 +98,7 @@ seconds):
 cmake -S dolphin -B build/dolphin -DBUILD_TESTING=ON && cmake --build build/dolphin && ctest --test-dir build/dolphin --output-on-failure
 ```
 
-**Install for your user** (no root). This puts two files under
+**Install for your user** (no root). This puts three plugin files under
 `~/.local/lib64/plugins/kf6/` (the install output shows the exact paths):
 
 ```
@@ -127,7 +127,7 @@ cmake --build build/dolphin-system && sudo cmake --install build/dolphin-system
 ```
 
 This installs into `/usr/lib64/qt6/plugins/kf6/overlayicon/` and
-`.../kf6/kfileitemaction/`; `sudo xargs rm < build/dolphin-system/install_manifest.txt`
+`.../kf6/kfileitemaction/` and `.../kf6/kfilemetadata/`; `sudo xargs rm < build/dolphin-system/install_manifest.txt`
 removes it.
 
 ## What `konedrivectl` says of a refusal

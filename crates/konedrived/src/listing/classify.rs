@@ -21,13 +21,18 @@ pub fn classify(item: &DriveItem) -> Change {
         ctag: item.c_tag.clone(),
         quickxor: item.quick_xor_hash().map(str::to_owned),
         mime: item.file.as_ref().and_then(|f| f.mime_type.clone()),
+        media: media_facts(item),
         placement: Placement::Placed,
     };
     if item.root.is_some() {
         row.parent_id = None;
         row.name = String::new();
         row.kind = Kind::Folder;
+        row.media = None;
         return Change::Root(row);
+    }
+    if row.kind == Kind::Folder {
+        row.media = None;
     }
     if row.kind == Kind::File {
         row.size = item.size.unwrap_or(0);
@@ -36,6 +41,38 @@ pub fn classify(item: &DriveItem) -> Change {
         row.placement = Placement::Skipped(reason);
     }
     Change::Upsert(row)
+}
+
+/// Video wins even when Graph also sends an image/photo facet. Values stay unconverted.
+fn media_facts(item: &DriveItem) -> Option<konedrive_tree::MediaFacts> {
+    use konedrive_tree::{MediaFacts, MediaKind};
+    let number = |value: Option<f64>| value.and_then(serde_json::Number::from_f64);
+    if let Some(video) = &item.video {
+        let mut facts = MediaFacts::empty(MediaKind::Video);
+        facts.width = video.width;
+        facts.height = video.height;
+        facts.duration_ms = video.duration;
+        facts.frame_rate = number(video.frame_rate);
+        return Some(facts);
+    }
+    if item.image.is_none() && item.photo.is_none() { return None; }
+    let mut facts = MediaFacts::empty(MediaKind::Photo);
+    if let Some(image) = &item.image {
+        facts.width = image.width;
+        facts.height = image.height;
+    }
+    if let Some(photo) = &item.photo {
+        facts.orientation = photo.orientation.filter(|o| (1..=8).contains(o));
+        facts.camera_make = photo.camera_make.clone();
+        facts.camera_model = photo.camera_model.clone();
+        facts.taken_date_time = photo.taken_date_time.clone();
+        facts.f_number = number(photo.f_number);
+        facts.exposure_numerator = number(photo.exposure_numerator);
+        facts.exposure_denominator = number(photo.exposure_denominator);
+        facts.focal_length = number(photo.focal_length);
+        facts.iso = photo.iso;
+    }
+    Some(facts)
 }
 
 fn skip_reason(item: &DriveItem, name: &str) -> Option<SkipReason> {

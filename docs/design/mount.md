@@ -228,9 +228,37 @@ store (§7). A write-open clears the old cTag before allowing an edit; recovery 
 hashes the bytes regardless of any surviving mark.
 
 The attributes a program reads through the mount (`user.konedrive.item-id`, `.state`, `.pin`,
-`.sync`) are not these marks: the mount answers them from the row and the plan
-(`item_lookup.rs`), lists none of them, and writes nothing on disk. Dolphin's emblems read them
+`.sync`, `.media`) are not these marks: the mount answers them from the row and the plan
+(`item_lookup.rs`), lists none of them, and writes nothing on disk. Dolphin's plugins read them
 ([desktop.md](desktop.md)).
+
+| Attribute | Value and availability |
+|---|---|
+| `user.konedrive.media` | Compact UTF-8 JSON, `v: 1`, `kind: "photo"` or `"video"`, with unknown keys omitted. Files whose content is not on disk only; otherwise `ENODATA`. |
+
+Media facts come only from the store, in the same read transaction as the row's
+content presence: one indexed side-table lookup, no network request, content read,
+download-guard check or D-Bus. The delivering drive/item, eTag and complete content
+version must still match; the folder must also show that same content (a newer delta
+awaiting the plan cannot describe the older shown file). Files without stored facets and all folders return `ENODATA`.
+
+For photos, allowed keys are `width`, `height`, `orientation`, `cameraMake`,
+`cameraModel`, `takenDateTime`, `fNumber`, `exposureNumerator`, `exposureDenominator`,
+`focalLength` and `iso`. For videos, only `width`, `height`, `durationMs` and
+`frameRate` are kept; a video's photo facet is ignored. Values are OneDrive's,
+unconverted: portrait dimensions and camera-clock timestamps are passed through.
+Location, bitrate, codec and audio fields are never stored or served.
+
+Availability follows `ContentPresence::NotOnDisk`, the same decision a reader's open
+uses to reach `check_cloud_open`. It never follows the visual state: a remote-only file
+with a running download still answers, but landed, synced, modified-here and kept
+on-disk files return `ENODATA` even if range fetches or progress linger show
+`hydrating`. Dolphin's built-in extractors can read those on-disk files themselves.
+A hydration completing between the metadata read and built-in extraction can merge
+values once in that panel render; this race is accepted.
+
+Like every virtual item attribute, `.media` is omitted from `listxattr`, so `cp -a`
+and `rsync -X` do not copy account facts to another file or filesystem.
 
 Through the mount, `user.konedrive.state` on a bound file is `online-only`,
 `hydrating`, `hydrated`, or `failed`. `failed` means a whole download exhausted the

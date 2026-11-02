@@ -10,17 +10,17 @@ const ROOT: LocalItemId = LocalItemId::ROOT;
 
 /// The root of the drive as a listing gives it.
 fn root() -> Change {
-    Change::Root(Row { id: "R".into(), parent_id: None, name: String::new(), kind: Kind::Folder, size: 0, mtime: 0, etag: Some("e-R".into()), ctag: None, quickxor: None, mime: None, placement: Placement::Placed })
+    Change::Root(Row { media: None, id: "R".into(), parent_id: None, name: String::new(), kind: Kind::Folder, size: 0, mtime: 0, etag: Some("e-R".into()), ctag: None, quickxor: None, mime: None, placement: Placement::Placed })
 }
 
 /// The directory `id` as a listing gives it: in `parent` under `name`.
 fn directory(id: &str, parent: &str, name: &str) -> Change {
-    Change::Upsert(Row { id: id.into(), parent_id: Some(parent.into()), name: name.into(), kind: Kind::Folder, size: 0, mtime: 500, etag: Some(format!("e-{id}")), ctag: Some(format!("c-{id}")), quickxor: None, mime: None, placement: Placement::Placed })
+    Change::Upsert(Row { media: None, id: id.into(), parent_id: Some(parent.into()), name: name.into(), kind: Kind::Folder, size: 0, mtime: 500, etag: Some(format!("e-{id}")), ctag: Some(format!("c-{id}")), quickxor: None, mime: None, placement: Placement::Placed })
 }
 
 /// The file `id` as a listing gives it: in `parent` under `name`, with the content `version`.
 fn file(id: &str, parent: &str, name: &str, version: &str) -> Change {
-    Change::Upsert(Row {
+    Change::Upsert(Row { media: None,
         id: id.into(),
         parent_id: Some(parent.into()),
         name: name.into(),

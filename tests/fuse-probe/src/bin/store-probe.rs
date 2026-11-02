@@ -11,7 +11,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "seed31" => {
             let store = TreeStore::open(path)?;
             store.set_pin("MIGRATION-PIN", true)?;
-            store.bench_sql("ALTER TABLE items DROP COLUMN onedrive_folder_ctag; UPDATE meta SET value='31' WHERE key='schema_version';")?;
+            store.bench_sql("DROP TRIGGER media_facts_item_gone; DROP TRIGGER media_facts_binding_gone; DROP TABLE media_facts; ALTER TABLE items DROP COLUMN onedrive_folder_ctag; UPDATE meta SET value='31' WHERE key='schema_version';")?;
             store.sync_write_ahead_log()?;
         }
         "open" => {
@@ -38,7 +38,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             assert_eq!(store.pins()?, ["MIGRATION-PIN"]);
             assert_eq!(
                 find_stored_version(path)?,
-                StoredVersion::Version("32".into())
+                StoredVersion::Version(konedrive_tree::SCHEMA_VERSION.into())
             );
         }
         other => panic!("unknown command {other}"),

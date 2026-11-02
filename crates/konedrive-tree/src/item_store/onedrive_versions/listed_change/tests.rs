@@ -47,7 +47,7 @@ fn root_row() -> Item {
 
 /// What a listing says of the file `A`: in `parent_id`, under the eTag `etag`.
 fn listed_file(item_id: &str, parent_id: Option<&str>, etag: &str) -> ListedItem {
-    ListedItem {
+    ListedItem { media: None,
         item_id: item_id.to_owned(),
         parent_id: parent_id.unwrap_or_default().to_owned(),
         kind: ItemKind::File,

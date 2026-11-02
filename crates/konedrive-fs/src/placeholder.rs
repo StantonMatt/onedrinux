@@ -10,6 +10,9 @@ use std::time::SystemTime;
 use nix::sys::stat::Mode;
 use xattr::FileExt;
 
+/// OneDrive media facts, served by name only for content not on disk.
+pub const XATTR_MEDIA: &str = "user.konedrive.media";
+
 pub const XATTR_ITEM_ID: &str = "user.konedrive.item-id";
 /// File download state; on directories, recursive file aggregate (failed > hydrating
 /// > online-only > hydrated). See docs/design/mount.md.

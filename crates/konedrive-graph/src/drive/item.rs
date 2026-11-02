@@ -3,6 +3,10 @@
 
 use serde::Deserialize;
 
+mod media;
+use media::facet;
+pub use media::{ImageFacet, PhotoFacet, VideoFacet};
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DriveItem {
@@ -22,6 +26,12 @@ pub struct DriveItem {
     pub parent_reference: Option<ParentReference>,
     #[serde(default)]
     pub file: Option<FileFacet>,
+    #[serde(default, deserialize_with = "facet")]
+    pub image: Option<ImageFacet>,
+    #[serde(default, deserialize_with = "facet")]
+    pub photo: Option<PhotoFacet>,
+    #[serde(default, deserialize_with = "facet")]
+    pub video: Option<VideoFacet>,
     #[serde(default)]
     pub folder: Option<serde_json::Value>,
     #[serde(default)]

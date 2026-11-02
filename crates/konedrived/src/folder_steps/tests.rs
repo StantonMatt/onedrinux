@@ -190,7 +190,7 @@ fn make_crossing_page(fixture: &ItemFixture, item: LocalItemId) -> impl FnOnce()
     let row = fixture.find_item(item).expect("the row");
     let binding = row.onedrive_item.clone().unwrap_or_else(|| OneDriveItemReference { drive_id: fixture.drive_id(), item_id: konedrive_tree::OneDriveItemId::new("never-listed") });
     let store = fixture.store.clone();
-    let listed = Row { id: binding.item_id.as_str().into(), parent_id: Some(ROOT_ONEDRIVE_ID.into()), name: "listed again.txt".into(), kind: Kind::File, size: 3, mtime: ONEDRIVE_MTIME, etag: Some("e-crossing".into()), ctag: Some("c-crossing".into()), quickxor: None, mime: None, placement: Placement::Placed };
+    let listed = Row { media: None, id: binding.item_id.as_str().into(), parent_id: Some(ROOT_ONEDRIVE_ID.into()), name: "listed again.txt".into(), kind: Kind::File, size: 3, mtime: ONEDRIVE_MTIME, etag: Some("e-crossing".into()), ctag: Some("c-crossing".into()), quickxor: None, mime: None, placement: Placement::Placed };
     let is_bound = row.onedrive_item.is_some();
     move || {
         store

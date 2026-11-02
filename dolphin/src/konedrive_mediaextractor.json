@@ -1,0 +1,114 @@
+{
+    "Name": "KOneDrive Media Extractor",
+    "Id": "org.konedrive.mediaextractor",
+    "MimeTypes": {
+        "image/avif": {
+            "Version": "1.0"
+        },
+        "image/bmp": {
+            "Version": "1.0"
+        },
+        "image/gif": {
+            "Version": "1.0"
+        },
+        "image/heif": {
+            "Version": "1.0"
+        },
+        "image/jp2": {
+            "Version": "1.0"
+        },
+        "image/jpeg": {
+            "Version": "1.0"
+        },
+        "image/jxl": {
+            "Version": "1.0"
+        },
+        "image/pgf": {
+            "Version": "1.0"
+        },
+        "image/png": {
+            "Version": "1.0"
+        },
+        "image/tiff": {
+            "Version": "1.0"
+        },
+        "image/webp": {
+            "Version": "1.0"
+        },
+        "image/x-canon-cr2": {
+            "Version": "1.0"
+        },
+        "image/x-canon-cr3": {
+            "Version": "1.0"
+        },
+        "image/x-canon-crw": {
+            "Version": "1.0"
+        },
+        "image/x-exv": {
+            "Version": "1.0"
+        },
+        "image/x-fuji-raf": {
+            "Version": "1.0"
+        },
+        "image/x-minolta-mrw": {
+            "Version": "1.0"
+        },
+        "image/x-nikon-nef": {
+            "Version": "1.0"
+        },
+        "image/x-olympus-orf": {
+            "Version": "1.0"
+        },
+        "image/x-panasonic-rw2": {
+            "Version": "1.0"
+        },
+        "image/x-pentax-pef": {
+            "Version": "1.0"
+        },
+        "image/x-photoshop": {
+            "Version": "1.0"
+        },
+        "image/x-samsung-srw": {
+            "Version": "1.0"
+        },
+        "image/x-tga": {
+            "Version": "1.0"
+        },
+        "video/mp2t": {
+            "Version": "1.0"
+        },
+        "video/mp4": {
+            "Version": "1.0"
+        },
+        "video/mpeg": {
+            "Version": "1.0"
+        },
+        "video/ogg": {
+            "Version": "1.0"
+        },
+        "video/quicktime": {
+            "Version": "1.0"
+        },
+        "video/vnd.avi": {
+            "Version": "1.0"
+        },
+        "video/webm": {
+            "Version": "1.0"
+        },
+        "video/x-flv": {
+            "Version": "1.0"
+        },
+        "video/x-matroska": {
+            "Version": "1.0"
+        },
+        "video/x-ms-asf": {
+            "Version": "1.0"
+        },
+        "video/x-ms-wmv": {
+            "Version": "1.0"
+        },
+        "video/x-msvideo": {
+            "Version": "1.0"
+        }
+    }
+}

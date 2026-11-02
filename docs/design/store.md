@@ -9,10 +9,10 @@ A per-store ownership lock prevents a simultaneous open or offline reset.
 
 | Finding | Action |
 |---|---|
-| No store, or no tables | Create schema 32 |
-| Schema 32, `quick_check` succeeds | Use it |
-| Schema 30 or 31, `quick_check` succeeds | Snapshot, then migrate sequentially |
-| Unsupported older schema, missing metadata, not a database, failed `quick_check` | Quarantine, carry over readable state, create schema 32 |
+| No store, or no tables | Create schema 33 |
+| Schema 33, `quick_check` succeeds | Use it |
+| Schema 30, 31 or 32, `quick_check` succeeds | Snapshot, then migrate sequentially |
+| Unsupported older schema, missing metadata, not a database, failed `quick_check` | Quarantine, carry over readable state, create schema 33 |
 | Newer schema | Refuse; preserve all original file contents and permissions |
 | Permission, lock, or I/O error | Return the error; preserve the store |
 
@@ -57,7 +57,23 @@ adds nullable `items.onedrive_folder_ctag TEXT` and discards legacy upload-sessi
 windows, whose machine-clock times cannot prove ownership against Graph timestamps. The
 column is unused and always null: OneDrive personal gives folders no cTag (measured
 2026-10-29), and a folder removal is guarded by the folder's eTag ([writes.md](writes.md)
-§4.2). The next migration drops it.
+§4.2). The additive media-facts migration retains it.
+Schema 32 to 33 adds `media_facts`, keyed by local item id. It stores compact v1 JSON
+of only the allowed image/photo/video fields, bound to the delivering drive/item id,
+eTag and all six content columns. An indexed lookup checks the binding and content
+before answering; a newer content version cannot use stale details. Every accepted
+listing replaces or clears facts, including listings of unchanged versions. Triggers
+remove facts with an item's row or lost/replaced binding. Binding transfers preserve
+the facts and their original fences in the same transaction, including conflict copies,
+merges and atomic saves. No location is stored.
+
+In the same transaction, the migration requests one full listing for backfill, keeping
+any earlier outstanding full-listing cause. Beginning that listing consumes the request;
+reopening schema 33 never requests it again. The listing changes no local/synced version,
+content presence, pin or pending upload for an unchanged tree, and downloads no content.
+The one-off network cost is a metadata enumeration (about 12 delta pages for 11,000 items).
+New stores create the table immediately and fill it through their usual initial listing.
+
 Every shipped version from 32 onward must retain its sequential migration step. Each
 step's statements and version update run in one transaction, with FULL synchronous
 commits for the migration itself.

@@ -9,8 +9,8 @@ notifications, and the Dolphin plugins. The daemon's own work is in [sync.md](sy
 
 - **Every client talks to the daemon.** The window, the tray, the command line and the Dolphin menu
   call D-Bus methods and show what the daemon publishes. The window never touches the folder. The
-  Dolphin emblems are the one exception: they read the attributes the mount answers, by name
-  (§11.1).
+  Dolphin emblems and media details are the exceptions: they read the attributes the mount
+  answers, by name (§11.1, §11.3).
 - **Every feature has a command-line path.** Anything the window can do, `konedrivectl` can do.
 - **The daemon decides, the clients say it.** The state of an account as a whole is one function in
   the daemon (`Folder.Overall`, §2.4); a client turns its reason into words and an icon, and decides
@@ -648,10 +648,10 @@ mount's own inotify bridge ([mount.md](mount.md) §9).
 
 ## 11. Dolphin plugins
 
-Two plugins in `dolphin/`, both running inside Dolphin, where a crash takes the file manager down
-and any `open()` reads what is shown. Both are tested never to open a file in the folder
-(`dolphin/tests/noopentest.cpp`, which drives every code path under an inotify watch), and the
-tests run under a poisoned allocator.
+Three plugins in `dolphin/`: emblems and the context menu run inside Dolphin; media details run
+in KFileMetaData's extractor host (normally `baloo_filemetadata_temp_extractor`). None opens file
+content. The inotify tests in `dolphin/tests/noopentest.cpp` and `mediaextractortest.cpp` watch
+for opens and reads, and the tests run under a poisoned allocator.
 
 ### 11.1 Emblems
 
@@ -782,10 +782,34 @@ again, and at most 1000 calls wait at once. "View Online" calls `WebUrl` with th
 Refusals are told by their error name, in the catalogue's words. The actions can be switched off
 in Dolphin's context-menu settings.
 
+### 11.3 Media details
+
+`konedrive_mediaextractor`, installed in `kf6/kfilemetadata`, supplies OneDrive's known photo
+and video properties to KFileMetaData, for the Information panel, tooltips and Properties ›
+Details. KDE chooses the labels, row order and locale formatting. Today these surfaces never ask
+for files in the sync folder, because KDE treats the mount as slow (K35); the plugin answers as
+soon as KDE extracts single files on slow mounts. Details-view columns use Baloo's index, which
+excludes the sync folder (§9), so they stay empty either way.
+
+The plugin reads only `user.konedrive.media`, using `lgetxattr`; absent or unsupported attributes
+return immediately. It never opens content, calls D-Bus or requests the network. The daemon
+serves this attribute only while content is not on disk, including downloads that have not
+landed. On-disk files have no media attribute, leaving KDE's built-in extractors to answer.
+`user.konedrive.state` is a visual progress state, not content presence, and is never checked.
+A download landing between the attribute read and a built-in open can merge values for one
+render; that race is accepted.
+
+The [media attribute contract](media-details.md) specifies the versioned JSON and exact
+property mapping. Portrait photos swap dimensions back to stored size for orientations 5–8.
+Camera timestamps preserve the local clock reading, discarding `Z` and fractions without UTC
+conversion. Videos supply only dimensions, duration and an optional frame rate; photo fields
+on videos, GPS, bitrate, codecs and audio are ignored.
+
 ## 12. Known limits
 
 In the limitations log: Dolphin still reads some files itself (K1); "Move to Trash" needs KDE
-Frameworks 6.21 to delete without a download (K34); there is no desktop search inside the folder
+Frameworks 6.21 to delete without a download (K34); Dolphin shows no photo or video details in
+the folder (K35); there is no desktop search inside the folder
 (W14); "View Online" opens under whichever personal account the browser is signed in to
 (F295); with the daemon stopped the folder shows only what is on disk (F296). Others, in plain
 words: notifications need the app running (§6); there are no emblems in search results or Recent

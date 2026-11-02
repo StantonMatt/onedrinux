@@ -7,7 +7,7 @@ use std::path::Path;
 use rusqlite::Connection;
 
 use crate::step_memory::schema as step_memory_schema;
-use crate::item_store::{own_upload_contents_schema, place_change_records_schema, thumbnail_marks_schema, unsent, unsent_columns, BINDING_ALONE, CHANGED_IN_ONEDRIVE, HAS_THUMBNAIL_TYPE, LEFT_HERE, NOT_PLACED, SHOWN_AGAINST_PLACEMENT};
+use crate::item_store::{media_facts_schema, own_upload_contents_schema, place_change_records_schema, thumbnail_marks_schema, unsent, unsent_columns, BINDING_ALONE, CHANGED_IN_ONEDRIVE, HAS_THUMBNAIL_TYPE, LEFT_HERE, NOT_PLACED, SHOWN_AGAINST_PLACEMENT};
 use crate::model::{ItemKind, LocalItemId, NOT_ON_DISK, ON_DISK, PLACED};
 use crate::{meta, TreeError, TreeStore};
 
@@ -19,7 +19,7 @@ pub use old_store::{decide_old_store, find_stored_version, list_old_store_upload
 
 /// The shipped schema. Every change from version 32 onward keeps a sequential
 /// migration step, committing its new version in the same transaction.
-pub const SCHEMA_VERSION: &str = "32";
+pub const SCHEMA_VERSION: &str = "33";
 
 /// The index of the files a thumbnail is made for, which version 31 made in place of
 /// `items_image_or_video`, as the schema of a new store makes it and as the step from
@@ -95,7 +95,7 @@ fn thumbnail_type_index() -> String {
 ///   what is left here without a walk up from each row. `is_executable` is the owner's
 ///   executable bit of a file, this computer's alone. `onedrive_folder_ctag` is unused and
 ///   always null: schema 32 added it for a folder's cTag, which OneDrive personal never
-///   gives (measured 2026-10-29); the next migration drops it. A row is made with, and moved to, only a local, an OneDrive and a synced parent that is
+///   gives (measured 2026-10-29); schema 33 retains it. A row is made with, and moved to, only a local, an OneDrive and a synced parent that is
 ///   the row of a directory (the triggers `items_parent_directory_insert` and
 ///   `items_parent_directory_update`, asked per row, at one read by the key for each side:
 ///   a directory's row is written before what is in it). A row is not deleted while another
@@ -114,6 +114,8 @@ fn thumbnail_type_index() -> String {
 ///   OneDrive in place of what it sent, by local item id, and the trigger
 ///   `own_upload_contents_item_gone` that takes it with the item's row
 ///   ([`crate::item_store`]'s `own_upload_content`, which has its schema).
+/// - `media_facts`: compact allowlisted JSON bound to the delivering binding, eTag and
+///   content, removed with its item or binding (`item_store::media_facts`).
 /// - `thumbnail_marks`: which content of a file, at which path, a thumbnail was last made
 ///   for, and whether one was written, by local item id, and the trigger
 ///   `thumbnail_marks_item_gone` that takes it with the item's row ([`crate::item_store`]'s
@@ -139,7 +141,7 @@ fn schema() -> String {
     );
     let content = |of: &str| format!("{of}_size INTEGER, {of}_mtime INTEGER, {of}_mtime_nsec INTEGER, {of}_hash TEXT, {of}_ctag TEXT, {of}_change_count INTEGER");
     // `onedrive_folder_ctag` is unused and always null, as the doc above says: it stays
-    // until the next migration drops it, so that a fresh store is the migrated one.
+    // through the additive media migration, so a fresh store is the migrated one.
     format!(
         "CREATE TABLE items (
              local_item_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -206,6 +208,7 @@ fn schema() -> String {
          {place_change_records}
          {own_upload_contents}
          {thumbnail_marks}
+         {media_facts}
          CREATE TABLE pins (id TEXT PRIMARY KEY, is_kept INTEGER NOT NULL DEFAULT 1);
          CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
          INSERT INTO meta (key, value) VALUES ('{last_unsent_since}', '0');
@@ -225,6 +228,7 @@ fn schema() -> String {
         place_change_records = place_change_records_schema(),
         own_upload_contents = own_upload_contents_schema(),
         thumbnail_marks = thumbnail_marks_schema(),
+        media_facts = media_facts_schema(),
         not_placed = NOT_PLACED,
         thumbnail_type_index = thumbnail_type_index(),
         no_local_parent_directory = no_parent_directory("local"),

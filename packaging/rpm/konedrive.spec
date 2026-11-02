@@ -65,6 +65,7 @@ BuildRequires:  kf6-knotifications-devel >= %{kf6_min}
 BuildRequires:  kf6-kstatusnotifieritem-devel >= %{kf6_min}
 BuildRequires:  kf6-kdbusaddons-devel >= %{kf6_min}
 BuildRequires:  kf6-kio-devel >= %{kf6_min}
+BuildRequires:  kf6-kfilemetadata-devel >= %{kf6_min}
 BuildRequires:  kf6-kwindowsystem-devel >= %{kf6_min}
 BuildRequires:  kf6-kjobwidgets-devel >= %{kf6_min}
 BuildRequires:  desktop-file-utils
@@ -110,11 +111,12 @@ Supplements:    (%{name} and plasma-workspace)
 %description    kde
 The KOneDrive window, with its tray icon and notifications, where OneDrive
 accounts are added and each one's folder, space, transfers and history are
-shown; and two Dolphin plugins for the folder: an emblem on each file and
+shown; and Dolphin plugins for the folder: an emblem on each file and
 folder that shows whether it is online-only, downloading, downloaded or kept
 on this device, or has a change waiting to be uploaded, and "Always Keep on
-This Device", "Free Up Space" and "View Online" in its context menu. Neither
-plugin opens a file in the folder.
+This Device", "Free Up Space" and "View Online" in its context menu. Photo and
+video details for cloud-only files come from OneDrive. No plugin opens a file
+in the folder.
 
 # Where Cargo writes: the build directory, unless the build names another directory
 # (scripts/build-rpm.sh does for a local build, to keep the compiled crates between builds).
@@ -222,8 +224,10 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/org.konedrive.KOneDri
 %{_datadir}/knotifications6/konedrive.notifyrc
 %dir %{_qt6_plugindir}/kf6/overlayicon
 %dir %{_qt6_plugindir}/kf6/kfileitemaction
+%dir %{_qt6_plugindir}/kf6/kfilemetadata
 %{_qt6_plugindir}/kf6/overlayicon/konedriveoverlay.so
 %{_qt6_plugindir}/kf6/kfileitemaction/konedriveactions.so
+%{_qt6_plugindir}/kf6/kfilemetadata/konedrive_mediaextractor.so
 %{_datadir}/icons/hicolor/*/emblems/konedrive-*.svg
 
 %changelog

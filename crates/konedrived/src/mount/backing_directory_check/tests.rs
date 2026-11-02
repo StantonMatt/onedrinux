@@ -49,7 +49,7 @@ fn store_with_listed_root() -> TreeStore {
     let mut store = TreeStore::in_memory().unwrap();
     store.set_drive_id("d1").unwrap();
     let listing = store.item_store().begin_full_listing().unwrap();
-    let root = Change::Root(Row { id: "ROOT".into(), parent_id: None, name: String::new(), kind: Kind::Folder, size: 0, mtime: 0, etag: Some("e-R".into()), ctag: None, quickxor: None, mime: None, placement: Placement::Placed });
+    let root = Change::Root(Row { media: None, id: "ROOT".into(), parent_id: None, name: String::new(), kind: Kind::Folder, size: 0, mtime: 0, etag: Some("e-R".into()), ctag: None, quickxor: None, mime: None, placement: Placement::Placed });
     let outcome = store.item_store().write_listed_changes(listing.id, &[root], listing.began_at_count, &ListingLink::DeltaLink("link-0".into())).unwrap();
     assert!(outcome.is_link_written());
     store
@@ -293,7 +293,7 @@ impl Folder {
                 _ => (0, 0, None, None),
             };
             let kind = if row.kind == ItemKind::Directory { Kind::Folder } else { Kind::File };
-            listed.push(Change::Upsert(Row {
+            listed.push(Change::Upsert(Row { media: None,
                 id: reference.item_id.as_str().to_owned(),
                 parent_id: Some(onedrive_id(place.parent_local_item_id).expect("OneDrive has the directory it is in")),
                 name: place.name.to_str().unwrap().to_owned(),

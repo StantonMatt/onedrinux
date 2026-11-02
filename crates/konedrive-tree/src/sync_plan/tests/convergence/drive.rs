@@ -173,7 +173,7 @@ impl OneDriveChanges {
         let Some(item) = self.items.get(id) else { return Change::Delete(id.to_owned()) };
         let (size, mtime) = item.content.unwrap_or((0, 500));
         let hash = item.content.map(|(size, mtime)| format!("h{size}-{mtime}"));
-        Change::Upsert(Row {
+        Change::Upsert(Row { media: None,
             id: id.to_owned(),
             parent_id: Some(item.parent.clone()),
             name: item.name.clone(),

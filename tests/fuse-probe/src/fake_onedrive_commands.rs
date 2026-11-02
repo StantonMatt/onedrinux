@@ -53,6 +53,11 @@ impl FakeOneDriveCommands {
                 graph.with(|cloud| cloud.add_file(id, parent, name, &std::fs::read(from).unwrap()));
                 String::new()
             }
+            ["media", id, from] => {
+                let facets = serde_json::from_slice(&std::fs::read(from).unwrap()).unwrap();
+                graph.with(|cloud| cloud.set_media_facets(id, facets));
+                String::new()
+            }
             ["folder", id, parent, name] => {
                 graph.with(|cloud| {
                     cloud.add(FakeItem {

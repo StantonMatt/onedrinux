@@ -39,7 +39,7 @@ pub(crate) const LISTING_NEXT_LINK: &str = "listing_next_link";
 /// with the schema.
 pub(crate) const LAST_UNSENT_SINCE: &str = "last_unsent_since";
 /// Set while a full listing was asked for and has not begun, to the words of who asked
-/// (`item_store::full_listing_request`, which alone reads and writes it).
+/// (`item_store::full_listing_request`; a schema migration can request a backfill too).
 pub(crate) const FULL_LISTING_REQUESTED: &str = "full_listing_requested";
 
 /// The value of `key`, read on `conn`: a transaction's too.

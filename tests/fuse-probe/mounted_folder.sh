@@ -1,3 +1,31 @@
+# Media facts travel from the fake Graph through listing/store and FUSE without content.
+media_details_xattr_reads_cloud_facts_without_downloading() {
+    begin_folder
+    seed_file P R photo.jpg 'fake image content'
+    seed_file V R video.mp4 'fake video content'
+    seed_file N R plain.txt 'no details'
+    seed_folder D R docs
+    cat > "$SRC/photo-media.json" <<'JSON'
+{"image":{"width":2400,"height":3200},"photo":{"orientation":6,"cameraMake":"Example","cameraModel":"Model","takenDateTime":"2024-02-03T04:05:06.12Z","fNumber":2.8,"exposureNumerator":1.0,"exposureDenominator":125.0,"focalLength":7.5,"iso":200},"location":{"latitude":1}}
+JSON
+    cat > "$SRC/video-media.json" <<'JSON'
+{"video":{"width":1080,"height":1920,"duration":12345,"frameRate":30.0,"bitrate":999},"photo":{"cameraMake":"Ignored"}}
+JSON
+    onedrive media P "$SRC/photo-media.json"
+    onedrive media V "$SRC/video-media.json"
+    register_folder read-only
+    check "portrait details stay unconverted and omit location" "$(user "python3 -c \"import os; print(os.getxattr('photo.jpg', 'user.konedrive.media').decode())\"")" '{"v":1,"kind":"photo","width":2400,"height":3200,"orientation":6,"cameraMake":"Example","cameraModel":"Model","takenDateTime":"2024-02-03T04:05:06.12Z","fNumber":2.8,"exposureNumerator":1.0,"exposureDenominator":125.0,"focalLength":7.5,"iso":200}'
+    check "video ignores photo and bitrate" "$(user "python3 -c \"import os; print(os.getxattr('video.mp4', 'user.konedrive.media').decode())\"")" '{"v":1,"kind":"video","width":1080,"height":1920,"durationMs":12345,"frameRate":30.0}'
+    check "no details for plain files" "$(errno_of "os.getxattr('plain.txt', 'user.konedrive.media')")" ENODATA
+    check "no details for folders" "$(errno_of "os.getxattr('docs', 'user.konedrive.media')")" ENODATA
+    check "no listed attributes to copy" "$(user "python3 -c \"import os; print(os.listxattr('photo.jpg'))\"")" '[]'
+    check "media queries downloaded nothing" "$(onedrive count GET dl/)" 0
+    check_state photo.jpg online-only
+    check_folder_holds photo.jpg 'fake image content'
+    check_state photo.jpg hydrated
+    check "landed photo leaves built-in extractors to answer" "$(errno_of "os.getxattr('photo.jpg', 'user.konedrive.media')")" ENODATA
+}
+
 # The scenarios of a folder from its start to its end: what OneDrive holds shown and read, what
 # OneDrive changes arriving, a directory that cannot be removed here, a name that cannot be used
 # here, and the folder forgotten.
@@ -152,6 +180,7 @@ mounted_folder() {
         directory_states_follow_descendants_and_notify_the_parent \
         a_slow_range_fetch_shows_downloading_until_its_linger_ends \
         a_pinned_download_announces_its_hydrating_and_final_states \
+        media_details_xattr_reads_cloud_facts_without_downloading \
         start_from_nothing_shows_onedrives_files_and_reads_them \
         file_that_is_not_on_disk_is_read_in_ranges_and_then_downloaded_whole \
         changes_made_in_onedrive_arrive_in_the_folder \

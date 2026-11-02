@@ -97,6 +97,8 @@ mod item_pins;
 mod item_reader;
 /// The content an upload of this folder left in OneDrive in place of what it sent.
 mod own_upload_content;
+mod media_facts;
+pub(crate) use media_facts::schema as media_facts_schema;
 /// The readers a plan is made from, over the reader.
 mod plan_readers;
 /// A file's local content written by the mount apart from a change of its local version.

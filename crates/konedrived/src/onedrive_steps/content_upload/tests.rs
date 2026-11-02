@@ -428,7 +428,7 @@ async fn an_answer_with_another_hash_for_an_existing_item_keeps_the_fact_of_the_
 
     // The listing the refusal asks for brings what the upload left: the fact tells the plan whose content it is.
     use konedrive_tree::{Change, Kind, Placement, Row};
-    let listed = Row { id: "a.txt".into(), parent_id: Some("R".into()), name: "a.txt".into(), kind: Kind::File, size: 1000, mtime: 1_714_557_600, etag: Some("e-wrong".into()), ctag: Some("c-wrong".into()), quickxor: Some("another-hash".into()), mime: None, placement: Placement::Placed };
+    let listed = Row { media: None, id: "a.txt".into(), parent_id: Some("R".into()), name: "a.txt".into(), kind: Kind::File, size: 1000, mtime: 1_714_557_600, etag: Some("e-wrong".into()), ctag: Some("c-wrong".into()), quickxor: Some("another-hash".into()), mime: None, placement: Placement::Placed };
     folder.fixture.write_listing(vec![Change::Upsert(listed)]);
     let fact = folder.fixture.read_rows(move |items| items.find_own_upload_content(item)).expect("the fact is kept for the plan");
     assert_eq!(Some(fact.local_content), step.item().local.as_ref().and_then(|local| local.content.clone()));

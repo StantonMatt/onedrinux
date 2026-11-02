@@ -85,7 +85,7 @@ pub fn decide_old_store(stored: &StoredVersion) -> OldStoreDecision {
     match stored {
         StoredVersion::NoStore => OldStoreDecision::Make,
         StoredVersion::Version(version) if version == SCHEMA_VERSION => OldStoreDecision::Use,
-        StoredVersion::Version(version) if matches!(version.as_str(), "30" | "31") => {
+        StoredVersion::Version(version) if matches!(version.as_str(), "30" | "31" | "32") => {
             OldStoreDecision::Migrate
         }
         StoredVersion::Version(version)
@@ -104,7 +104,7 @@ pub fn decide_old_store(stored: &StoredVersion) -> OldStoreDecision {
     }
 }
 
-/// Runs the retained 30 to 31 and 31 to 32 steps in order. Each step and its version
+/// Runs the retained 30 to 31, 31 to 32 and 32 to 33 steps in order. Each step and its version
 /// commit in one transaction; a crash leaves the last committed version intact.
 fn migrate(conn: &Connection) -> Result<(), TreeError> {
     // Every shipped step stays in this chain. Each step and its version commit together.
@@ -117,7 +117,7 @@ fn migrate(conn: &Connection) -> Result<(), TreeError> {
             // Earlier opening windows used the machine clock. They cannot prove
             // ownership against Graph's timestamps; leave any unknown holder alone.
             // `onedrive_folder_ctag` is unused and always null (OneDrive personal gives a
-            // folder no cTag); the next migration drops it.
+            // folder no cTag); the additive media migration retains it.
             tx.execute_batch("ALTER TABLE items ADD COLUMN onedrive_folder_ctag TEXT;
                               DELETE FROM upload_session_openings;")?;
             #[cfg(feature = "fault-injection")]
@@ -127,6 +127,16 @@ fn migrate(conn: &Connection) -> Result<(), TreeError> {
                 loop {
                     std::thread::park();
                 }
+            }
+            Ok(())
+        })?;
+    }
+    if meta::get(conn, meta::SCHEMA_VERSION)?.as_deref() == Some("32") {
+        at_version(conn, "33", |tx| {
+            tx.execute_batch(&crate::item_store::media_facts_schema())?;
+            // Keep an earlier outstanding cause. Beginning the full listing consumes it.
+            if meta::get(tx, meta::FULL_LISTING_REQUESTED)?.is_none() {
+                meta::set(tx, meta::FULL_LISTING_REQUESTED, Some("media facts backfill after schema 33 upgrade"))?;
             }
             Ok(())
         })?;

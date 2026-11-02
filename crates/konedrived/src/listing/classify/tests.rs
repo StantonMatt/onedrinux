@@ -189,3 +189,26 @@ mod listed_into_items {
         });
     }
 }
+
+#[test]
+fn media_classification_obeys_the_version_1_contract() {
+    let cases = [
+        (json!({"image":{"width":3200,"height":2400}, "photo":{"cameraMake":"Example","cameraModel":"Example 2","takenDateTime":"2024-02-03T04:05:06.12Z","fNumber":2.8,"exposureNumerator":1.0,"exposureDenominator":125.0,"focalLength":7.5,"iso":200,"orientation":1},"location":{"latitude":1}}),
+         json!({"v":1,"kind":"photo","width":3200,"height":2400,"cameraMake":"Example","cameraModel":"Example 2","takenDateTime":"2024-02-03T04:05:06.12Z","fNumber":2.8,"exposureNumerator":1.0,"exposureDenominator":125.0,"focalLength":7.5,"iso":200,"orientation":1})),
+        (json!({"image":{"width":2400,"height":3200},"photo":{"orientation":6}}), json!({"v":1,"kind":"photo","width":2400,"height":3200,"orientation":6})),
+        (json!({"video":{"width":1080,"height":1920,"duration":12345,"frameRate":30.0,"bitrate":999,"fourCC":"TEST","audioBitsPerSample":16},"image":{"width":1},"photo":{"takenDateTime":"2024-02-03T04:05:06Z","cameraMake":"Ignored"}}), json!({"v":1,"kind":"video","width":1080,"height":1920,"durationMs":12345,"frameRate":30.0})),
+        (json!({"image":{"width":800,"height":600}}), json!({"v":1,"kind":"photo","width":800,"height":600})),
+        (json!({"photo":{"orientation":9,"iso":"bad"}}), json!({"v":1,"kind":"photo"})),
+        (json!({"video":{},"photo":{"cameraMake":"Ignored"}}), json!({"v":1,"kind":"video"})),
+    ];
+    for (facets, expected) in cases {
+        let mut value = json!({"id":"F","name":"media","file":{},"parentReference":{"id":"R"}});
+        value.as_object_mut().unwrap().extend(facets.as_object().unwrap().clone());
+        let Change::Upsert(row) = classify(&item(value)) else { panic!() };
+        assert_eq!(serde_json::to_value(row.media.unwrap()).unwrap(), expected);
+    }
+    for value in [json!({"id":"F","name":"plain","file":{}}), json!({"id":"D","name":"folder","folder":{},"image":{"width":1}}), json!({"id":"R","root":{},"folder":{},"photo":{}})] {
+        let row = match classify(&item(value)) { Change::Root(row) | Change::Upsert(row) => row, _ => panic!() };
+        assert_eq!(row.media, None);
+    }
+}

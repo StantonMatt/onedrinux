@@ -62,6 +62,7 @@ pub(super) struct ListedItem {
     pub(super) etag: Option<String>,
     /// The MIME type of a file's content, when the listing gives one.
     pub(super) mime: Option<String>,
+    pub(super) media: Option<crate::MediaFacts>,
     pub(super) placement: Placement,
 }
 

@@ -205,7 +205,7 @@ async fn stage(staged: StagedStep) -> (StepsFolder, OneDriveStep) {
 
 /// `item` as a listing gives it: a folder with no cTag, as OneDrive personal gives one.
 pub(in crate::onedrive_steps) fn listed_row(item: &crate::fake_onedrive::FakeItem) -> konedrive_tree::Row {
-    konedrive_tree::Row {
+    konedrive_tree::Row { media: None,
         id: item.id.clone(), parent_id: item.parent.clone(), name: item.name.clone(),
         kind: if item.folder { konedrive_tree::Kind::Folder } else { konedrive_tree::Kind::File },
         size: item.size, mtime: item.mtime, etag: Some(item.etag.clone()), ctag: (!item.folder).then(|| item.ctag.clone()), quickxor: item.hash.clone(), mime: None, placement: konedrive_tree::Placement::Placed,

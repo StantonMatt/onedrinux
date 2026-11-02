@@ -134,13 +134,13 @@ fn migration_31_to_32_keeps_a_wal_inclusive_snapshot_and_a_nullable_folder_ctag(
     let path = store_path(&dir);
     drop(TreeStore::open(&path).unwrap());
     let conn = Connection::open(&path).unwrap();
-    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; ALTER TABLE items DROP COLUMN onedrive_folder_ctag;").unwrap();
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; DROP TRIGGER media_facts_item_gone; DROP TRIGGER media_facts_binding_gone; DROP TABLE media_facts; ALTER TABLE items DROP COLUMN onedrive_folder_ctag;").unwrap();
     conn.execute("UPDATE meta SET value='31' WHERE key='schema_version'", [])
         .unwrap();
     conn.execute("INSERT INTO pins VALUES('WAL-ONLY',0)", [])
         .unwrap();
     let store = TreeStore::open(&path).unwrap();
-    assert_eq!(store.meta("schema_version").unwrap().as_deref(), Some("32"));
+    assert_eq!(store.meta("schema_version").unwrap().as_deref(), Some(SCHEMA_VERSION));
     let snapshot = beside(&path, ".pre-31");
     let snap =
         Connection::open_with_flags(&snapshot, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
@@ -193,7 +193,7 @@ fn a_migration_snapshot_is_readable_by_its_owner_alone() {
     let path = store_path(&dir);
     drop(TreeStore::open(&path).unwrap());
     let conn = Connection::open(&path).unwrap();
-    conn.execute_batch("ALTER TABLE items DROP COLUMN onedrive_folder_ctag; UPDATE meta SET value='31' WHERE key='schema_version';").unwrap();
+    conn.execute_batch("DROP TRIGGER media_facts_item_gone; DROP TRIGGER media_facts_binding_gone; DROP TABLE media_facts; ALTER TABLE items DROP COLUMN onedrive_folder_ctag; UPDATE meta SET value='31' WHERE key='schema_version';").unwrap();
     drop(conn);
     // A desktop session's umask lets others read what VACUUM INTO makes.
     drop(TreeStore::open(&path).unwrap());
@@ -207,7 +207,7 @@ fn migration_31_to_32_discards_machine_clock_upload_openings() {
     let path = store_path(&dir);
     drop(TreeStore::open(&path).unwrap());
     let conn = Connection::open(&path).unwrap();
-    conn.execute_batch("ALTER TABLE items DROP COLUMN onedrive_folder_ctag;
+    conn.execute_batch("DROP TRIGGER media_facts_item_gone; DROP TRIGGER media_facts_binding_gone; DROP TABLE media_facts; ALTER TABLE items DROP COLUMN onedrive_folder_ctag;
         UPDATE meta SET value='31' WHERE key='schema_version';
         INSERT INTO upload_session_openings VALUES(1, 'holder', 'holder', NULL, 100, 200);").unwrap();
     drop(conn);
@@ -359,7 +359,7 @@ fn a_migration_retry_snapshots_new_work_without_overwriting_the_first_snapshot()
     assert!(TreeStore::open(&path).is_err());
     let first = std::fs::read(beside(&path, ".pre-31")).unwrap();
     let conn = Connection::open(&path).unwrap();
-    conn.execute_batch("ALTER TABLE items DROP COLUMN onedrive_folder_ctag; INSERT INTO pins VALUES('NEW-WORK',1);").unwrap();
+    conn.execute_batch("DROP TRIGGER media_facts_item_gone; DROP TRIGGER media_facts_binding_gone; DROP TABLE media_facts; ALTER TABLE items DROP COLUMN onedrive_folder_ctag; INSERT INTO pins VALUES('NEW-WORK',1);").unwrap();
     drop(conn);
     let store = TreeStore::open(&path).unwrap();
     assert_eq!(store.pins().unwrap(), ["NEW-WORK"]);
