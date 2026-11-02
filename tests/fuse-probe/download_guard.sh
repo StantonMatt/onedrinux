@@ -176,6 +176,42 @@ PYCODE
     umount /mnt/guard-cgroups
 }
 
+# Dolphin's Information panel, Properties Details tab and tooltips start
+# baloo-widgets' extractor per file, in Dolphin's app unit, with the file's
+# absolute path as its argument. A copied interpreter with that basename stats
+# and reads its argument, as the helper's MIME sniff does.
+dolphins_metadata_helper_cannot_download_what_it_inspects() {
+    begin_folder
+    seed_file A R clip.mp4 "remote video content"
+    seed_file B R here.mp4 "resident video content"
+    register_folder read-only
+    daemon hydrate "$F/here.mp4" > /dev/null
+    local helper=$SRC/baloo_filemetadata_temp_extractor
+    cp /usr/bin/python3 "$helper"
+    chown 1000:1000 "$helper"
+    mkdir -p /mnt/guard-cgroups
+    mount -t cgroup2 none /mnt/guard-cgroups
+    local app_group=/mnt/guard-cgroups/app-org.kde.dolphin@0a1b2c.service code cloud resident
+    mkdir "$app_group"
+    code='import errno, os, sys
+assert "app-org.kde.dolphin@0a1b2c.service" in open("/proc/self/cgroup").read()
+os.stat(sys.argv[1])
+try:
+    print(open(sys.argv[1], "rb").read(64).decode())
+except OSError as e:
+    print(errno.errorcode[e.errno])'
+    cloud=$(bash -c 'echo $$ > "$1/cgroup.procs"; shift; exec "$@"' bash "$app_group" $U "$helper" -c "$code" "$F/clip.mp4")
+    resident=$(bash -c 'echo $$ > "$1/cgroup.procs"; shift; exec "$@"' bash "$app_group" $U "$helper" -c "$code" "$F/here.mp4")
+    rmdir "$app_group"
+    umount /mnt/guard-cgroups
+    check "the metadata helper cannot open a cloud-only file" "$cloud" EACCES
+    check "the metadata helper still reads a file on this computer" "$resident" "resident video content"
+    check "the helper fetched no cloud content" "$(onedrive count GET dl/A)" 0
+    check_state clip.mp4 online-only
+    check_holds "the refusal is a background role in Dolphin's app unit" "$(daemon guard apps)" "app:org.kde.dolphin "
+    check_holds "the refusal is recorded as background" "$(daemon guard apps)" "background"
+}
+
 normal_open_and_kio_file_copy_still_hydrate() {
     begin_folder
     seed_file A R normal.txt "opened deliberately"
@@ -364,6 +400,7 @@ download_guard() {
         missing_names_do_not_consume_or_bypass_the_download_limit \
         background_readers_are_refused_before_fetch_and_local_content_still_works \
         kio_ghostscript_helpers_keep_the_thumbnail_role \
+        dolphins_metadata_helper_cannot_download_what_it_inspects \
         normal_open_and_kio_file_copy_still_hydrate \
         explicit_hydrate_and_pin_bypass_a_blocked_app \
         read_below_the_reserve_stays_as_ranges \

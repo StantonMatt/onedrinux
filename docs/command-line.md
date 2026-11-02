@@ -190,8 +190,9 @@ downloads are untracked until entries become available. Range-only reads store n
 
 A permission error on a cloud-only file may be the guard. `guard apps` explains which program
 was refused. Allowances do not override the background-reader list; its deliberate override is
-in `config.toml` ([design/download-guard.md](design/download-guard.md)). Dolphin MIME sniffing
-and KIO thumbnail workers are background readers; KIO file copies remain eligible. Explicit
+in `config.toml` ([design/download-guard.md](design/download-guard.md)). Dolphin MIME sniffing,
+its file-details helper (`baloo_filemetadata_temp_extractor`) and KIO thumbnail workers are
+background readers; KIO file copies remain eligible. Explicit
 `sync hydrate`, `sync pin` and `sync free` bypass the guard. When disk space is below the
 account's reserve, normal reads can stay as ranges without keeping a whole local copy.
 

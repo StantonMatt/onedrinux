@@ -3,6 +3,7 @@
 // test: t3_agents_konsole_children_and_flatpak_scopes_keep_their_identities
 // test: host_matching_keeps_launch_prefixes_case_and_jetbrains_rules
 // test: thumbnail_helpers_keep_the_background_role_without_blocking_ordinary_ghostscript
+// test: dolphins_metadata_helper_is_a_background_reader_in_dolphins_unit
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -19,11 +20,13 @@ pub(crate) struct Caller {
 
 /// Executable basenames and the special KIO thumbnail role. Dolphin's own MIME sniffing
 /// is automatic (docs/kio-behavior.md C); file.so copies are not thumbnail requests.
+/// baloo-widgets starts its metadata extractor per hovered or inspected file.
 pub(super) const BACKGROUND_READERS: &[&str] = &[
     "dolphin",
     "kio-thumbnail",
     "baloo_file",
     "baloo_file_extractor",
+    "baloo_filemetadata_temp_extractor",
     "tracker-extract",
     "tracker-extract-3",
     "tracker-miner-fs",

@@ -219,3 +219,43 @@ fn launch_intent_playlist_peeks_revalidate_consumed_owners() {
         intents.stop();
     }
 }
+
+#[test]
+fn launch_intent_ignores_dolphins_metadata_helper() {
+    let fixture = ItemFixture::new();
+    let cloud = fixture.show_onedrive_file_with_mime("holiday.mp4", b"video", Some("video/mp4"));
+    let key = DownloadKey {
+        item: cloud.local_item_id,
+        content: cloud.local.as_ref().unwrap().content.clone().unwrap(),
+    };
+    let fake = process(&fixture.folder().join("holiday.mp4"));
+    {
+        let mut info = fake.0.lock().unwrap();
+        let info = info.as_mut().unwrap();
+        info.executable = "/usr/bin/baloo_filemetadata_temp_extractor".into();
+        info.cgroup = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-org.kde.dolphin@0a1b2c.service".into();
+        info.cmdline = Arc::new(
+            format!("/usr/bin/baloo_filemetadata_temp_extractor\0{}\0", fixture.folder().join("holiday.mp4").display())
+                .into_bytes(),
+        );
+    }
+    let mut guard = DownloadGuard::default();
+    guard.set_process_reader(fake.clone());
+    let intents = LaunchIntents::new(
+        fixture.folder(),
+        fixture.read_connections.clone(),
+        Arc::new(guard),
+        fixture.download_states.clone(),
+        fixture.runtime(),
+    );
+    intents.observe(42);
+    assert!(
+        !fixture.download_states.is_hydrating(cloud.local_item_id),
+        "hovering a file shows no download"
+    );
+    assert!(
+        intents.take(42, &key).is_none(),
+        "a metadata read cannot start a whole download"
+    );
+    intents.stop();
+}

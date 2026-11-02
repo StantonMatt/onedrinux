@@ -48,6 +48,12 @@ The default reader list is data (`download_guard/identity.rs`):
   still subject to bulk limits.
 - `baloo_file`, `baloo_file_extractor`: KDE's file indexer and content extractor, in addition
   to the existing folder exclusion ([desktop.md](desktop.md) §9).
+- `baloo_filemetadata_temp_extractor`: baloo-widgets' file-details helper. Dolphin's
+  Information panel (also on hover), the Properties dialog's Details tab and tooltips start it
+  per file, in Dolphin's app unit, with the file's absolute path as its argument; its first read
+  sniffs the content's MIME type. As an ordinary reader it would take that argument as launch
+  intent and download the whole file. Refused, a cloud-only file shows only its type, size and
+  dates; files on this computer still show all their details.
 - `tracker-extract`, `tracker-extract-3`, `tracker-miner-fs`, `tracker-miner-fs-3`,
   `localsearch-extractor`, `localsearch-3`: the corresponding GNOME indexer/extractor services.
 - `tumblerd`, `ffmpegthumbnailer`: thumbnail generation outside KIO.

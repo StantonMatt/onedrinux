@@ -37,7 +37,7 @@ fn callers_are_revalidated_and_unknown_pids_are_refused() {
 }
 #[test]
 fn background_list_is_specific() {
-    for name in ["dolphin", "kio-thumbnail", "baloo_file", "baloo_file_extractor", "tracker-extract-3", "tumblerd"] {
+    for name in ["dolphin", "kio-thumbnail", "baloo_file", "baloo_file_extractor", "baloo_filemetadata_temp_extractor", "tracker-extract-3", "tumblerd"] {
         assert!(BACKGROUND_READERS.contains(&name));
     }
     for name in ["kioworker", "okular", "cat", "rg"] {
@@ -138,4 +138,36 @@ fn thumbnail_helpers_keep_the_background_role_without_blocking_ordinary_ghostscr
     let mut independent = super::super::DownloadGuard::default();
     independent.set_process_reader(processes);
     assert!(independent.launch_process(42).is_some());
+}
+
+/// Dolphin's Information panel, Properties Details tab and tooltips start
+/// baloo-widgets' extractor per file, in Dolphin's app unit, with the file's
+/// absolute path as its argument; its first read is a MIME sniff of the content.
+#[test]
+fn dolphins_metadata_helper_is_a_background_reader_in_dolphins_unit() {
+    struct Processes(Mutex<HashMap<u32, ProcessInfo>>);
+    impl ProcessReader for Processes {
+        fn read(&self, pid: u32) -> Option<ProcessInfo> {
+            self.0.lock().unwrap().get(&pid).cloned()
+        }
+    }
+    let unit = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-org.kde.dolphin@0a1b2c.service";
+    let helper = ProcessInfo {
+        start: 10, parent: 41, executable: "/usr/bin/baloo_filemetadata_temp_extractor".into(), cgroup: unit.into(),
+        cmdline: Arc::new(b"/usr/bin/baloo_filemetadata_temp_extractor\0/mount/Videos/holiday.mp4\0".to_vec()),
+    };
+    let copier = ProcessInfo {
+        start: 11, parent: 41, executable: "/usr/lib/x86_64-linux-gnu/libexec/kf6/kioworker".into(), cgroup: unit.into(),
+        cmdline: Arc::new(b"kioworker\0/usr/lib/qt6/plugins/kf6/kio/file.so\0".to_vec()),
+    };
+    let processes = Arc::new(Processes(Mutex::new(HashMap::from([(42, helper), (43, copier)]))));
+    let mut guard = super::super::DownloadGuard::default();
+    guard.set_process_reader(processes);
+    let who = guard.callers.identify(42).unwrap();
+    assert_eq!((who.identity.as_str(), who.reader.as_str()), ("app:org.kde.dolphin", "baloo_filemetadata_temp_extractor"));
+    assert_eq!(guard.check_open(42), Err(fuser::Errno::EACCES), "a cloud-only open is refused");
+    assert!(guard.launch_process(42).is_none(), "its argv is not launch intent");
+    assert!(guard.read_ahead_caller(42).is_none());
+    // The same app unit's file.so copies stay ordinary desktop reads.
+    guard.check_open(43).unwrap();
 }
