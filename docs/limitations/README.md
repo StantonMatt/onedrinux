@@ -37,7 +37,7 @@ its text. An id is never given twice: a new entry takes the next number its lett
 
 - [K1](K1.md) — Dolphin opens some files just to show them, which downloads them
 - [K34](K34.md) — "Move to Trash" needs KDE Frameworks 6.21 or later to delete without a download
-- [K35](K35.md) — Dolphin shows no photo or video details for files in the sync folder
+- [K35](K35.md) — Dolphin’s Information panel and tooltips show no photo/video details; Properties has KOneDrive’s Details tab
 - [W14](W14.md) — No desktop search inside a OneDrive folder
 - [F175](F175.md) — No automatic pause without NetworkManager, UPower or power-profiles-daemon
 - [R3](R3.md) — Removing the package does not refuse while a folder is registered

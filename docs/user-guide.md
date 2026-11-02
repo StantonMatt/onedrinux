@@ -154,6 +154,11 @@ Office) and EPUB books come from OneDrive's own thumbnails, so showing them down
 preview of another kind of file, plain text for one, or one at the largest zoom, does download the
 file; to avoid that, turn previews off in that folder (View → Show Previews).
 
+For a photo or video, **Properties → Details** shows OneDrive’s known dimensions and camera
+or video values without downloading it. Once downloaded, it shows the file’s own details.
+The tab appears only when details are available; it follows the rows you have hidden in Dolphin.
+The Information panel and tooltips still show only basic file information (K35).
+
 Desktop search (KRunner, Dolphin's search) finds nothing in the folder: indexing it would
 download every file.
 
@@ -332,9 +337,9 @@ cloud-only content, and stops agents, scripts, terminals and IDEs before they re
 30 distinct files or 2 GiB in 10 minutes. Files already on this computer remain readable.
 Ordinary desktop apps such as Gwenview, Okular and LibreOffice can open files without a bulk
 limit, as can Dolphin file copies. Dolphin's automatic MIME sniffing and thumbnail workers cannot fetch content. Some ambiguous file types can therefore
-show a generic icon until opened or explicitly downloaded. Dolphin's Information panel, tooltips
-and Properties dialog show only type, size and dates for files in the folder: KDE treats it as a
-slow network folder and reads no details there (K35).
+show a generic icon until opened or explicitly downloaded. Dolphin's Information panel and tooltips
+show only type, size and dates: KDE treats the mount as slow (K35). Properties has KOneDrive’s
+Details tab for photos and videos with known values.
 
 If an open says "Permission denied", `konedrivectl guard apps` shows the caller and reason.
 Use `konedrivectl guard allow '<identity>'` for this daemon session, or add `--always` to

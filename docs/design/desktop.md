@@ -648,10 +648,11 @@ mount's own inotify bridge ([mount.md](mount.md) §9).
 
 ## 11. Dolphin plugins
 
-Three plugins in `dolphin/`: emblems and the context menu run inside Dolphin; media details run
-in KFileMetaData's extractor host (normally `baloo_filemetadata_temp_extractor`). None opens file
-content. The inotify tests in `dolphin/tests/noopentest.cpp` and `mediaextractortest.cpp` watch
-for opens and reads, and the tests run under a poisoned allocator.
+Four plugins in `dolphin/`: emblems, the context menu and the fallback Properties page run
+inside Dolphin; the media extractor runs in KFileMetaData's extractor host (normally
+`baloo_filemetadata_temp_extractor`). None opens file content in Dolphin. The fallback page
+runs its mount probe and local-content helper asynchronously in separate processes. Inotify
+canaries in `dolphin/tests/` watch for opens; the tests run under a poisoned allocator.
 
 ### 11.1 Emblems
 
@@ -805,12 +806,44 @@ Camera timestamps preserve the local clock reading, discarding `Z` and fractions
 conversion. Videos supply only dimensions, duration and an optional frame rate; photo fields
 on videos, GPS, bitrate, codecs and audio are ignored.
 
+### 11.4 Properties › Details
+
+`konedrive_detailstab`, in `kf6/propertiesdialog`, supplies a fallback for KDE's slow-mount
+gate (K35). A single photo or video in a sync folder gets **Details**, last, only when there
+are visible rows. General remains selected. MIME is checked by filename extension only;
+folders, symbolic links, multiple selections and non-media files get no page.
+
+`konedrive_details_probe` runs the existing physical-path/root-mark checks and reads the
+state and media attributes out of process, without opening content. A valid media attribute
+is mapped in Dolphin with the same implementation as §11.3. Otherwise, an exact
+`hydrated` state or an absent state attribute (`ENODATA`) permits `baloo_filemetadata_temp_extractor` to read local content in a separate
+process. An eligible regular file with no state is new locally and has no cloud copy. Empty,
+unknown and other state values or attribute errors do not admit extraction. The visual state
+is a conservative admission gate here, never proof that all on-disk
+files have that state: on-disk content still showing `hydrating` gets no fallback until reopened.
+KDE's helper is a download-guard background reader, so a concurrent eviction cannot download.
+
+KDE’s reply uses QDataStream with 16-bit property IDs (Baloo’s extractor adapter),
+validated before creating rows. Each child has a five-second timeout and a bounded reply; failure
+adds nothing. Closing the
+dialog kills the active child without waiting on the GUI thread. No loading UI, network or
+D-Bus call is involved, and no file content is opened in Dolphin's process. Reopen to refresh.
+
+The page uses KFileMetaData labels and formats, Baloo's row order and grid/scroll layout,
+joined Dimensions/local EXIF GPS Location, and `baloofileinformationrc` [Show] keys/defaults
+without rewriting settings.
+File type, size and filesystem dates stay on General; Tags, Rating and Comment are omitted.
+Labels fill their grid cells so wrapping cannot clip them; their text stays right-aligned.
+Camera/EXIF dates remain visible. Downloaded files show all other returned metadata, including
+rows absent from OneDrive. If a native Details page already exists or arrives later, the
+fallback steps aside. The Information panel, tooltips and indexed columns keep the K35 limit.
+
 ## 12. Known limits
 
 In the limitations log: Dolphin still reads some files itself (K1); "Move to Trash" needs KDE
-Frameworks 6.21 to delete without a download (K34); Dolphin shows no photo or video details in
-the folder (K35); there is no desktop search inside the folder
-(W14); "View Online" opens under whichever personal account the browser is signed in to
+Frameworks 6.21 to delete without a download (K34); Dolphin’s Information panel and tooltips
+show no photo or video details in the folder (K35), while Properties has the fallback Details
+page (§11.4); there is no desktop search inside the folder (W14); "View Online" opens under whichever personal account the browser is signed in to
 (F295); with the daemon stopped the folder shows only what is on disk (F296). Others, in plain
 words: notifications need the app running (§6); there are no emblems in search results or Recent
 Files, which do not use `file://` URLs; and the Plasma side — how the tray, the popups and the job

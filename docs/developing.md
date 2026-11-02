@@ -14,6 +14,9 @@ sudo dnf install rust cargo cmake extra-cmake-modules gcc-c++ qt6-qtbase-devel \
   kf6-kjobwidgets-devel kf6-kfilemetadata-devel dbus-daemon desktop-file-utils
 ```
 
+For downloaded photo/video Properties details, the runtime also needs `baloo-widgets`
+(`libbaloowidgets-bin` on Debian), which supplies `baloo_filemetadata_temp_extractor`.
+
 These are what `app/CMakeLists.txt` and `dolphin/CMakeLists.txt` look for.
 
 A stable Rust toolchain (edition 2021), CMake 3.24+ and Extra CMake Modules are needed.

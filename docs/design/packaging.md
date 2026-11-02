@@ -12,7 +12,7 @@ side of this page.
 | Package | Contents | Relations |
 |---|---|---|
 | `konedrive` | `/usr/bin/konedrived`, `/usr/bin/konedrivectl`; the user unit `/usr/lib/systemd/user/konedrived.service`; the D-Bus activation file `/usr/share/dbus-1/services/org.konedrive.Daemon.service`; README, SECURITY.md, LICENSE and `docs/` | `Requires: fuse3`, since every folder is mounted with `fusermount3`; nothing of KDE or Qt; `Conflicts: konedrive-kde` older than itself, since one before 0.2.1 held only the plugins and required no `konedrive`, so that upgrading `konedrive` alone would take the window away |
-| `konedrive-kde` | `/usr/bin/konedrive` (the window); the launcher entry `/usr/share/applications/org.konedrive.KOneDrive.desktop`; the notification events `/usr/share/knotifications6/konedrive.notifyrc`; the Dolphin plugins, `/usr/lib64/qt6/plugins/kf6/overlayicon/konedriveoverlay.so`, `/usr/lib64/qt6/plugins/kf6/kfileitemaction/konedriveactions.so` and `/usr/lib64/qt6/plugins/kf6/kfilemetadata/konedrive_mediaextractor.so`; LICENSE | `Requires: konedrive` of the same version and release; `Requires:` the Kirigami, Kirigami Addons, KItemModels, KQuickCharts and Qt Quick QML modules and the desktop style of Qt Quick Controls (`kf6-qqc2-desktop-style`), which no library dependency pulls in; `Requires: kf6-kio-core >= 6.21` (K34); `Requires: dolphin`; KFileMetaData is pulled in by the media extractor's ELF dependency (`libkf6filemetadata3` on Debian); `Supplements: (konedrive and plasma-workspace)` |
+| `konedrive-kde` | `/usr/bin/konedrive` (the window); the launcher entry `/usr/share/applications/org.konedrive.KOneDrive.desktop`; the notification events `/usr/share/knotifications6/konedrive.notifyrc`; the Dolphin plugins, `/usr/lib64/qt6/plugins/kf6/overlayicon/konedriveoverlay.so`, `/usr/lib64/qt6/plugins/kf6/kfileitemaction/konedriveactions.so`, `/usr/lib64/qt6/plugins/kf6/kfilemetadata/konedrive_mediaextractor.so` and `/usr/lib64/qt6/plugins/kf6/propertiesdialog/konedrive_detailstab.so`; `/usr/libexec/konedrive_details_probe`; LICENSE | `Requires: konedrive` of the same version and release; `Requires:` the Kirigami, Kirigami Addons, KItemModels, KQuickCharts and Qt Quick QML modules and the desktop style of Qt Quick Controls (`kf6-qqc2-desktop-style`), which no library dependency pulls in; `Requires: kf6-kio-core >= 6.21` (K34); `Requires: dolphin` and `baloo-widgets` (`libbaloowidgets-bin` on Debian) for `baloo_filemetadata_temp_extractor`; KFileMetaData is pulled in by the media extractor's ELF dependency (`libkf6filemetadata3` on Debian); `Supplements: (konedrive and plasma-workspace)` |
 
 Nothing is installed as a system service and nothing runs as root: the daemon is a user service,
 and `fusermount3`, the setuid program of `fuse3`, is the only privileged program involved.
@@ -142,3 +142,9 @@ tokens and the folders alone, so the packaged daemon starts where this one stopp
 "Start at login" entry at `/usr/bin/konedrive`, points out per-user Dolphin plugins without removing
 them, and says to restart a window that still runs the removed program. Then `sudo dnf install` of
 both RPMs. Nothing of the developer install needs root to remove.
+
+The Properties plugin and its metadata-only probe are checked as required Debian build artifacts
+and installed with the other Dolphin plugins. The probe uses KDEInstallDirs’ libexec directory
+(`/usr/lib/<multiarch>/libexec` on Debian). Both are included in ELF dependency scanning.
+KConfig supplies the shared Baloo row-visibility settings. Missing, timed-out or failed KDE
+extractors yield no fallback page; cloud attributes do not require that helper.

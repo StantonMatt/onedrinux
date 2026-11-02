@@ -47,7 +47,7 @@ A change that adds, moves or removes a file changes its line here.
 | `crates/konedrive-text` | What the codes mean, in words: the one catalogue of sentences, and the C++ generated from it |
 | `dbus/` | The D-Bus interfaces as XML: the contract between the daemon and its clients |
 | `app/` | The window and the tray icon (Qt 6, Kirigami) |
-| `dolphin/` | The Dolphin plugins: overlay emblems, the context menu and cloud-only media details |
+| `dolphin/` | The Dolphin plugins: overlay emblems, the context menu, media extraction and Properties Details |
 | `vendor/fuser` | The `fuser` crate with one change (`vendor/fuser/README.konedrive.md`); not mapped here |
 | `tests/fuse-probe` | The VM suite: a sync folder mounted for real, in a virtme-ng VM |
 | `tests/write-account` | The guarded harness for the test account |
@@ -1259,6 +1259,12 @@ Each has its file in `crates/konedrived/src/dbus/`.
 - `mediaextractor.cpp` — KFileMetaData photo/video properties from `user.konedrive.media`,
   without opening content or consulting the visual sync state.
 - `konedrive_mediaextractor.json` — its MIME registrations (exiv2 + ffmpeg, including BMFF).
+- `mediafacts.h`, `mediafacts.cpp` — shared media xattr reader and wire-contract mapping.
+- `detailsplugin.cpp`, `konedrive_detailstab.json` — Properties fallback plugin registration.
+- `detailstab.h`, `detailstab.cpp` — asynchronous probe/extractor lifecycle, exact hydrated gate,
+  page insertion and coexistence with KDE’s native Details page.
+- `detailsprobe.cpp` — metadata-only child: physical sync-root checks and media/state xattrs.
+- `detailsrows.h`, `detailsrows.cpp` — Baloo row visibility defaults/settings, order and layout.
 - `filestate.h`, `filestate.cpp` — what a file in the folder is, from its extended attributes
   alone: what the emblems show, and whether a selection is in a sync folder at all.
 - `syncclient.h`, `syncclient.cpp` — the calls to the daemon, none of them waited for: the
@@ -1284,6 +1290,9 @@ Each has its file in `crates/konedrived/src/dbus/`.
 - `noopentest.cpp` — the overlay and action plugins never open a file inside the folder.
 - `mediaextractortest.cpp` — the loaded media extractor: mapping, local camera clock, missing
   or invalid attributes, MIME registrations and readable canaries watched for opens.
+- `detailstabtest.cpp` — Properties eligibility, source priority, state gating, child failures,
+  cancellation, hidden rows, page order/coexistence and content-open canaries.
+- `detailsextractorfixture.cpp` — child with KDE’s serialized property protocol and failure modes.
 - `refusaltextstest.cpp`, `refusaltexts.expected` — every operation and refusal reads as it did
   before its sentence was generated: the strings of the hand-written table, a line each.
 

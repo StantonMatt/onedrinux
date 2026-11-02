@@ -1,0 +1,7 @@
+{
+    "KPlugin": {
+        "Name": "KOneDrive Details",
+        "Description": "Photo and video details in KOneDrive sync folders"
+    },
+    "X-KDE-Protocols": ["file"]
+}

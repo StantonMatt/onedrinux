@@ -89,3 +89,13 @@ set_tests_properties(actionplugintest_activation PROPERTIES ENVIRONMENT "${test_
 add_test(NAME actionplugintest_slow
          COMMAND dbus-run-session --config-file=${CMAKE_CURRENT_BINARY_DIR}/session-bus.conf -- $<TARGET_FILE:actionplugintest> keepingOnThisDeviceLongerThanTheDefaultTimeoutIsNotAFailure)
 set_tests_properties(actionplugintest_slow PROPERTIES ENVIRONMENT "${test_environment};KONEDRIVE_TEST_SLOW=1" TIMEOUT 120)
+
+konedrive_dolphin_test(detailstabtest)
+add_dependencies(detailstabtest konedrive_detailstab)
+add_executable(detailsextractorfixture detailsextractorfixture.cpp)
+target_link_libraries(detailsextractorfixture PRIVATE Qt6::Core KF6::FileMetaData)
+target_compile_definitions(detailstabtest PRIVATE
+    KONEDRIVE_DETAILS_PLUGIN="$<TARGET_FILE:konedrive_detailstab>"
+    KONEDRIVE_DETAILS_PROBE="$<TARGET_FILE:konedrive_details_probe>"
+    KONEDRIVE_DETAILS_FIXTURE="$<TARGET_FILE:detailsextractorfixture>")
+add_dependencies(detailstabtest detailsextractorfixture)

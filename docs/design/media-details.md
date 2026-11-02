@@ -1,7 +1,7 @@
 # Media details attribute contract
 
 The daemon and the KFileMetaData plugin share this contract. For the desktop behavior, see
-[desktop.md §11.3](desktop.md#113-media-details). Only stored photo/video details are used;
+[desktop.md §11.3–11.4](desktop.md#113-media-details). Only stored photo/video details are used;
 GPS is neither stored nor served.
 
 ## Source (Graph delta, no $select)
@@ -32,3 +32,14 @@ Answer whenever `user.konedrive.media` is present and valid (the daemon serves i
 - photo: `Width`/`Height` = stored size: swap OneDrive's width/height when orientation is 5, 6, 7 or 8 (OneDrive reports them already turned; Dolphin shows the stored size plus the orientation row). `ImageOrientation` (int) if present. `Manufacturer`, `Model` (strings). `PhotoFNumber`, `PhotoFocalLength` (double). `PhotoExposureTime` = numerator/denominator (double, only when both present, denominator > 0 and the quotient is finite). `PhotoISOSpeedRatings` (int). `PhotoDateTimeOriginal` = takenDateTime read as the camera's clock: drop the trailing `Z` and any fraction, parse as LOCAL time (Qt::LocalTime), do not convert from UTC. Do NOT add `ImageDateTime`. `addType(Type::Image)`.
 - video: `Width`/`Height` as given (display size; accepted that sideways-recorded phone videos show the two numbers swapped once downloaded, since OneDrive has no rotation field). `Duration` = durationMs / 1000 (integer seconds, truncated and range-checked). `FrameRate` (double) if present. `addType(Type::Video)`. Nothing else.
 - Unknown `v` or unparsable JSON: add nothing.
+
+## Properties fallback
+
+[desktop.md §11.4](desktop.md#114-properties--details) adds a dedicated Properties page while
+KDE skips slow mounts. It shares this mapping. A separate, timed metadata-only probe avoids
+blocking Dolphin on mount syscalls. If the media attribute is absent or invalid, an exact
+`user.konedrive.state=hydrated` or an absent state attribute (`ENODATA`, a new local file
+without a cloud copy) admits KDE's out-of-process content extractor. The regular-file and
+sync-root checks still apply. This is a conservative read gate, not a content-presence
+contract: on-disk content with a visual `hydrating` state waits until a later reopening.
+Other states, present-but-empty values and attribute errors never launch a content extractor.

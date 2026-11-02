@@ -1270,3 +1270,23 @@ the window as background reading; after the window, normal coverage applies.
   Widgets extracts nothing there (K35). The attribute and the extractor cost one
   `lgetxattr` when asked and answer on every native surface once KDE extracts single files
   on slow mounts (draft Baloo Widgets MR 82).
+
+
+## Show photo/video Properties details despite KDE’s slow-mount gate (2026-11-02)
+
+- **Decision.** Add a final, translated Details page for one photo/video in a marked sync
+  folder, only when visible rows are ready. General stays selected. Use the shared cloud-fact
+  mapping first, then KDE’s out-of-process extractor for exact `hydrated` state or an absent
+  state attribute (`ENODATA`) on a new local regular file with no cloud copy. Attribute errors
+  and all other state values fail closed.
+- **Safety.** Mount probing itself runs in a metadata-only child, because even `lgetxattr`
+  can wait on an unresponsive FUSE server. Each phase is asynchronous, times out after five
+  seconds, and is killed on dialog close. Dolphin never opens content. The local helper’s
+  existing background-reader guard prevents downloads if content disappears after probing.
+- **Conservative boundary.** Visual `hydrating` can describe already-landed content; without
+  cloud facts it gets no page until reopened after progress settles. No daemon contract changes.
+- **Compatibility.** Mirror Baloo’s row defaults, config keys, labels, formats and ordering;
+  do not rewrite the user’s row settings. Join local EXIF GPS coordinates like Baloo (cloud
+  facts still exclude GPS). Omit General’s fields and unwritable Tags/Rating/Comment.
+  A native Details page suppresses or removes ours, including one added after extraction.
+- **Scope.** Properties only. Information panel, tooltips and indexed columns retain K35.

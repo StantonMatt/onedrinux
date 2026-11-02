@@ -34,7 +34,9 @@ for artifact in "$rust_build/konedrived" "$rust_build/konedrivectl" \
     "$app_build/bin/konedrive" \
     "$dolphin_build/bin/kf6/overlayicon/konedriveoverlay.so" \
     "$dolphin_build/bin/kf6/kfileitemaction/konedriveactions.so" \
-    "$dolphin_build/bin/kf6/kfilemetadata/konedrive_mediaextractor.so"; do
+    "$dolphin_build/bin/kf6/kfilemetadata/konedrive_mediaextractor.so" \
+    "$dolphin_build/bin/kf6/propertiesdialog/konedrive_detailstab.so" \
+    "$dolphin_build/bin/kf6/propertiesdialog/konedrive_details_probe"; do
     test -f "$artifact" || { echo "Missing build artifact: $artifact" >&2; exit 1; }
 done
 # Match packaging/rpm/konedrive.spec: release packages never export tokens.
@@ -66,6 +68,10 @@ done
 test -f "$kde/$plugin_dir/kf6/overlayicon/konedriveoverlay.so"
 test -f "$kde/$plugin_dir/kf6/kfileitemaction/konedriveactions.so"
 test -f "$kde/$plugin_dir/kf6/kfilemetadata/konedrive_mediaextractor.so"
+test -f "$kde/$plugin_dir/kf6/propertiesdialog/konedrive_detailstab.so"
+# KDEInstallDirs uses Debian's multiarch libexec directory.
+probe="$kde/usr/lib/$multiarch/libexec/konedrive_details_probe"
+test -x "$probe"
 # The overlay plugin's emblems, from the same build: the 8 px set is hicolor's scalable one.
 test -f "$kde/usr/share/icons/hicolor/scalable/emblems/konedrive-online-only.svg"
 test -f "$kde/usr/share/icons/hicolor/16x16/emblems/konedrive-online-only.svg"
@@ -126,7 +132,8 @@ core_shlibs=$(shlibs -e"$core/usr/bin/konedrived" -e"$core/usr/bin/konedrivectl"
 kde_shlibs=$(shlibs -e"$kde/usr/bin/konedrive" \
     -e"$kde/$plugin_dir/kf6/overlayicon/konedriveoverlay.so" \
     -e"$kde/$plugin_dir/kf6/kfileitemaction/konedriveactions.so" \
-    -e"$kde/$plugin_dir/kf6/kfilemetadata/konedrive_mediaextractor.so")
+    -e"$kde/$plugin_dir/kf6/kfilemetadata/konedrive_mediaextractor.so" \
+    -e"$kde/$plugin_dir/kf6/propertiesdialog/konedrive_detailstab.so" -e"$probe")
 test -n "$core_shlibs"
 test -n "$kde_shlibs"
 
@@ -154,7 +161,7 @@ control konedrive "$core_shlibs, fuse3, init-system-helpers (>= 1.69)" \
     'OneDrive files-on-demand daemon and command line' \
     'Per-user OneDrive FUSE service and konedrivectl. Accounts start read-only.'
 # Keep the wire protocol split in lockstep, as the RPM does.
-control konedrive-kde "konedrive (= $version), $kde_shlibs, libkf6kiocore6 (>= 6.21), dolphin, breeze-icon-theme, $qml_deps" \
+control konedrive-kde "konedrive (= $version), $kde_shlibs, libkf6kiocore6 (>= 6.21), dolphin, libbaloowidgets-bin, breeze-icon-theme, $qml_deps" \
     'KOneDrive window, tray icon and Dolphin plugins' \
     'Kirigami account window, file state overlays, context actions and cloud media details for Dolphin.'
 

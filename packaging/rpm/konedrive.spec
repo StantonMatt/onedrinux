@@ -103,6 +103,8 @@ Requires:       qt6-qtdeclarative%{?_isa}
 # trash, which downloads it (docs/limitations/K34.md).
 Requires:       kf6-kio-core%{?_isa} >= %{kf6_min}
 Requires:       dolphin
+# Runtime helper protocol for already-downloaded photo/video details.
+Requires:       baloo-widgets%{?_isa}
 # The directories of the emblems the overlay plugin installs.
 Requires:       hicolor-icon-theme
 # Installed with the daemon on a Plasma desktop, from a repository.
@@ -228,6 +230,8 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/org.konedrive.KOneDri
 %{_qt6_plugindir}/kf6/overlayicon/konedriveoverlay.so
 %{_qt6_plugindir}/kf6/kfileitemaction/konedriveactions.so
 %{_qt6_plugindir}/kf6/kfilemetadata/konedrive_mediaextractor.so
+%{_qt6_plugindir}/kf6/propertiesdialog/konedrive_detailstab.so
+%{_libexecdir}/konedrive_details_probe
 %{_datadir}/icons/hicolor/*/emblems/konedrive-*.svg
 
 %changelog

@@ -14,3 +14,13 @@ License: GPL-3.0+
  .
  The full license is in LICENSE.gz in this directory and in
  /usr/share/common-licenses/GPL-3 on Debian/Ubuntu systems.
+
+Files: dolphin/src/detailsrows.cpp
+Copyright: 2008 Sebastian Trueg
+ 2009-2010 Peter Penz
+ 2012-2014 Vishesh Handa
+ 2021 Kai Uwe Broulik
+ KOneDrive contributors
+License: GPL-3.0+
+Comment: Adapted from Baloo Widgets under the GPL option in LGPL section 3;
+ upstream copyright notices are retained in the source.
