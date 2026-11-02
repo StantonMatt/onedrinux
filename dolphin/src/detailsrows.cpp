@@ -34,6 +34,7 @@ public:
     QSize sizeHint() const override { return QFontMetrics(font()).size(Qt::TextSingleLine, text()); }
 };
 } // namespace
+QString valueText(const QString &k, const QVariant &v);
 QVariantMap visibleDetails(const PropertyMultiMap &properties)
 {
     QVariantMap data;
@@ -107,7 +108,10 @@ QVariantMap visibleDetails(const PropertyMultiMap &properties)
         for (const char *key : hiddenByDefault) {
             if (it.key() == QLatin1String(key)) byDefault = false;
         }
-        if (it.key().isEmpty() || excluded.contains(it.key()) || !show.readEntry(it.key(), byDefault)) {
+        // A value KDE formats as nothing (EXIF orientation 0, say) would
+        // leave a bare label, so the row is left out.
+        if (it.key().isEmpty() || excluded.contains(it.key()) || !show.readEntry(it.key(), byDefault)
+            || valueText(it.key(), it.value()).trimmed().isEmpty()) {
             it = data.erase(it);
         } else {
             ++it;

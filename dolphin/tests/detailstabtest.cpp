@@ -381,6 +381,15 @@ private Q_SLOTS:
         QCOMPARE(visibleDetails(facts).value(QStringLiteral("artist")).toList(), expected);
     }
 
+    void valuesFormattedAsNothingAreLeftOut()
+    {
+        const PropertyMultiMap facts{{Property::ImageOrientation, 0}, {Property::Manufacturer, QStringLiteral("OnePlus")}};
+        const auto data = visibleDetails(facts);
+        QVERIFY(!data.contains(QStringLiteral("imageOrientation")));
+        QVERIFY(data.contains(QStringLiteral("manufacturer")));
+        QVERIFY(visibleDetails(PropertyMultiMap{{Property::ImageOrientation, 0}}).isEmpty());
+    }
+
     void largeRepeatedPropertyIsResponsive()
     {
         PropertyMultiMap facts;
