@@ -18,6 +18,8 @@ variables:
 build:
   stage: build
   timeout: 120m
+  variables:
+    CARGO_BUILD_JOBS: "1"
   parallel:
     matrix:
       - FEDORA: ["44", "45"]
@@ -37,6 +39,8 @@ build:
       fi
       export RELEASE_SHA=$(git rev-parse HEAD)
     - dnf -y builddep packaging/rpm/konedrive.spec
+    # Keep Fedora's flags while avoiding full Rust debug info in the 4 GiB CI VM.
+    - printf '%%rustflags_debuginfo 0\n' >> "$HOME/.rpmmacros"
     - rustc --version
   script:
     - |
