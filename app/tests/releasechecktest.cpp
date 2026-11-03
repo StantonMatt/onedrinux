@@ -36,7 +36,7 @@ private:
     static QByteArray answer(const QString &tag)
     {
         return QStringLiteral("{\"tag_name\": \"%1\", \"name\": \"KOneDrive %2\", \"draft\": false, \"prerelease\": false, "
-                              "\"_links\": {\"self\": \"https://gitlab.com/stantonmatthewj/onedrinux/-/releases/%1\"}}")
+                              "\"_links\": {\"self\": \"https://gitlab.com/StantonMatt/onedrinux/-/releases/%1\"}}")
             .arg(tag, tag.mid(1))
             .toUtf8();
     }
@@ -140,7 +140,7 @@ private Q_SLOTS:
         const std::optional<LatestRelease> release = readLatestRelease(answer(QStringLiteral("v0.2.2")));
         QVERIFY(release);
         QCOMPARE(release->tag, QStringLiteral("v0.2.2"));
-        QCOMPARE(release->page, QUrl(QStringLiteral("https://gitlab.com/stantonmatthewj/onedrinux/-/releases/v0.2.2")));
+        QCOMPARE(release->page, QUrl(QStringLiteral("https://gitlab.com/StantonMatt/onedrinux/-/releases/v0.2.2")));
 
         const auto github = readLatestRelease(QByteArrayLiteral("{\"tag_name\":\"v0.2.2\",\"html_url\":\"https://github.com/kartas39/konedrive/releases/tag/v0.2.2\"}"));
         QVERIFY(github);
@@ -165,7 +165,7 @@ private Q_SLOTS:
         });
         qunsetenv("KONEDRIVE_RELEASE_FORGE");
         qunsetenv("KONEDRIVE_LATEST_RELEASE_URL");
-        QCOMPARE(ReleaseCheck::latestReleaseUrl(), QUrl(QStringLiteral("https://gitlab.com/api/v4/projects/stantonmatthewj%2Fonedrinux/releases/permalink/latest")));
+        QCOMPARE(ReleaseCheck::latestReleaseUrl(), QUrl(QStringLiteral("https://gitlab.com/api/v4/projects/88430038/releases/permalink/latest")));
         qputenv("KONEDRIVE_RELEASE_FORGE", "github");
         QCOMPARE(ReleaseCheck::latestReleaseUrl().host(), QStringLiteral("api.github.com"));
         qputenv("KONEDRIVE_LATEST_RELEASE_URL", "http://127.0.0.1:1/");
@@ -182,7 +182,7 @@ private Q_SLOTS:
             QSignalSpy changed(&check, &ReleaseCheck::newerReleaseChanged);
             QVERIFY(check.takeAnswer(answer(QStringLiteral("v0.2.2"))));
             QCOMPARE(check.newerVersion(), QStringLiteral("0.2.2"));
-            QCOMPARE(check.newerPage(), QUrl(QStringLiteral("https://gitlab.com/stantonmatthewj/onedrinux/-/releases/v0.2.2")));
+            QCOMPARE(check.newerPage(), QUrl(QStringLiteral("https://gitlab.com/StantonMatt/onedrinux/-/releases/v0.2.2")));
             QCOMPARE(changed.count(), 1);
             QCOMPARE(sink.sent.size(), 1);
             QCOMPARE(sink.sent.at(0).event, QStringLiteral("newerRelease"));

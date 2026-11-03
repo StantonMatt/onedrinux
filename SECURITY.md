@@ -47,7 +47,7 @@ permission away from Microsoft's side as well, remove KOneDrive at
 
 Please report security issues privately, not in a public issue:
 
-- Open a **confidential** issue on [GitLab](https://gitlab.com/stantonmatthewj/onedrinux/-/issues/new);
+- Open a **confidential** issue on [GitLab](https://gitlab.com/StantonMatt/onedrinux/-/issues/new);
   check **This issue is confidential** before submitting;
 - or email the maintainer at kartas39@gmail.com.
 
