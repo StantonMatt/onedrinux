@@ -1,0 +1,110 @@
+# Child pipeline: release's resource group in .gitlab-ci.yml holds until done.
+workflow:
+  auto_cancel:
+    on_new_commit: none
+    on_job_failure: all
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "parent_pipeline"'
+
+default:
+  image: fedora:$FEDORA
+  tags: [ci-public]
+  interruptible: false
+
+stages: [build, install, publish]
+variables:
+  GIT_DEPTH: "0"
+
+build:
+  stage: build
+  timeout: 120m
+  parallel:
+    matrix:
+      - FEDORA: ["44", "45"]
+  before_script:
+    - dnf -y install git rpm-build 'dnf-command(builddep)'
+    - &prepare-source |
+      git config --global --add safe.directory "$CI_PROJECT_DIR"
+      # Keep the reviewed publisher when checking out a historical release tag.
+      mkdir -p target/ci
+      cp scripts/ci/publish-release.py target/ci/publish-release.py
+      if [ -n "$release_tag" ]; then
+        case "$PARENT_PIPELINE_SOURCE" in web|api) ;; *) exit 1 ;; esac
+        echo "$release_tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'
+        git show-ref --verify "refs/tags/$release_tag"
+        git checkout --detach "refs/tags/$release_tag"
+        test "v$(scripts/version.sh release)" = "$release_tag"
+      fi
+      export RELEASE_SHA=$(git rev-parse HEAD)
+    - dnf -y builddep packaging/rpm/konedrive.spec
+    - rustc --version
+  script:
+    - |
+      if [ "$RELEASE" = true ]; then
+        version=$(scripts/version.sh release)
+        scripts/build-rpm.sh --version "$version"
+      else
+        version=$(scripts/version.sh local)
+        scripts/build-rpm.sh
+      fi
+      mkdir -p "dist/fc$FEDORA"
+      printf '%s\n' "$RELEASE_SHA" >"dist/fc$FEDORA/release-commit"
+      cp target/rpm/RPMS/*/*.rpm target/rpm/SRPMS/*.src.rpm "dist/fc$FEDORA/"
+      (cd "dist/fc$FEDORA" && sha256sum -- *.rpm)
+  artifacts:
+    name: konedrive-$CI_COMMIT_SHORT_SHA-fc$FEDORA
+    paths: [dist/]
+    expire_in: 90 days
+
+install:
+  stage: install
+  timeout: 30m
+  needs: [build]
+  parallel:
+    matrix:
+      - FEDORA: ["44", "45"]
+  script:
+    - |
+      cd "dist/fc$FEDORA"
+      rm -f -- *.src.rpm
+      ls -l
+      dnf -y install dbus-daemon konedrive-[0-9]*.rpm
+      if rpm -q qt6-qtbase; then
+        echo 'the konedrive package brought in Qt' >&2
+        exit 1
+      fi
+      konedrived --version
+      dbus-run-session -- konedrivectl --version
+      dnf -y install konedrive-kde-*.rpm
+      missing=0
+      for file in /usr/bin/konedrived /usr/bin/konedrivectl \
+                  $(rpm -ql konedrive-kde | grep -e '^/usr/bin/' -e '\.so$'); do
+        echo "== $file"
+        if ldd "$file" | grep 'not found'; then missing=1; fi
+      done
+      test "$missing" = 0
+    - |
+      export QT_QPA_PLATFORM=offscreen QT_LOGGING_RULES=konedrive.app.debug=true QT_FORCE_STDERR_LOGGING=1
+      export HOME=/tmp/konedrive-home XDG_RUNTIME_DIR=/tmp/konedrive-runtime
+      mkdir -p "$HOME" "$XDG_RUNTIME_DIR"
+      chmod 700 "$XDG_RUNTIME_DIR"
+      rc=0
+      dbus-run-session -- timeout 30 konedrive --background >window.log 2>&1 || rc=$?
+      cat window.log
+      if ! grep -q 'ready, window hidden' window.log; then
+        echo "the window did not come up (exit $rc)" >&2
+        exit 1
+      fi
+
+publish:
+  stage: publish
+  image: python:3.13-slim-bookworm
+  timeout: 15m
+  needs: [build, install]
+  rules:
+    - if: '$RELEASE == "true" && ($CI_COMMIT_BRANCH == "main" || (($PARENT_PIPELINE_SOURCE == "web" || $PARENT_PIPELINE_SOURCE == "api") && $release_tag != "" && $dry_run == "false"))'
+  before_script:
+    - apt-get update -q && apt-get install -y -q --no-install-recommends git ca-certificates
+    - *prepare-source
+  script:
+    - python3 target/ci/publish-release.py

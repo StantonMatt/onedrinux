@@ -2,7 +2,7 @@
 # The version a build carries. It lives in one place: `version` in
 # [workspace.package] of the root Cargo.toml, the next release's version,
 # X.Y.Z. Used by scripts/build-rpm.sh and by the release workflow
-# (.github/workflows/release.yml), so that both choose it the same way
+# (.gitlab/ci/release.yml), so that both choose it the same way
 # (docs/releasing.md, "The version").
 #
 #     scripts/version.sh release   # X.Y.Z: the file's version

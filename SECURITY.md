@@ -47,8 +47,8 @@ permission away from Microsoft's side as well, remove KOneDrive at
 
 Please report security issues privately, not in a public issue:
 
-- GitHub's private vulnerability reporting: open the repository's **Security** tab and use
-  **Report a vulnerability**;
+- Open a **confidential** issue on [GitLab](https://gitlab.com/stantonmatthewj/onedrinux/-/issues/new);
+  check **This issue is confidential** before submitting;
 - or email the maintainer at kartas39@gmail.com.
 
 Please include what you found, how to reproduce it, and, if you can, what you think the impact
