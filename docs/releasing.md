@@ -177,7 +177,7 @@ The old manual command is `gh workflow run release.yml --ref <branch>` (`dry_run
 `-f dry_run=false` publishes only on `main`. GitHub uses `GITHUB_TOKEN` with `contents: write`,
 `gh api` for tags, and `gh release create --verify-tag` / `upload --clobber` for release assets.
 
-The current release/download page is <https://gitlab.com/stantonmatthewj/onedrinux/-/releases>.
+The current release/download page is <https://gitlab.com/StantonMatt/onedrinux/-/releases>.
 The window defaults to GitLab's `releases/permalink/latest` API and reads `_links.self`.
 `KONEDRIVE_RELEASE_FORGE=github` selects the retained upstream GitHub API
 (`https://api.github.com/repos/kartas39/konedrive/releases/latest`, `html_url` responses).

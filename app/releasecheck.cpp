@@ -20,7 +20,7 @@ namespace
 const QString ConfigName = QStringLiteral("konedriverc");
 const char Group[] = "General";
 const char Key[] = "NotifiedRelease";
-const QString GitLabLatestRelease = QStringLiteral("https://gitlab.com/api/v4/projects/stantonmatthewj%2Fonedrinux/releases/permalink/latest");
+const QString GitLabLatestRelease = QStringLiteral("https://gitlab.com/api/v4/projects/88430038/releases/permalink/latest");
 const QString GitHubLatestRelease = QStringLiteral("https://api.github.com/repos/kartas39/konedrive/releases/latest");
 constexpr int AskTimeoutMs = 30 * 1000;
 

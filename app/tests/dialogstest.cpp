@@ -934,12 +934,12 @@ private Q_SLOTS:
         auto *release = window->findChild<QQuickItem *>(QStringLiteral("releaseLine"));
         QVERIFY(release);
         QVERIFY(!release->isVisible());
-        const QString page = QStringLiteral("https://gitlab.com/stantonmatthewj/onedrinux/-/releases/v99.0.0");
+        const QString page = QStringLiteral("https://gitlab.com/StantonMatt/onedrinux/-/releases/v99.0.0");
         QVERIFY(releaseCheck.takeAnswer(QStringLiteral("{\"tag_name\": \"v99.0.0\", \"_links\": {\"self\": \"%1\"}}").arg(page).toUtf8()));
         QTRY_VERIFY(release->isVisible());
         QCOMPARE(release->property("text").toString(), QStringLiteral("Update available: 99.0.0"));
         QCOMPARE(release->property("url").toString(), page);
-        QVERIFY(releaseCheck.takeAnswer(QByteArrayLiteral("{\"tag_name\": \"v0.0.1\", \"_links\": {\"self\": \"https://gitlab.com/stantonmatthewj/onedrinux/-/releases/v0.0.1\"}}")));
+        QVERIFY(releaseCheck.takeAnswer(QByteArrayLiteral("{\"tag_name\": \"v0.0.1\", \"_links\": {\"self\": \"https://gitlab.com/StantonMatt/onedrinux/-/releases/v0.0.1\"}}")));
         QTRY_VERIFY(!release->isVisible());
     }
 
