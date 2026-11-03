@@ -7,6 +7,7 @@
 
 #include <QFile>
 #include <QSignalSpy>
+#include <QScopeGuard>
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QTest>
@@ -22,8 +23,8 @@ public:
 };
 
 /// The newer release: how build versions are read and ordered, what a latest release is to
-/// the build that runs, how GitHub's answer is read, and what the check shows and notifies.
-/// No test asks GitHub: answers are handed to `takeAnswer`. konedriverc is under a temporary
+/// the build that runs, how the forge's answer is read, and what the check shows and notifies.
+/// No test asks a forge: answers are handed to `takeAnswer`. konedriverc is under a temporary
 /// XDG_CONFIG_HOME, so the user's own ~/.config is never touched.
 class ReleaseCheckTest : public QObject
 {
@@ -35,7 +36,7 @@ private:
     static QByteArray answer(const QString &tag)
     {
         return QStringLiteral("{\"tag_name\": \"%1\", \"name\": \"KOneDrive %2\", \"draft\": false, \"prerelease\": false, "
-                              "\"html_url\": \"https://github.com/kartas39/konedrive/releases/tag/%1\"}")
+                              "\"_links\": {\"self\": \"https://gitlab.com/stantonmatthewj/onedrinux/-/releases/%1\"}}")
             .arg(tag, tag.mid(1))
             .toUtf8();
     }
@@ -134,16 +135,41 @@ private Q_SLOTS:
         QCOMPARE(findRelease(BuildVersion::parse(running), BuildVersion::parse(latest), BuildVersion::parse(notified)), finding);
     }
 
-    void gitHubsAnswerIsReadForItsTagAndPage()
+    void bothForgesAnswersAreReadForTheirTagAndPage()
     {
         const std::optional<LatestRelease> release = readLatestRelease(answer(QStringLiteral("v0.2.2")));
         QVERIFY(release);
         QCOMPARE(release->tag, QStringLiteral("v0.2.2"));
-        QCOMPARE(release->page, QUrl(QStringLiteral("https://github.com/kartas39/konedrive/releases/tag/v0.2.2")));
+        QCOMPARE(release->page, QUrl(QStringLiteral("https://gitlab.com/stantonmatthewj/onedrinux/-/releases/v0.2.2")));
+
+        const auto github = readLatestRelease(QByteArrayLiteral("{\"tag_name\":\"v0.2.2\",\"html_url\":\"https://github.com/kartas39/konedrive/releases/tag/v0.2.2\"}"));
+        QVERIFY(github);
+        QCOMPARE(github->tag, QStringLiteral("v0.2.2"));
+        QCOMPARE(github->page.host(), QStringLiteral("github.com"));
+        QVERIFY(!readLatestRelease(QByteArrayLiteral("{\"tag_name\":\"v0.2.2\",\"_links\":{\"self\":\"http://example.org/\"}}")));
 
         QVERIFY(!readLatestRelease(QByteArrayLiteral("<html>rate limited</html>")));
         QVERIFY(!readLatestRelease(QByteArrayLiteral("{\"message\": \"Not Found\"}")));
         QVERIFY(!readLatestRelease(QByteArrayLiteral("{\"tag_name\": \"v0.2.2\", \"html_url\": \"http://example.org/\"}")));
+    }
+
+    void theForgeCanBeSwitchedAndTheUrlOverridden()
+    {
+        const QByteArray oldForge = qgetenv("KONEDRIVE_RELEASE_FORGE");
+        const QByteArray oldUrl = qgetenv("KONEDRIVE_LATEST_RELEASE_URL");
+        const auto restore = qScopeGuard([&] {
+            if (oldForge.isNull()) qunsetenv("KONEDRIVE_RELEASE_FORGE");
+            else qputenv("KONEDRIVE_RELEASE_FORGE", oldForge);
+            if (oldUrl.isNull()) qunsetenv("KONEDRIVE_LATEST_RELEASE_URL");
+            else qputenv("KONEDRIVE_LATEST_RELEASE_URL", oldUrl);
+        });
+        qunsetenv("KONEDRIVE_RELEASE_FORGE");
+        qunsetenv("KONEDRIVE_LATEST_RELEASE_URL");
+        QCOMPARE(ReleaseCheck::latestReleaseUrl(), QUrl(QStringLiteral("https://gitlab.com/api/v4/projects/stantonmatthewj%2Fonedrinux/releases/permalink/latest")));
+        qputenv("KONEDRIVE_RELEASE_FORGE", "github");
+        QCOMPARE(ReleaseCheck::latestReleaseUrl().host(), QStringLiteral("api.github.com"));
+        qputenv("KONEDRIVE_LATEST_RELEASE_URL", "http://127.0.0.1:1/");
+        QCOMPARE(ReleaseCheck::latestReleaseUrl(), QUrl(QStringLiteral("http://127.0.0.1:1/")));
     }
 
     /// A newer release is shown and notified once: not again for the same answer, and not
@@ -156,7 +182,7 @@ private Q_SLOTS:
             QSignalSpy changed(&check, &ReleaseCheck::newerReleaseChanged);
             QVERIFY(check.takeAnswer(answer(QStringLiteral("v0.2.2"))));
             QCOMPARE(check.newerVersion(), QStringLiteral("0.2.2"));
-            QCOMPARE(check.newerPage(), QUrl(QStringLiteral("https://github.com/kartas39/konedrive/releases/tag/v0.2.2")));
+            QCOMPARE(check.newerPage(), QUrl(QStringLiteral("https://gitlab.com/stantonmatthewj/onedrinux/-/releases/v0.2.2")));
             QCOMPARE(changed.count(), 1);
             QCOMPARE(sink.sent.size(), 1);
             QCOMPARE(sink.sent.at(0).event, QStringLiteral("newerRelease"));

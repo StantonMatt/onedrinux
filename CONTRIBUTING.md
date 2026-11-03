@@ -51,7 +51,7 @@ The groups are `service`, `mounted_folder`, `file_writes`, `file_reads`, `daemon
 `cli`. The host needs `vng` (virtme-ng), QEMU and `/dev/kvm`, and no `sudo`:
 [`docs/developing.md`](docs/developing.md), "The VM suite".
 
-**What runs by itself.** A pull request into `dev` runs the daemon's unit tests, the window's and
+**What runs by itself.** A merge request into `dev` runs the daemon's unit tests, the window's and
 the Dolphin plugins' tests and the structure checks. A release runs no test of the code:
 `docs/releasing.md`, "Where the tests run".
 
@@ -83,8 +83,8 @@ These rules hold for every change:
    `dbus/`.
 5. **Every `impl SyncService` is in `account_folder/`.** The directories before
    `account_folder/` do not know `SyncService`.
-6. **A guard**, `scripts/check-structure.sh`, checks rules 1–3, 7 and 8. It runs on every pull request
-   (`.github/workflows/structure.yml`); run it yourself before sending a change:
+6. **A guard**, `scripts/check-structure.sh`, checks rules 1–3, 7 and 8. It runs on every merge request
+   (`.gitlab/ci/checks.yml`); run it yourself before sending a change:
 
 ```
 scripts/check-structure.sh
@@ -176,7 +176,7 @@ KONEDRIVE_UPDATE_GENERATED=1 cargo test -p konedrive-text
 ```
 
 `app/generated/` and `dolphin/src/generated/` are never edited by hand. `cargo test -p
-konedrive-text` fails when they are not what the catalogue gives, and runs on every pull request
+konedrive-text` fails when they are not what the catalogue gives, and runs on every merge request
 and before a release is built.
 
 ## The limitations log

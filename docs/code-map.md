@@ -52,7 +52,7 @@ A change that adds, moves or removes a file changes its line here.
 | `tests/fuse-probe` | The VM suite: a sync folder mounted for real, in a virtme-ng VM |
 | `tests/write-account` | The guarded harness for the test account |
 | `tests/stress`, `tests/kio` | Tools run by hand, and the probes of KIO |
-| `scripts/`, `packaging/`, `.github/` | Building, installing, the RPM packages, the workflows |
+| `scripts/`, `packaging/`, `.gitlab/`, `.gitlab-ci.yml` | Building, installing, the RPM packages, the workflows |
 
 Which crate uses which, lowest first: `konedrive-fs` and `konedrive-reason` (which use nothing);
 `konedrive-graph`; `konedrive-tree` (uses `konedrive-fs` and `konedrive-reason`; it does not
@@ -1160,7 +1160,7 @@ Each has its file in `crates/konedrived/src/dbus/`.
 - `serviceunit.h`, `serviceunit.cpp` — the daemon's systemd unit: starting it, and its log.
 - `buildversion.h`, `buildversion.cpp` — a build's version (`X.Y.Z`, `X.Y.Z-dev.N`, a tag
   `vX.Y.Z`), read and ordered as RPM orders the packages.
-- `releasecheck.h`, `releasecheck.cpp` — the newer release on GitHub: asked once a day, said in the
+- `releasecheck.h`, `releasecheck.cpp` — the newer release on the configured forge: asked once a day, said in the
   sidebar's foot and notified once.
 - `org.konedrive.KOneDrive.desktop.in` — the desktop entry.
 
@@ -1410,14 +1410,15 @@ What `docs/kio-behavior.md` was measured with.
 - `systemd/konedrived.service` — the daemon's user unit.
 - `dbus/org.konedrive.Daemon.service` — the daemon started by the bus.
 
-### `.github/workflows/`
+### GitLab CI
 
-- `release.yml` — a release on every push to `main`: the RPMs for each Fedora, each tried in a
-  clean container, then the tag and the release.
-- `tests.yml` — the tests of a pull request into `dev`: the daemon's unit tests, the window's and
-  the Dolphin plugins'.
-- `structure.yml` — on every pull request: the guard, the check of the links in the doc comments,
-  and the generated C++ against the catalogue of sentences (`cargo test -p konedrive-text`).
+- `.gitlab-ci.yml` — pipeline triggers and the serialized release child pipeline.
+- `.gitlab/ci/release.yml` — the Fedora 44/45 build and clean-install matrices, then publish.
+- `.gitlab/ci/checks.yml` — structure, doc links and generated texts on every merge request;
+  daemon and window/plugin tests only for merge requests into `dev`.
+- `scripts/ci/publish-release.py` — verified tags, generic package uploads and GitLab release links.
+- `scripts/ci/test_publish_release.py` — isolated publication/retry/failure tests.
+- `.github/workflows/` — unchanged, inactive GitHub workflows; switch-back notes in `docs/releasing.md`.
 
 ## Documents
 

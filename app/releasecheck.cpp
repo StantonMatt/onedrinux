@@ -20,6 +20,7 @@ namespace
 const QString ConfigName = QStringLiteral("konedriverc");
 const char Group[] = "General";
 const char Key[] = "NotifiedRelease";
+const QString GitLabLatestRelease = QStringLiteral("https://gitlab.com/api/v4/projects/stantonmatthewj%2Fonedrinux/releases/permalink/latest");
 const QString GitHubLatestRelease = QStringLiteral("https://api.github.com/repos/kartas39/konedrive/releases/latest");
 constexpr int AskTimeoutMs = 30 * 1000;
 
@@ -37,7 +38,11 @@ std::optional<LatestRelease> readLatestRelease(const QByteArray &answer)
     }
     const QJsonObject release = document.object();
     const QString tag = release.value(QLatin1String("tag_name")).toString();
-    const QUrl page(release.value(QLatin1String("html_url")).toString());
+    QString pageText = release.value(QLatin1String("html_url")).toString();
+    if (pageText.isEmpty()) {
+        pageText = release.value(QLatin1String("_links")).toObject().value(QLatin1String("self")).toString();
+    }
+    const QUrl page(pageText);
     if (tag.isEmpty() || !page.isValid() || page.scheme() != QLatin1String("https")) {
         return std::nullopt;
     }
@@ -60,7 +65,11 @@ ReleaseFinding findRelease(const std::optional<BuildVersion> &running,
 QUrl ReleaseCheck::latestReleaseUrl()
 {
     const QString other = qEnvironmentVariable("KONEDRIVE_LATEST_RELEASE_URL");
-    return QUrl(other.isEmpty() ? GitHubLatestRelease : other);
+    if (!other.isEmpty()) {
+        return QUrl(other);
+    }
+    return QUrl(qEnvironmentVariable("KONEDRIVE_RELEASE_FORGE") == QLatin1String("github")
+                    ? GitHubLatestRelease : GitLabLatestRelease);
 }
 
 ReleaseCheck::ReleaseCheck(const QString &running, NotificationSink *sink, QObject *parent)
@@ -89,9 +98,9 @@ void ReleaseCheck::start(const QUrl &url)
 void ReleaseCheck::ask()
 {
     QNetworkRequest request(m_url);
-    // GitHub refuses a request without one.
+    // Both forges accept this user agent.
     request.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("KOneDrive/%1").arg(m_runningText));
-    request.setRawHeader("Accept", "application/vnd.github+json");
+    request.setRawHeader("Accept", "application/json");
     request.setTransferTimeout(AskTimeoutMs);
     QNetworkReply *reply = m_network->get(request);
     connect(reply, &QNetworkReply::finished, this, [this, reply] {

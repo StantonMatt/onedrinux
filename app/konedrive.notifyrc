@@ -51,7 +51,7 @@ Action=Popup
 
 [Event/newerRelease]
 Name=New release
-Comment=A newer release of KOneDrive is out on GitHub
+Comment=A newer release of KOneDrive is available
 Action=Popup
 
 [Event/downloadsBlocked]
