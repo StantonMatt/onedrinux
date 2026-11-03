@@ -151,6 +151,10 @@ All Linux jobs use the `ci-public` Docker executor; Ubuntu 24.04, pinned Rust on
 and the original Fedora 44/45 images supply the tools the jobs need. Fork MRs run in the fork,
 not on this project's runners. No schedules existed to recreate.
 
+RPM CI builds use one Cargo job and disable Rust debug information to fit the
+4 GiB worker. The container's RPM macro keeps Fedora's other Rust build flags;
+local builds and the tagged RPM spec retain their original settings.
+
 Locally, the same build: `scripts/build-rpm.sh --version X.Y.Z`, with `X.Y.Z` the file's version.
 
 
