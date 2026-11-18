@@ -1,4 +1,4 @@
-# The guards that run on every pull request. Two run no test:
+# The guards that run on every pull request and default-branch push. Two run no test:
 #
 # - the structure rules (CONTRIBUTING.md, "The structure of the code"): the
 #   no tests in a source file, the order of the daemon's layers (the sizes are
@@ -20,6 +20,8 @@ name: Structure
 
 on:
   pull_request:
+  push:
+    branches: [onedrinux]
 
 permissions:
   contents: read
@@ -103,3 +105,13 @@ jobs:
       # against what the generator writes now.
       - name: Check the sentences and the generated files
         run: cargo test -p konedrive-text --locked
+
+  release-script:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+
+      - name: Test release publication offline
+        run: python3 -m unittest discover -s scripts/ci -p 'test_*.py' -v

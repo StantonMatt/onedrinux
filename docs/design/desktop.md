@@ -380,8 +380,8 @@ runs another build — its `Version` or `Commit` differs — a last line says to
 `konedrivectl --version` says the build and the daemon's, not the newer release.
 
 **The newer release** is the window's own check (`ReleaseCheck`; the daemon takes no part, and
-there is no setting for it): at start and then once a day it asks GitLab for the latest release
-(`gitlab.com/api/v4/projects/88430038/releases/permalink/latest`) and compares its tag with the window's
+there is no setting for it): at start and then once a day it asks GitHub for the latest release
+(`api.github.com/repos/StantonMatt/onedrinux/releases/latest`) and compares its tag with the window's
 build (`BuildVersion`: a build `X.Y.Z-dev.N` or `X.Y.Z-dev` comes before the release `X.Y.Z` and
 after the one before). An ask that gets no answer says nothing and is asked again an hour later.
 The first time a release is newer, the `newerRelease` notification says so once; the release

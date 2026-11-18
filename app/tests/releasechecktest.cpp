@@ -165,9 +165,9 @@ private Q_SLOTS:
         });
         qunsetenv("KONEDRIVE_RELEASE_FORGE");
         qunsetenv("KONEDRIVE_LATEST_RELEASE_URL");
+        QCOMPARE(ReleaseCheck::latestReleaseUrl(), QUrl(QStringLiteral("https://api.github.com/repos/StantonMatt/onedrinux/releases/latest")));
+        qputenv("KONEDRIVE_RELEASE_FORGE", "gitlab");
         QCOMPARE(ReleaseCheck::latestReleaseUrl(), QUrl(QStringLiteral("https://gitlab.com/api/v4/projects/88430038/releases/permalink/latest")));
-        qputenv("KONEDRIVE_RELEASE_FORGE", "github");
-        QCOMPARE(ReleaseCheck::latestReleaseUrl().host(), QStringLiteral("api.github.com"));
         qputenv("KONEDRIVE_LATEST_RELEASE_URL", "http://127.0.0.1:1/");
         QCOMPARE(ReleaseCheck::latestReleaseUrl(), QUrl(QStringLiteral("http://127.0.0.1:1/")));
     }
