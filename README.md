@@ -45,7 +45,7 @@ Needs FUSE 3 (`fuse3`, which the package asks for), KDE Plasma 6, Qt 6.8+ and KD
 6.21+.
 
 Download the two RPMs of the latest release for your Fedora (`.fc44` or `.fc45` in the name) from
-[GitLab Releases](https://gitlab.com/StantonMatt/onedrinux/-/releases) — `konedrive` (the service and the command line) and `konedrive-kde` (the window
+[GitHub Releases](https://github.com/StantonMatt/onedrinux/releases) — `konedrive` (the service and the command line) and `konedrive-kde` (the window
 and the Dolphin plugins), not the `.src.rpm` — and install them:
 
 ```

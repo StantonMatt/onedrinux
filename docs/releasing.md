@@ -1,90 +1,63 @@
 # Releasing
 
-## How a release happens
+## Manual release workflow
 
-By hand, two steps:
+GitHub is the primary host; GitLab is a read-only mirror with CI disabled. The default branch
+is `onedrinux`, and development happens on `dev`. Ordinary pushes publish nothing and create
+no tags. The old automatic rules targeted a nonexistent `main`; releases remain manual.
 
-1. Merge `dev` into `main`, with a merge request and a merge commit (not a squash: `main` must hold
-   `dev`'s own commits, or the next merge finds them all again). The workflow below then releases `X.Y.Z`, the version in `Cargo.toml`,
-   and tags the commit `vX.Y.Z`.
-2. At once, a one-line merge request into `dev` that moves `version` in `[workspace.package]` of the
-   root `Cargo.toml` from `X.Y.Z` to `X.Y.(Z+1)` (or to the next minor or major version, when that
-   is what comes next). No other merge request changes it (below).
+Merge `dev` into `onedrinux` with a pull request and a merge commit, so the development commits
+remain in the default branch's history. Then run **Actions → Release → Run workflow**, selecting
+`onedrinux`. Leave `dry_run=true` first. Once the RPM build and install checks pass, run it again
+with `dry_run=false` to publish the version in `Cargo.toml`. `v0.2.3` is ready for an explicit
+release when the maintainer chooses; this migration does not publish it.
 
-Every push to `main` runs the release pipeline
-(`.gitlab-ci.yml`, `.gitlab/ci/release.yml`) on GitLab. It builds and publishes; it runs no test of
-the code:
+The CLI equivalent is `gh workflow run release.yml --ref onedrinux`; adding `-f dry_run=false`
+publishes. A run on another branch is always dry unless an existing `release_tag` is supplied.
+After publishing, merge a version bump into `dev` before the next release.
 
-1. For Fedora 44 and for Fedora 45, each in its own container (`fedora:44`, `fedora:45`), it
-   installs the spec's build dependencies, chooses the version (below) and builds the RPMs with
-   `scripts/build-rpm.sh --version X.Y.Z`, the same script a local build uses, with that Fedora's
-   own Rust: `konedrive` and `konedrive-kde` for x86_64, and the source RPM. The dist tag in the
-   file names tells the two apart (`.fc44`, `.fc45`).
-2. It keeps each Fedora's RPMs as the run's artifacts.
-3. In a clean container of that Fedora it installs `konedrive` alone, and checks that it brings
-   in no Qt and that `konedrived --version` and `konedrivectl --version` run; then `konedrive-kde`,
-   as a person on Plasma would, and checks that every program finds its libraries and that the
-   window loads its interface and comes up hidden, with no display, on a bus of its own. A missing
-   dependency of either package shows here.
-4. It tags the commit it built `vX.Y.Z` and publishes a GitLab Release, "KOneDrive X.Y.Z", with the
-   six RPMs and one `SHA256SUMS` for them all. The release notes are `docs/release-notes/X.Y.Z.md`, written by hand
-   and merged with the rest before the release; without that file they list commit subjects
-   since the previous tag (including merged request references).
+`.github/workflows/release.yml` builds Fedora 44 and 45 RPMs in their respective containers:
+`konedrive`, `konedrive-kde` and a source RPM for each Fedora. It uses each Fedora's own Rust,
+one Cargo job, and disables Rust debug information while retaining Fedora's other build flags.
+Each build records its source commit and retains its artifacts for 90 days.
 
-If a build or an install check fails for either Fedora, nothing is tagged or released.
+Each Fedora's packages are installed in a clean container. The daemon must bring in no Qt;
+`konedrived --version` and `konedrivectl --version` must run; every program must find its libraries;
+and the window must load its interface and come up hidden on a private bus with no display.
+Either build or install failure prevents publication.
 
-It uses `CI_JOB_TOKEN` for the Releases API and generic package registry; no personal token is
-needed. The Releases API creates a missing tag at the exact built commit using its `ref` field.
-An existing tag is checked before any upload and again after publication; it is never moved.
-Each publish job uploads to `konedrive/X.Y.Z-<job-id>/` in the generic registry and replaces
-release links by filename on a rerun. Previous uploads stay available at their original URLs.
-The release page and its direct asset links point to the new files, including `SHA256SUMS`.
+The publisher retained from the workflow revision checks both build commit stamps, the six
+RPM filenames and the remote tag before writing. It creates `vX.Y.Z` at the built commit only
+when absent; an existing tag on another commit is an error and is never moved. It creates a
+draft GitHub release, uploads the six RPMs and `SHA256SUMS`, then publishes the draft. A failed
+upload leaves a new release draft; retry reuses the tag and replaces assets by filename.
+An existing published release stays published during replacement.
 
-A resource group holds the whole build/install/publish child pipeline: releases run one at a
-time and are never cancelled automatically. Unlike GitHub's single waiting slot, GitLab queues
-waiting releases. Dry runs have their own resource group per branch and cannot replace a
-waiting release. MR checks are interruptible and cancel when a newer commit arrives.
+Release notes come from `docs/release-notes/X.Y.Z.md` of the built source; without that file,
+they list commit subjects since the previous version tag. Publication uses `GITHUB_TOKEN`
+with `contents: write`; build and install jobs have only `contents: read`.
 
-A failed run can be rerun. It builds the same version (the file's), finds the tag it pushed on
-the same commit and reuses it, and replaces the files of a release that already exists instead of
-making a second one. A tag `vX.Y.Z` that already exists on another commit stops the run: that is
-what happens when step 2 above was forgotten (the next merge into `main` still carries the version
-already released) — merge the bump into `dev` and `dev` into `main` again.
+Publishing runs share one concurrency group and are never cancelled. GitHub keeps one waiting
+run per group, replacing it when a newer one arrives. Dry runs have their own group per branch
+and cannot replace a waiting publication.
 
-Run by hand with **Build → Pipelines → New pipeline**, selecting a branch and the `dry_run`
-variable (default `true`), or `glab ci run --branch <branch> --variables dry_run:true`.
-It creates releases only on `main` with `dry_run=false`. The explicit existing-tag republish
-mode below is also available; other branch runs remain dry runs.
+## Rebuilding an existing release
 
-The migrated fork's branches are `onedrinux` (default) and `dev`; it has no `main`. The trigger
-above is preserved from the original workflow, not silently moved to `onedrinux`. The retained
-third-party `upstream/main` and release tags show that `main` existed upstream; they do not prove
-that this fork's GitHub release workflow ever ran. Automatic release remains dormant until an
-explicit branch/trigger decision is made. Manual dry runs work on `onedrinux` or a task branch.
+Run the workflow on `onedrinux` with `release_tag=v0.2.2` (or another existing `vX.Y.Z`). With
+`dry_run=true`, both Fedora builds check out that exact tag and install-check its packages.
+With `dry_run=false`, it replaces that release's assets. The publisher remains at the reviewed
+workflow revision. The requested tag must exist and agree with the source version and both
+build stamps; this mode cannot create or move a tag. It shares the publication concurrency group.
 
 ## Where the tests run
 
-Not in the release: on the merge requests (`.gitlab/ci/checks.yml`).
-
-**A merge request into `dev`** runs the fast tests:
-
-- the unit tests of the daemon, the Graph client, the reasons and the tree store
-  (`cargo test -p konedrived -p konedrive-graph -p konedrive-reason -p konedrive-tree --lib --features konedrived/dev-tools`),
-  in `rust:1.98.1-bookworm`, as an unprivileged user; root only installs `dbus-daemon`
-  for the private buses and prepares that user;
-- the window's and the Dolphin plugins' tests (`ctest`), in a `fedora:45` container, where Qt and
-  KDE Frameworks are the ones the packages are built with;
-- the catalogue of sentences and the generated files, with the structure rules
-  (`.gitlab/ci/checks.yml`).
-
-**A merge request into any branch** runs structure, rustdoc, generated-text and release-script
-checks. The daemon and window/plugin suites run only when targeting `dev`. The suite that mounts a folder
-(`tests/fuse-probe/run.sh`) runs by hand, in a `virtme-ng` VM on a developer's machine.
-
-**The Rust of the tests is fixed** (`RUST_VERSION` in `.gitlab-ci.yml`, used by the Rust image),
-so that a
-new compiler does not fail a merge request by itself; it is moved by hand, in a merge request. The
-packages are not tied to it: each is built with its Fedora's own `rust`, as a package is.
+Every pull request and push to `onedrinux` runs structure, rustdoc, generated-text and offline release-script checks
+(`.github/workflows/structure.yml`). Pull requests into `dev` also run the daemon, Graph,
+reason and tree unit tests, the dead-code guard, and the window/Dolphin tests
+(`.github/workflows/tests.yml`). Rust is pinned to 1.98.1 for tests and documentation; the RPMs
+use Fedora's compiler. Jobs use GitHub-hosted Ubuntu runners, with Fedora containers for KDE.
+The mount suite (`tests/fuse-probe/run.sh`) runs by hand in a developer's `virtme-ng` VM.
+No schedules or Pages deployments existed to migrate.
 
 ## The version
 
@@ -141,45 +114,10 @@ carries Cargo's version of that copy.
 `--dev-tools` makes a local development package whose daemon serves the token export, for the developer's own machine; it is refused together with `--version`, and CI never
 passes it.
 
-## A dry run
+## Downloads and update checks
 
-On GitLab, **Build → Pipelines → New pipeline**, on any branch. `dry_run=true` is the default:
-the run builds the RPMs, tries them in clean containers and retains them as job artifacts for
-90 days. It tags and releases nothing. The RPMs carry the local version, `X.Y.Z~dev.N`, so a
-later release upgrades them normally. `main` with `dry_run=false` publishes `X.Y.Z`.
-All Linux jobs use the `ci-public` Docker executor; Ubuntu 24.04, pinned Rust on Debian Bookworm,
-and the original Fedora 44/45 images supply the tools the jobs need. Fork MRs run in the fork,
-not on this project's runners. No schedules existed to recreate.
-
-RPM CI builds use one Cargo job and disable Rust debug information to fit the
-4 GiB worker. The container's RPM macro keeps Fedora's other Rust build flags;
-local builds and the tagged RPM spec retain their original settings.
-
-Locally, the same build: `scripts/build-rpm.sh --version X.Y.Z`, with `X.Y.Z` the file's version.
-
-
-## Republishing an existing release
-
-For migrated downloads, start a manual pipeline on a branch containing the GitLab config and
-set `release_tag=v0.2.2` (or the desired existing `vX.Y.Z`). Keep `dry_run=true` first: both
-Fedora matrices check out that tag, build its exact source, and install-check it. Once this
-pipeline succeeds, repeat with `dry_run=false` to publish its packages. The publisher stays
-at the reviewed pipeline revision, verifies both build commit stamps and the remote tag, and
-refuses a missing/mismatched tag; this mode cannot create or move a tag. It shares the normal
-release lock. This does not enable automatic releases from `onedrinux`.
-
-## If moving back to GitHub
-
-`.github/workflows/` is the unchanged, inactive GitHub version. Keep it in sync by hand only
-when switching back; disable GitLab pipelines before re-enabling GitHub Actions to avoid two
-publishers. Preserve the branch layout and decide explicitly whether to restore `main`.
-The old manual command is `gh workflow run release.yml --ref <branch>` (`dry_run` defaults true);
-`-f dry_run=false` publishes only on `main`. GitHub uses `GITHUB_TOKEN` with `contents: write`,
-`gh api` for tags, and `gh release create --verify-tag` / `upload --clobber` for release assets.
-
-The current release/download page is <https://gitlab.com/StantonMatt/onedrinux/-/releases>.
-The window defaults to GitLab's `releases/permalink/latest` API and reads `_links.self`.
-`KONEDRIVE_RELEASE_FORGE=github` selects the retained upstream GitHub API
-(`https://api.github.com/repos/kartas39/konedrive/releases/latest`, `html_url` responses).
-`KONEDRIVE_LATEST_RELEASE_URL` overrides either URL, including a restored fork's API address.
-The third-party `upstream` remote and source attribution are not changed by this migration.
+Downloads are at <https://github.com/StantonMatt/onedrinux/releases>.
+The window defaults to `https://api.github.com/repos/StantonMatt/onedrinux/releases/latest`
+and reads GitHub's `html_url`. `KONEDRIVE_RELEASE_FORGE=gitlab` selects the retained GitLab API;
+`KONEDRIVE_LATEST_RELEASE_URL` overrides either endpoint. The third-party `upstream` remote and
+source attribution stay unchanged.

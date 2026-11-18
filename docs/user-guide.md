@@ -15,7 +15,7 @@ KOneDrive is two packages, for Fedora 44 and 45 (x86_64):
 It needs KDE Plasma 6 with KDE Frameworks 6.21 or later, and FUSE 3 (`fuse3`, which the package
 asks for).
 
-Download both for your Fedora from [GitLab Releases](https://gitlab.com/StantonMatt/onedrinux/-/releases): the files with `.fc45` in the name for Fedora 45, `.fc44` for Fedora 44 —
+Download both for your Fedora from [GitHub Releases](https://github.com/StantonMatt/onedrinux/releases): the files with `.fc45` in the name for Fedora 45, `.fc44` for Fedora 44 —
 not the other Fedora's, and not the `.src.rpm`. Then, in the directory they are in:
 
 ```

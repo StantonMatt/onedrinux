@@ -21,7 +21,7 @@ const QString ConfigName = QStringLiteral("konedriverc");
 const char Group[] = "General";
 const char Key[] = "NotifiedRelease";
 const QString GitLabLatestRelease = QStringLiteral("https://gitlab.com/api/v4/projects/88430038/releases/permalink/latest");
-const QString GitHubLatestRelease = QStringLiteral("https://api.github.com/repos/kartas39/konedrive/releases/latest");
+const QString GitHubLatestRelease = QStringLiteral("https://api.github.com/repos/StantonMatt/onedrinux/releases/latest");
 constexpr int AskTimeoutMs = 30 * 1000;
 
 QString configPath()
@@ -68,8 +68,8 @@ QUrl ReleaseCheck::latestReleaseUrl()
     if (!other.isEmpty()) {
         return QUrl(other);
     }
-    return QUrl(qEnvironmentVariable("KONEDRIVE_RELEASE_FORGE") == QLatin1String("github")
-                    ? GitHubLatestRelease : GitLabLatestRelease);
+    return QUrl(qEnvironmentVariable("KONEDRIVE_RELEASE_FORGE") == QLatin1String("gitlab")
+                    ? GitLabLatestRelease : GitHubLatestRelease);
 }
 
 ReleaseCheck::ReleaseCheck(const QString &running, NotificationSink *sink, QObject *parent)
